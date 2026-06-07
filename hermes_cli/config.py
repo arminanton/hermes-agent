@@ -1121,6 +1121,17 @@ DEFAULT_CONFIG = {
         "threshold": 0.50,            # compress when context usage exceeds this ratio
         "target_ratio": 0.20,         # fraction of threshold to preserve as recent tail
         "protect_last_n": 20,         # minimum recent messages to keep uncompressed
+        "max_attempts": 3,            # P2: compression-retry ceiling on context_overflow/413.
+                                      # Default 3 (historical). LCM users that persist content
+                                      # to files and reference them by a single line can afford
+                                      # many more passes — set to 6/12 for deep rolling compaction.
+        "chunk_oversized_input": False,  # P3: when a SINGLE message alone exceeds the model max
+                                      # (history compression can't help), save it to
+                                      # $HERMES_HOME/pastes/ and pass a file reference instead of
+                                      # hard-failing with 413. Default off (opt-in).
+        "never_413": False,           # P3 master override: when True, forces the oversized-input
+                                      # file-reference handling regardless of chunk_oversized_input,
+                                      # guaranteeing a 413 payload-too-large is never surfaced.
         "hygiene_hard_message_limit": 400,  # gateway session-hygiene force-compress threshold by message count
         "protect_first_n": 3,         # non-system head messages always preserved
                                       # verbatim, in ADDITION to the system prompt
@@ -2262,6 +2273,18 @@ DEFAULT_CONFIG = {
 
     # ``hermes update`` behaviour.
     "updates": {
+        # Update checks default to the historical moving-branch comparison.
+        # Set check_strategy: stable-tags (or stable_tags: true) to compare
+        # against release tags only — useful for locally customized installs
+        # that intentionally stay pinned to a stable tag and carry overlays.
+        "check_strategy": "branch",
+        "stable_tags": False,
+        "stable_tag_pattern": "v20*",
+        "stable_tag_remote": "origin",
+        # Optional command shown in the banner when stable-tag mode detects a
+        # newer stable release.  Left empty by default because core Hermes does
+        # not know a user's local overlay/update workflow.
+        "stable_update_command": "",
         # Run a full ``hermes backup``-style zip of HERMES_HOME before every
         # ``hermes update``.  Backups land in ``<HERMES_HOME>/backups/`` and
         # can be restored with ``hermes import <path>``.  Off by default —
