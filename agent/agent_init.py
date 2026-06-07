@@ -252,6 +252,12 @@ def init_agent(
     _install_safe_stdio()
 
     agent.model = model
+    agent._requested_model = model
+    agent._copilot_auto_session = None
+    agent._copilot_auto_decision = None
+    agent._copilot_auto_session_token = ""
+    agent._copilot_auto_last_model = ""
+    agent._copilot_auto_resolved_model = ""
     agent.max_iterations = max_iterations
     # Shared iteration budget — parent creates, children inherit.
     # Consumed by every LLM turn across parent + all subagents.
@@ -320,6 +326,40 @@ def init_agent(
         agent.api_mode = "bedrock_converse"
     else:
         agent.api_mode = "chat_completions"
+
+    # ── Copilot + Claude → Anthropic Messages (/v1/messages) override ──────
+    # The GitHub Copilot proxy serves Claude on TWO endpoints with very
+    # different limits (empirically proven, see probe/FINDINGS.md §2):
+    #   * POST /chat/completions  → proxy CLAMPS Claude prompts and returns a
+    #     misleading ``prompt token count … exceeds the limit of 168000``
+    #     (real clamp ~300k, error text says 168k).  This is the regular tier.
+    #   * POST /v1/messages       → the genuine **1,000,000** input window for
+    #     opus/sonnet 4.6–4.8, unlocked by the anthropic-beta triplet
+    #     (cli-internal + context-1m + task-budgets) that the Anthropic
+    #     adapter already attaches for the Copilot base_url.
+    # Hermes' default decision tree above has no Copilot+Claude branch, so a
+    # Claude model on provider=copilot falls through to ``chat_completions``
+    # and hits the 168k clamp — the exact "1M → snap to 168k → cannot compress
+    # further" failure.  Force the Anthropic Messages transport so Claude rides
+    # the 1M path.  This intentionally overrides an explicit
+    # ``api_mode: chat_completions`` from config because that default is simply
+    # wrong for Claude-on-Copilot.  Excludes ``copilot-acp`` (the ACP CLI
+    # subprocess does its own endpoint routing and does not use this adapter).
+    _model_lower = (agent.model or "").lower()
+    _is_copilot_native = (
+        agent.provider in {"copilot", "github-copilot"}
+        or (
+            agent.provider not in {"copilot-acp"}
+            and base_url_host_matches(agent._base_url_lower, "api.githubcopilot.com")
+        )
+    )
+    if (
+        agent.provider != "copilot-acp"
+        and _is_copilot_native
+        and "claude" in _model_lower
+        and agent.api_mode != "anthropic_messages"
+    ):
+        agent.api_mode = "anthropic_messages"
 
     # Eagerly warm the transport cache so import errors surface at init,
     # not mid-conversation.  Also validates the api_mode is registered.
@@ -711,6 +751,15 @@ def init_agent(
             if agent.provider == "copilot-acp":
                 client_kwargs["command"] = agent.acp_command
                 client_kwargs["args"] = agent.acp_args
+                client_kwargs["provider"] = agent.provider
+                client_kwargs["model"] = agent.model
+                client_kwargs["auth_facts"] = {
+                    "provider": agent.provider,
+                    "base_url": base_url,
+                    "command": agent.acp_command,
+                    "args": list(agent.acp_args or []),
+                    "source": "process",
+                }
             effective_base = base_url
             if base_url_host_matches(effective_base, "openrouter.ai"):
                 from agent.auxiliary_client import build_or_headers
@@ -765,6 +814,16 @@ def init_agent(
                     _routed_headers = getattr(_routed_client, "_default_headers", None)
                 if _routed_headers:
                     client_kwargs["default_headers"] = dict(_routed_headers)
+                if agent.provider == "copilot-acp":
+                    client_kwargs["provider"] = agent.provider
+                    client_kwargs["model"] = agent.model
+                    client_kwargs["auth_facts"] = {
+                        "provider": agent.provider,
+                        "base_url": str(_routed_client.base_url),
+                        "command": getattr(_routed_client, "_acp_command", agent.acp_command),
+                        "args": list(getattr(_routed_client, "_acp_args", agent.acp_args) or []),
+                        "source": "process",
+                    }
             else:
                 # When the user explicitly chose a non-OpenRouter provider
                 # but no credentials were found, fail fast with a clear
@@ -1469,7 +1528,23 @@ def init_agent(
         )
     agent.compression_enabled = compression_enabled
 
-    # Reject models whose context window is below the minimum required
+    # P2: configurable compression-retry ceiling (default 3 — preserves
+    # historical behavior). LCM users who persist content to files and
+    # reference them by a single line can afford many more passes; raise
+    # via compression.max_attempts. Floor at 1.
+    agent.max_compression_attempts = max(
+        1, int(_compression_cfg.get("max_attempts", 3))
+    )
+    # P3: oversized-single-message handling (default off — zero behavior
+    # change unless opted in). chunk_oversized_input enables the file-ref
+    # primary path at the 413/context_overflow dead-ends. never_413 is the
+    # master override that forces it on so a 413 is never surfaced.
+    agent.chunk_oversized_input = str(
+        _compression_cfg.get("chunk_oversized_input", False)
+    ).lower() in {"true", "1", "yes"}
+    agent.never_413 = str(
+        _compression_cfg.get("never_413", False)
+    ).lower() in {"true", "1", "yes"}
     # for reliable tool-calling workflows (64K tokens).
     _ctx = getattr(agent.context_compressor, "context_length", 0)
     if _ctx and _ctx < MINIMUM_CONTEXT_LENGTH:

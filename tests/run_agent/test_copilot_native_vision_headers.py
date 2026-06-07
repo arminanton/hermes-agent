@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 
+from hermes_cli.copilot_auth import copilot_request_headers
 from run_agent import AIAgent
 
 
@@ -16,6 +17,12 @@ def _make_copilot_agent():
             skip_memory=True,
         )
     return agent
+
+
+def _assert_copilot_text_headers(headers):
+    expected_headers = copilot_request_headers(is_agent_turn=True)
+    assert headers == expected_headers
+    assert "Copilot-Vision-Request" not in headers
 
 
 def test_request_client_adds_copilot_vision_header_for_native_image_payload():
@@ -46,7 +53,8 @@ def test_request_client_adds_copilot_vision_header_for_native_image_payload():
         agent._create_request_openai_client(reason="test", api_kwargs=api_kwargs)
 
     headers = built_kwargs[-1]["default_headers"]
-    assert headers["Copilot-Vision-Request"] == "true"
+    expected_headers = copilot_request_headers(is_agent_turn=True)
+    assert headers == {**expected_headers, "Copilot-Vision-Request": "true"}
 
 
 def test_request_client_leaves_copilot_text_requests_without_vision_header():
@@ -66,7 +74,7 @@ def test_request_client_leaves_copilot_text_requests_without_vision_header():
         agent._create_request_openai_client(reason="test", api_kwargs=api_kwargs)
 
     headers = built_kwargs[-1]["default_headers"]
-    assert "Copilot-Vision-Request" not in headers
+    _assert_copilot_text_headers(headers)
 
 
 def test_request_client_does_not_add_vision_header_after_non_vision_fallback():
@@ -93,4 +101,4 @@ def test_request_client_does_not_add_vision_header_after_non_vision_fallback():
         agent._create_request_openai_client(reason="test", api_kwargs=api_kwargs)
 
     headers = built_kwargs[-1]["default_headers"]
-    assert "Copilot-Vision-Request" not in headers
+    _assert_copilot_text_headers(headers)

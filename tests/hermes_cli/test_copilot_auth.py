@@ -36,6 +36,89 @@ class TestTokenValidation:
 
 
 
+class TestIdentityAudit:
+    """Structured Copilot identity resolution audit."""
+
+    def test_identity_precedence_records_skipped_classic_pat(self, monkeypatch):
+        from hermes_cli.copilot_auth import resolve_copilot_identity_audit
+
+        monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "ghp_classic_pat_nope")
+        monkeypatch.setenv("GH_TOKEN", "gho_gh_second")
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+        audit = resolve_copilot_identity_audit()
+
+        assert audit.token == "gho_gh_second"
+        assert audit.source == "GH_TOKEN"
+        assert audit.source_kind == "env"
+        assert len(audit.skipped_sources) == 1
+        assert audit.skipped_sources[0].source == "COPILOT_GITHUB_TOKEN"
+        assert "Classic Personal Access Tokens" in audit.skipped_sources[0].reason
+
+    def test_pool_audit_records_skipped_invalid_entries_and_gh_fallback(self, monkeypatch):
+        from hermes_cli.copilot_auth import resolve_copilot_identity_audit
+
+        monkeypatch.delenv("COPILOT_GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+        with patch(
+            "hermes_cli.auth.read_credential_pool",
+            return_value=[
+                "not-a-dict",
+                {"label": "no-token-here"},
+                {"access_token": ""},
+                {"access_token": "ghp_classic_pat"},
+            ],
+        ), patch(
+            "hermes_cli.copilot_auth._try_gh_cli_token",
+            return_value="gho_from_cli",
+        ):
+            audit = resolve_copilot_identity_audit(include_credential_pool=True)
+
+        assert audit.token == "gho_from_cli"
+        assert audit.source == "gh auth token"
+        assert audit.source_kind == "gh_auth"
+        assert [skip.source for skip in audit.skipped_sources] == [
+            "credential_pool:copilot[0]",
+            "credential_pool:copilot[1]",
+            "credential_pool:copilot[2]",
+            "credential_pool:copilot[3]",
+        ]
+        assert any(
+            "Non-dict credential pool entry" in skip.reason
+            for skip in audit.skipped_sources
+        )
+        assert any("Missing access_token" in skip.reason for skip in audit.skipped_sources)
+        assert any("Classic Personal Access Tokens" in skip.reason for skip in audit.skipped_sources)
+
+    def test_pool_token_wins_before_gh_auth(self, monkeypatch):
+        from hermes_cli.copilot_auth import resolve_copilot_identity_audit
+
+        monkeypatch.delenv("COPILOT_GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+        with patch(
+            "hermes_cli.auth.read_credential_pool",
+            return_value=[{"access_token": "gho_pool_token"}],
+        ), patch(
+            "hermes_cli.copilot_auth.exchange_copilot_token",
+            return_value=("tid_from_pool", 1234567890.0),
+        ), patch(
+            "hermes_cli.copilot_auth._try_gh_cli_token",
+            return_value="gho_from_cli",
+        ):
+            audit = resolve_copilot_identity_audit(
+                include_credential_pool=True,
+                exchange_pool_tokens=True,
+            )
+
+        assert audit.token == "tid_from_pool"
+        assert audit.source == "credential_pool:copilot[0]"
+        assert audit.source_kind == "credential_pool"
+
+
 class TestResolveToken:
     """Token resolution with env var priority."""
 
@@ -110,12 +193,21 @@ class TestResolveToken:
 class TestRequestHeaders:
     """Copilot API header generation."""
 
-    def test_default_headers_include_openai_intent(self):
+    def test_default_headers_include_openai_intent(self, monkeypatch):
         from hermes_cli.copilot_auth import copilot_request_headers
+        monkeypatch.setattr(
+            "hermes_cli.copilot_auth._latest_copilot_chat_version",
+            lambda: "1.2.3",
+        )
+        monkeypatch.setattr(
+            "hermes_cli.copilot_auth._latest_vscode_version",
+            lambda: "1.104.1",
+        )
         headers = copilot_request_headers()
-        assert headers["Openai-Intent"] == "conversation-edits"
-        assert headers["User-Agent"] == "HermesAgent/1.0"
-        assert "Editor-Version" in headers
+        assert headers["Openai-Intent"] == "conversation-panel"
+        assert headers["User-Agent"] == "rest-book"
+        assert headers["Editor-Version"] == "vscode/1.104.1"
+        assert headers["Editor-Plugin-Version"] == "copilot-chat/1.2.3"
 
     def test_agent_turn_sets_initiator(self):
         from hermes_cli.copilot_auth import copilot_request_headers
@@ -141,11 +233,20 @@ class TestRequestHeaders:
 class TestCopilotDefaultHeaders:
     """The models.py copilot_default_headers uses copilot_auth."""
 
-    def test_includes_openai_intent(self):
+    def test_includes_openai_intent(self, monkeypatch):
         from hermes_cli.models import copilot_default_headers
+        monkeypatch.setattr(
+            "hermes_cli.copilot_auth._latest_copilot_chat_version",
+            lambda: "1.2.3",
+        )
+        monkeypatch.setattr(
+            "hermes_cli.copilot_auth._latest_vscode_version",
+            lambda: "1.104.1",
+        )
         headers = copilot_default_headers()
         assert "Openai-Intent" in headers
-        assert headers["Openai-Intent"] == "conversation-edits"
+        assert headers["Openai-Intent"] == "conversation-panel"
+        assert headers["User-Agent"] == "rest-book"
 
     def test_includes_x_initiator(self):
         from hermes_cli.models import copilot_default_headers

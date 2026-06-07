@@ -16,12 +16,26 @@ Key design decisions:
 
 import json
 import logging
+import os
 import random
 import re
-import sqlite3
 import threading
 import time
 from pathlib import Path
+
+_sqlite_driver_pref = os.environ.get("HERMES_SQLITE_DRIVER", "auto").strip().lower()
+if _sqlite_driver_pref in {"stdlib", "sqlite3"}:
+    import sqlite3  # type: ignore[no-redef]
+    SQLITE_DRIVER = "stdlib"
+else:
+    try:
+        import pysqlite3 as sqlite3  # type: ignore[no-redef]
+        SQLITE_DRIVER = "pysqlite3"
+    except ImportError:
+        if _sqlite_driver_pref in {"pysqlite3", "modern"}:
+            raise
+        import sqlite3  # type: ignore[no-redef]
+        SQLITE_DRIVER = "stdlib"
 
 from agent.memory_manager import sanitize_context
 from hermes_constants import get_hermes_home
@@ -71,6 +85,8 @@ _last_init_error_lock = threading.Lock()
 # filesystem-incompat warning on every connection, filling errors.log.
 _wal_fallback_warned_paths: set[str] = set()
 _wal_fallback_warned_lock = threading.Lock()
+_trigram_unavailable_warned = False
+_trigram_unavailable_warned_lock = threading.Lock()
 
 _FTS_TRIGGERS = (
     "messages_fts_insert",
@@ -223,6 +239,27 @@ def _log_wal_fallback_once(db_label: str, exc: Exception) -> None:
         "https://www.sqlite.org/wal.html for details. This warning "
         "fires once per process per database.",
         db_label,
+        exc,
+    )
+
+
+def _is_missing_trigram_tokenizer_error(exc: Exception) -> bool:
+    """Return True when sqlite lacks the built-in FTS5 trigram tokenizer."""
+    return "no such tokenizer: trigram" in str(exc).lower()
+
+
+def _log_trigram_unavailable_once(exc: Exception) -> None:
+    """Warn once per process when trigram tokenizer support is unavailable."""
+    global _trigram_unavailable_warned
+    with _trigram_unavailable_warned_lock:
+        if _trigram_unavailable_warned:
+            return
+        _trigram_unavailable_warned = True
+    logger.warning(
+        "state.db: SQLite trigram tokenizer unavailable (%s) — "
+        "continuing without trigram FTS index. "
+        "SessionDB remains available; CJK/substring search falls back to LIKE. "
+        "Upgrade SQLite to >=3.34 to restore trigram search.",
         exc,
     )
 
@@ -746,6 +783,21 @@ class SessionDB:
                         logger.debug(
                             "reconcile %s.%s: %s", table_name, col_name, exc,
                         )
+
+    def _ensure_trigram_fts(self, cursor: sqlite3.Cursor) -> bool:
+        """Ensure trigram FTS table exists when tokenizer support is present."""
+        try:
+            cursor.execute("SELECT * FROM messages_fts_trigram LIMIT 0")
+            return True
+        except sqlite3.OperationalError:
+            try:
+                cursor.executescript(FTS_TRIGRAM_SQL)
+            except sqlite3.OperationalError as exc:
+                if _is_missing_trigram_tokenizer_error(exc):
+                    _log_trigram_unavailable_once(exc)
+                    return False
+                raise
+            return True
 
     def _init_schema(self):
         """Create tables and FTS if they don't exist, reconcile columns.
@@ -2922,7 +2974,8 @@ class SessionDB:
                 self._count_cjk(t) < 3 for t in _tokens_for_check
             )
 
-            if cjk_count >= 3 and not _any_short_cjk:
+            use_trigram = cjk_count >= 3 and not _any_short_cjk
+            if use_trigram:
                 # Trigram FTS5 path — quote each non-operator token to handle
                 # FTS5 special chars (%, *, etc.) while preserving boolean
                 # operators (AND, OR, NOT) for multi-term queries.
@@ -2971,10 +3024,13 @@ class SessionDB:
                     try:
                         tri_cursor = self._conn.execute(tri_sql, tri_params)
                     except sqlite3.OperationalError:
-                        matches = []
+                        # Trigram table/tokenizer unavailable on this SQLite
+                        # build. Fall back to LIKE below so CJK search still
+                        # returns results (slower, lower quality ranking).
+                        use_trigram = False
                     else:
                         matches = [dict(row) for row in tri_cursor.fetchall()]
-            else:
+            if not use_trigram:
                 # Short / mixed CJK query: trigram cannot match tokens with
                 # <3 CJK chars. Fall back to LIKE substring search.
                 # For multi-token OR queries (e.g. "广西 OR 桂林 OR 漓江"),

@@ -64,6 +64,34 @@ from utils import base_url_host_matches, env_var_enabled
 logger = logging.getLogger(__name__)
 
 
+# ── Copilot+Claude wrong-route detection (Phase A2, 2026-06-04) ───────────
+# When a provider error parses a max_prompt_tokens value <= 200k for
+# provider=copilot AND model=claude*, the request almost certainly went
+# through Copilot's /chat/completions proxy clamp (which misleadingly
+# reports `exceeds the limit of 168000`) rather than /v1/messages (real
+# ~1M ceiling). Persisting that value would poison the on-disk cache so
+# every future session believes the cap is 168k. The conversation-loop
+# adopt-on-error path consults this predicate to refuse the persistable
+# flag in that case while still adopting the value for the current turn.
+def _detect_copilot_claude_wrong_route(
+    *, provider: str, base_url: str, model: str, new_ctx: int
+) -> bool:
+    """Return True if the parsed ``new_ctx`` looks like a Copilot misroute.
+
+    Args:
+        provider: agent.provider string (may be empty for base-url-only).
+        base_url: agent.base_url string.
+        model: agent.model string.
+        new_ctx: the integer context limit parsed out of the provider error.
+    """
+    norm_provider = (provider or "").strip().lower()
+    is_copilot = norm_provider in {
+        "copilot", "github-copilot", "copilot-acp",
+    } or "githubcopilot.com" in (base_url or "").lower()
+    is_claude = "claude" in (model or "").lower()
+    return bool(is_copilot and is_claude and new_ctx <= 200_000)
+
+
 def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str]:
     """Return a user-facing error when Ollama is loaded with too little context."""
     if not getattr(agent, "tools", None):
@@ -1139,7 +1167,7 @@ def run_conversation(
         retry_count = 0
         max_retries = agent._api_max_retries
         primary_recovery_attempted = False
-        max_compression_attempts = 3
+        max_compression_attempts = getattr(agent, "max_compression_attempts", 3)
         codex_auth_retry_attempted=False
         anthropic_auth_retry_attempted=False
         nous_auth_retry_attempted=False
@@ -2967,6 +2995,19 @@ def run_conversation(
                     )
 
                 if is_payload_too_large:
+                    # P3: oversized-single-message file-reference offload.
+                    # If a SINGLE message dominates the window, history
+                    # compression can't help — offload it to a file ref
+                    # (reusing the paste pattern) and retry instead of
+                    # dead-ending with 413. Gated off by default; enabled
+                    # via compression.never_413 or chunk_oversized_input.
+                    if (getattr(agent, "never_413", False)
+                            or getattr(agent, "chunk_oversized_input", False)):
+                        if agent._offload_oversized_message(messages):
+                            conversation_history = None
+                            time.sleep(1)
+                            restart_with_compressed_messages = True
+                            break
                     compression_attempts += 1
                     if compression_attempts > max_compression_attempts:
                         # Terminal — surface the buffered retry trace.
@@ -3028,6 +3069,18 @@ def run_conversation(
                 )
 
                 if is_context_length_error:
+                    # P3: oversized-single-message file-reference offload
+                    # (same as the 413 path). "prompt is too long" frequently
+                    # classifies as context_overflow rather than 413. Gated
+                    # off by default; enabled via compression.never_413 or
+                    # chunk_oversized_input.
+                    if (getattr(agent, "never_413", False)
+                            or getattr(agent, "chunk_oversized_input", False)):
+                        if agent._offload_oversized_message(messages):
+                            conversation_history = None
+                            time.sleep(1)
+                            restart_with_compressed_messages = True
+                            break
                     compressor = agent.context_compressor
                     old_ctx = compressor.context_length
 
@@ -3097,6 +3150,29 @@ def run_conversation(
                     )
 
                     if new_ctx is not None:
+                        # ── Wrong-route detection: copilot + claude under 200k ───
+                        # Copilot's /v1/messages serves Claude at the real
+                        # ~1,000,000-token input ceiling (probe V18.1: opus-4.8
+                        # → 999,968 input tokens, 200 OK). The proxy /chat/completions
+                        # path, however, returns a misleading
+                        # `model_max_prompt_tokens_exceeded: 168000` for the SAME
+                        # claude-* prompts. If a sub-200k context limit is
+                        # parsed for provider=copilot AND model=claude*, the
+                        # request was almost certainly mis-routed to
+                        # /chat/completions instead of /v1/messages. Persisting
+                        # that 168k value to disk would poison every future
+                        # session (Step 1 in get_model_context_length wins
+                        # before the Step-5 Copilot override). Adopt the
+                        # in-memory value for this turn (so the loop compresses
+                        # and survives), but do NOT mark it persistable, and
+                        # log a routing-bug warning so the misroute is visible.
+                        _wrong_route_signal = _detect_copilot_claude_wrong_route(
+                            provider=getattr(agent, "provider", "") or "",
+                            base_url=getattr(agent, "base_url", "") or "",
+                            model=getattr(agent, "model", "") or "",
+                            new_ctx=new_ctx,
+                        )
+
                         agent._buffer_vprint(f"Context limit detected from API: {new_ctx:,} tokens (was {old_ctx:,})")
                         compressor.update_model(
                             model=agent.model,
@@ -3108,11 +3184,32 @@ def run_conversation(
                         )
                         # Context probing flags — only set on built-in
                         # compressor (plugin engines manage their own).  This
-                        # value came from the provider, so it is safe to cache.
+                        # value came from the provider, so it is safe to cache —
+                        # UNLESS we just detected a wrong-route signal above,
+                        # in which case the value reflects a misroute, not the
+                        # real ceiling.
                         if hasattr(compressor, "_context_probed"):
                             compressor._context_probed = True
-                            compressor._context_probe_persistable = True
-                        agent._buffer_vprint(f"⚠️  Context length exceeded — using provider limit: {old_ctx:,} → {new_ctx:,} tokens")
+                            compressor._context_probe_persistable = not _wrong_route_signal
+                        if _wrong_route_signal:
+                            agent._buffer_vprint(
+                                f"⚠️  ROUTING WARNING — copilot+{agent.model} returned "
+                                f"max_prompt_tokens={new_ctx:,} (≤200k). Real /v1/messages "
+                                f"ceiling for opus/sonnet 4.6+ is ~1,000,000. The request "
+                                f"was likely mis-routed to /chat/completions. NOT persisting "
+                                f"this value to ~/.hermes/context_length_cache.yaml. Check "
+                                f"copilot_model_api_mode + agent_init api_mode override."
+                            )
+                            logger.warning(
+                                "copilot+claude wrong-route guard: refused to persist "
+                                "context_length=%d for %s@%s (sub-200k on copilot+claude "
+                                "indicates /chat/completions misroute, not the real "
+                                "/v1/messages ceiling)",
+                                new_ctx, agent.model, agent.base_url,
+                            )
+                            agent._buffer_vprint(f"⚠️  Context length exceeded (likely misroute) — using {old_ctx:,} → {new_ctx:,} tokens for THIS turn only.")
+                        else:
+                            agent._buffer_vprint(f"⚠️  Context length exceeded — using provider limit: {old_ctx:,} → {new_ctx:,} tokens")
                     elif minimax_delta_only_overflow:
                         agent._buffer_vprint(
                             f"Provider reported overflow amount only; "

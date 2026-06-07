@@ -1706,22 +1706,53 @@ class TestBuildApiKwargs:
         )
         assert kwargs["extra_body"]["reasoning"] == {"effort": "medium"}
 
-    def test_reasoning_xhigh_normalized_for_copilot(self, agent):
-        """xhigh effort should normalize to high for Copilot GitHub Models."""
+    def test_reasoning_xhigh_honored_for_copilot_gpt5(self, agent):
+        """xhigh effort is HONORED for Copilot gpt-5.x — the live catalog lists
+        it as supported (gpt-5.5/gpt-5.4). It must NOT be silently downgraded to
+        high (that was a stale free-tier guard)."""
+        from unittest.mock import patch as _patch
         from agent.transports import get_transport
         from providers import get_provider_profile
 
         transport = get_transport("chat_completions")
         profile = get_provider_profile("copilot")
         msgs = [{"role": "user", "content": "hi"}]
-        kwargs = transport.build_kwargs(
-            model="gpt-5.4",
-            messages=msgs,
-            tools=None,
-            supports_reasoning=True,
-            reasoning_config={"enabled": True, "effort": "xhigh"},
-            provider_profile=profile,
-        )
+        with _patch(
+            "hermes_cli.models.github_model_reasoning_efforts",
+            return_value=["low", "medium", "high", "xhigh"],
+        ):
+            kwargs = transport.build_kwargs(
+                model="gpt-5.4",
+                messages=msgs,
+                tools=None,
+                supports_reasoning=True,
+                reasoning_config={"enabled": True, "effort": "xhigh"},
+                provider_profile=profile,
+            )
+        assert kwargs["extra_body"]["reasoning"] == {"effort": "xhigh"}
+
+    def test_reasoning_xhigh_downgraded_when_catalog_lacks_it(self, agent):
+        """When the catalog does NOT list xhigh, downgrade to the nearest
+        supported level (high) rather than forwarding an unsupported value."""
+        from unittest.mock import patch as _patch
+        from agent.transports import get_transport
+        from providers import get_provider_profile
+
+        transport = get_transport("chat_completions")
+        profile = get_provider_profile("copilot")
+        msgs = [{"role": "user", "content": "hi"}]
+        with _patch(
+            "hermes_cli.models.github_model_reasoning_efforts",
+            return_value=["low", "medium", "high"],
+        ):
+            kwargs = transport.build_kwargs(
+                model="gpt-5.4",
+                messages=msgs,
+                tools=None,
+                supports_reasoning=True,
+                reasoning_config={"enabled": True, "effort": "xhigh"},
+                provider_profile=profile,
+            )
         assert kwargs["extra_body"]["reasoning"] == {"effort": "high"}
 
     def test_reasoning_omitted_for_non_reasoning_copilot_model(self, agent):

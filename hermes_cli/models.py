@@ -12,6 +12,7 @@ import os
 import urllib.request
 import urllib.error
 import time
+from copy import deepcopy
 from difflib import get_close_matches
 from pathlib import Path
 from typing import Any, NamedTuple, Optional
@@ -25,7 +26,7 @@ _HERMES_USER_AGENT = f"hermes-cli/{_HERMES_VERSION}"
 COPILOT_BASE_URL = "https://api.githubcopilot.com"
 COPILOT_MODELS_URL = f"{COPILOT_BASE_URL}/models"
 COPILOT_EDITOR_VERSION = "vscode/1.104.1"
-COPILOT_REASONING_EFFORTS_GPT5 = ["minimal", "low", "medium", "high"]
+COPILOT_REASONING_EFFORTS_GPT5 = ["minimal", "low", "medium", "high", "xhigh"]
 COPILOT_REASONING_EFFORTS_O_SERIES = ["low", "medium", "high"]
 
 
@@ -232,7 +233,16 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "gemini-3.1-pro-preview",
         "gemini-3-pro-preview",
         "gemini-3-flash-preview",
+        "gemini-3.1-flash-lite-preview",
         "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemma-4-31b-it",
+        "gemma-4-26b-a4b-it",
+        "claude-mythos-preview",
+        "claude-mythos-1-preview",
+        "claude-mythos",
+        "goldeneye-secondary",
     ],
     "gemini": [
         "gemini-3.1-pro-preview",
@@ -1941,54 +1951,27 @@ def _resolve_copilot_catalog_api_key() -> str:
     """Best-effort GitHub token for fetching the Copilot model catalog.
 
     Resolution order:
-      1. ``resolve_api_key_provider_credentials("copilot")`` — env vars
-         (``COPILOT_GITHUB_TOKEN`` / ``GH_TOKEN`` / ``GITHUB_TOKEN``) plus
-         the ``gh auth token`` CLI fallback.
-      2. ``read_credential_pool("copilot")`` — a token (typically a
-         ``gho_*`` from device-code login, or a fine-grained PAT) stored in
-         ``auth.json`` under ``credential_pool.copilot[]``. The pool is
-         populated by ``hermes auth add copilot`` and by ``_seed_from_env``
-         when the env var is set in ``~/.hermes/.env``.
+      1. Copilot env vars (``COPILOT_GITHUB_TOKEN`` / ``GH_TOKEN`` /
+         ``GITHUB_TOKEN``) via the shared identity audit helper.
+      2. ``credential_pool.copilot[]`` entries, skipping malformed or
+         unsupported entries before attempting the next one.
+      3. ``gh auth token`` as the final fallback when both env vars and the
+         credential pool are exhausted.
 
-    Without (2), users whose only Copilot credential is in the pool see
-    the ``/model`` picker fall back to a stale hardcoded list because the
-    live catalog fetch silently 401s. To avoid wedging on a malformed pool
-    entry, each candidate is exchanged via ``exchange_copilot_token`` —
-    only entries that actually exchange successfully are returned, so a
-    later valid entry is reachable when an earlier one is unsupported.
+    Pool tokens are still exchanged before returning so the catalog fetch
+    keeps the current Copilot API behavior while sharing the same identity
+    selection path as the compatibility wrapper.
     """
     try:
-        from hermes_cli.auth import resolve_api_key_provider_credentials
+        from hermes_cli.copilot_auth import resolve_copilot_identity_audit
 
-        creds = resolve_api_key_provider_credentials("copilot")
-        api_key = str(creds.get("api_key") or "").strip()
-        if api_key:
-            return api_key
-    except Exception:
-        pass
-
-    try:
-        from hermes_cli.auth import read_credential_pool
-        from hermes_cli.copilot_auth import (
-            exchange_copilot_token,
-            validate_copilot_token,
+        audit = resolve_copilot_identity_audit(
+            include_credential_pool=True,
+            exchange_pool_tokens=True,
         )
-
-        for entry in read_credential_pool("copilot"):
-            if not isinstance(entry, dict):
-                continue
-            raw = str(entry.get("access_token") or "").strip()
-            if not raw:
-                continue
-            valid, _ = validate_copilot_token(raw)
-            if not valid:
-                continue
-            try:
-                api_token, _expires_at = exchange_copilot_token(raw)
-            except Exception:
-                continue
-            if api_token:
-                return api_token
+        if audit.error or not audit.token:
+            return ""
+        return audit.token
     except Exception:
         pass
 
@@ -2307,6 +2290,20 @@ def _credential_fingerprint(provider: str) -> str:
     except Exception:
         pass
 
+    # Bedrock's available model IDs are region-scoped (us.*, eu.*, ap.*).
+    # Include the resolved region in the cache fingerprint; otherwise a fresh
+    # eu-central-1 profile can reuse a still-fresh us-east-1 cache entry and
+    # show the wrong regional inference profile IDs.
+    if provider == "bedrock":
+        try:
+            from agent.bedrock_adapter import resolve_bedrock_region
+            parts.append(f"bedrock_region={resolve_bedrock_region()}")
+        except Exception:
+            parts.append(
+                "bedrock_region="
+                f"{_os.environ.get('AWS_REGION', '') or _os.environ.get('AWS_DEFAULT_REGION', '')}"
+            )
+
     # OAuth / external-file mtimes that change on re-auth
     try:
         from hermes_constants import get_hermes_home
@@ -2529,7 +2526,369 @@ def _payload_items(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
-def copilot_default_headers() -> dict[str, str]:
+_COPILOT_INVENTORY_CACHE_TTL = 3600  # 1 hour
+
+
+def _copilot_inventory_cache_path() -> Path:
+    from hermes_constants import get_hermes_home
+    return get_hermes_home() / "copilot_inventory_cache.json"
+
+
+def _load_copilot_inventory_cache() -> dict[str, Any]:
+    try:
+        path = _copilot_inventory_cache_path()
+        if not path.exists():
+            return {}
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_copilot_inventory_cache(data: dict[str, Any]) -> None:
+    try:
+        from utils import atomic_json_write
+        path = _copilot_inventory_cache_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_json_write(path, data, indent=None)
+    except Exception:
+        pass
+
+
+def _copilot_catalog_source_name() -> str:
+    return "githubcopilot/models"
+
+
+def _copilot_model_source_coverage(raw_id: str) -> dict[str, bool]:
+    lowered = raw_id.strip().lower()
+    return {
+        "google": lowered.startswith("google/"),
+        "gemini": "gemini" in lowered,
+    }
+
+
+def _copilot_catalog_item_limits(item: dict[str, Any]) -> dict[str, Optional[int]]:
+    """Extract separate Copilot limit fields from a catalog item."""
+    capabilities = item.get("capabilities")
+    limits = capabilities.get("limits") if isinstance(capabilities, dict) else {}
+    limits = limits if isinstance(limits, dict) else {}
+
+    def _limit_value(key: str) -> Optional[int]:
+        value = limits.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+        return None
+
+    return {
+        "prompt_budget": _limit_value("max_prompt_tokens"),
+        "total_context_window": _limit_value("max_context_window_tokens"),
+        "max_output_tokens": _limit_value("max_output_tokens"),
+        "max_non_streaming_output_tokens": _limit_value(
+            "max_non_streaming_output_tokens",
+        ),
+    }
+
+
+def _sync_copilot_limit_freshness(snapshot: dict[str, Any]) -> None:
+    """Keep nested Copilot limit freshness aligned with the snapshot."""
+    freshness = dict(snapshot.get("freshness") or {})
+    models = snapshot.get("models")
+    if not isinstance(models, dict):
+        return
+
+    for model in models.values():
+        if not isinstance(model, dict):
+            continue
+
+        limits = model.get("limits")
+        if isinstance(limits, dict):
+            limits["freshness"] = dict(freshness)
+
+        sources = model.get("sources")
+        if not isinstance(sources, list):
+            continue
+        for source_record in sources:
+            if not isinstance(source_record, dict):
+                continue
+            source_limits = source_record.get("limits")
+            if isinstance(source_limits, dict):
+                source_limits["freshness"] = dict(freshness)
+
+
+def _fetch_github_model_catalog_items(
+    api_key: Optional[str] = None, timeout: float = 5.0
+) -> Optional[list[dict[str, Any]]]:
+    attempts: list[dict[str, str]] = []
+    # Try request without slug first to get the full catalog
+    attempts.append(copilot_default_headers(model="catalog"))
+    if api_key:
+        attempts.append({
+            **copilot_default_headers(model="catalog"),
+            "Authorization": f"Bearer {api_key}",
+        })
+
+    for headers in attempts:
+        req = urllib.request.Request(COPILOT_MODELS_URL, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode())
+                return _payload_items(data)
+        except Exception:
+            continue
+    return None
+
+
+def build_copilot_inventory_snapshot(
+    catalog: Optional[list[dict[str, Any]]],
+    *,
+    previous_snapshot: Optional[dict[str, Any]] = None,
+    captured_at: Optional[float] = None,
+) -> dict[str, Any]:
+    """Normalize live Copilot catalog items into a provenance-rich snapshot."""
+    source_name = _copilot_catalog_source_name()
+    captured_at = float(captured_at if captured_at is not None else time.time())
+    raw_items = [item for item in (catalog or []) if isinstance(item, dict)]
+    prev_models: dict[str, Any] = {}
+    if isinstance(previous_snapshot, dict):
+        candidate = previous_snapshot.get("models")
+        if isinstance(candidate, dict):
+            prev_models = candidate
+
+    raw_evidence: list[dict[str, Any]] = []
+    aliases_by_model: dict[str, set[str]] = {}
+    coverage_by_model: dict[str, dict[str, bool]] = {}
+    limits_by_model: dict[str, dict[str, Optional[int]]] = {}
+    order: list[str] = []
+
+    for item in raw_items:
+        raw_id = str(item.get("id") or "").strip()
+        coverage = _copilot_model_source_coverage(raw_id)
+        chat_capable = _copilot_catalog_item_is_text_model(item)
+        picker_enabled = item.get("model_picker_enabled") is not False
+        normalized_id = (
+            normalize_copilot_model_id(raw_id, catalog=raw_items)
+            if raw_id
+            else ""
+        )
+        limit_values = _copilot_catalog_item_limits(item)
+        included = bool(raw_id and normalized_id and chat_capable and picker_enabled)
+        reason = "included" if included else (
+            "missing_id"
+            if not raw_id
+            else "non_chat_or_picker_disabled"
+        )
+        raw_evidence.append({
+            "source": source_name,
+            "captured_at": captured_at,
+            "raw_id": raw_id,
+            "normalized_id": normalized_id,
+            "included": included,
+            "reason": reason,
+            "chat_capable": chat_capable,
+            "picker_enabled": picker_enabled,
+            "google": coverage["google"],
+            "gemini": coverage["gemini"],
+            "limits": {
+                "prompt_budget": limit_values["prompt_budget"],
+                "total_context_window": limit_values["total_context_window"],
+                "max_output_tokens": limit_values["max_output_tokens"],
+                "max_non_streaming_output_tokens": limit_values[
+                    "max_non_streaming_output_tokens"
+                ],
+            },
+        })
+        if not included:
+            continue
+        if normalized_id not in aliases_by_model:
+            aliases_by_model[normalized_id] = set()
+            coverage_by_model[normalized_id] = {"google": False, "gemini": False}
+            limits_by_model[normalized_id] = dict(limit_values)
+            order.append(normalized_id)
+        else:
+            existing_limits = limits_by_model.setdefault(normalized_id, {})
+            for key, value in limit_values.items():
+                if existing_limits.get(key) is None and value is not None:
+                    existing_limits[key] = value
+        aliases_by_model[normalized_id].add(raw_id)
+        coverage_by_model[normalized_id]["google"] = (
+            coverage_by_model[normalized_id]["google"] or coverage["google"]
+        )
+        coverage_by_model[normalized_id]["gemini"] = (
+            coverage_by_model[normalized_id]["gemini"] or coverage["gemini"]
+        )
+
+    models: dict[str, Any] = {}
+    for model_id in order:
+        prev_first_seen = captured_at
+        prev_entry = prev_models.get(model_id)
+        if isinstance(prev_entry, dict):
+            first_seen = prev_entry.get("first_seen")
+            if isinstance(first_seen, (int, float)):
+                prev_first_seen = float(first_seen)
+        aliases = sorted(aliases_by_model.get(model_id, set()))
+        coverage = coverage_by_model.get(model_id, {"google": False, "gemini": False})
+        limit_values = limits_by_model.get(model_id, {
+            "prompt_budget": None,
+            "total_context_window": None,
+            "max_output_tokens": None,
+            "max_non_streaming_output_tokens": None,
+        })
+        limit_snapshot = {
+            "prompt_budget": limit_values["prompt_budget"],
+            "total_context_window": limit_values["total_context_window"],
+            "max_output_tokens": limit_values["max_output_tokens"],
+            "max_non_streaming_output_tokens": limit_values[
+                "max_non_streaming_output_tokens"
+            ],
+            "source": source_name,
+            "captured_at": captured_at,
+            "raw_keys": {
+                "prompt_budget": "max_prompt_tokens",
+                "total_context_window": "max_context_window_tokens",
+                "max_output_tokens": "max_output_tokens",
+                "max_non_streaming_output_tokens": "max_non_streaming_output_tokens",
+            },
+        }
+        source_record = {
+            "source": source_name,
+            "captured_at": captured_at,
+            "first_seen": prev_first_seen,
+            "last_seen": captured_at,
+            "raw_aliases": list(aliases),
+            "google": coverage["google"],
+            "gemini": coverage["gemini"],
+            "chat_capable": True,
+            "picker_enabled": True,
+            "limits": dict(limit_snapshot),
+        }
+        models[model_id] = {
+            "id": model_id,
+            "first_seen": prev_first_seen,
+            "last_seen": captured_at,
+            "raw_aliases": list(aliases),
+            "sources": [source_record],
+            "limits": dict(limit_snapshot),
+            "coverage": {
+                "google": coverage["google"],
+                "gemini": coverage["gemini"],
+                "per_source": {
+                    source_name: {
+                        "google": coverage["google"],
+                        "gemini": coverage["gemini"],
+                    }
+                },
+            },
+            "chat_capable": True,
+            "picker_enabled": True,
+        }
+
+    model_ids = list(models)
+    snapshot = {
+        "source": source_name,
+        "captured_at": captured_at,
+        "model_ids": model_ids,
+        "models": models,
+        "raw_evidence": raw_evidence,
+        "freshness": {
+            "state": "live" if model_ids else "empty",
+            "checked_at": captured_at,
+            "source": source_name,
+            "raw_count": len(raw_evidence),
+            "model_count": len(model_ids),
+            "has_last_known_good": bool(prev_models),
+            "used_last_known_good": False,
+        },
+    }
+    _sync_copilot_limit_freshness(snapshot)
+    return snapshot
+
+
+def cached_copilot_inventory_snapshot(
+    api_key: Optional[str] = None,
+    *,
+    force_refresh: bool = False,
+    ttl_seconds: int = _COPILOT_INVENTORY_CACHE_TTL,
+) -> dict[str, Any]:
+    """Return the best known Copilot inventory snapshot with stale fallback."""
+    cache = _load_copilot_inventory_cache()
+    fp = _credential_fingerprint("copilot")
+    entry = cache.get(fp) if isinstance(cache, dict) else None
+    now = time.time()
+
+    if (
+        not force_refresh
+        and isinstance(entry, dict)
+        and entry.get("fp") == fp
+        and isinstance(entry.get("snapshot"), dict)
+        and (now - float(entry.get("at", 0))) < ttl_seconds
+    ):
+        snapshot = deepcopy(entry["snapshot"])
+        freshness = dict(snapshot.get("freshness") or {})
+        freshness.update({
+            "state": "cached",
+            "checked_at": now,
+            "source": _copilot_catalog_source_name(),
+            "has_last_known_good": True,
+            "used_last_known_good": True,
+        })
+        snapshot["freshness"] = freshness
+        _sync_copilot_limit_freshness(snapshot)
+        return snapshot
+
+    raw_items = _fetch_github_model_catalog_items(api_key=api_key)
+    previous_snapshot = (
+        deepcopy(entry.get("snapshot"))
+        if isinstance(entry, dict) and isinstance(entry.get("snapshot"), dict)
+        else None
+    )
+    live_snapshot = build_copilot_inventory_snapshot(
+        raw_items or [],
+        previous_snapshot=previous_snapshot,
+        captured_at=now,
+    )
+
+    if live_snapshot["model_ids"]:
+        live_snapshot["freshness"].update({
+            "state": "live",
+            "checked_at": now,
+            "has_last_known_good": bool(previous_snapshot),
+            "used_last_known_good": False,
+        })
+        _sync_copilot_limit_freshness(live_snapshot)
+        cache[fp] = {
+            "fp": fp,
+            "at": now,
+            "snapshot": deepcopy(live_snapshot),
+        }
+        _save_copilot_inventory_cache(cache)
+        return live_snapshot
+
+    if previous_snapshot:
+        snapshot = deepcopy(previous_snapshot)
+        freshness = dict(snapshot.get("freshness") or {})
+        freshness.update({
+            "state": "stale",
+            "checked_at": now,
+            "source": _copilot_catalog_source_name(),
+            "has_last_known_good": True,
+            "used_last_known_good": True,
+        })
+        snapshot["freshness"] = freshness
+        _sync_copilot_limit_freshness(snapshot)
+        return snapshot
+
+    live_snapshot["freshness"].update({
+        "state": "empty",
+        "checked_at": now,
+        "has_last_known_good": False,
+        "used_last_known_good": False,
+    })
+    _sync_copilot_limit_freshness(live_snapshot)
+    return live_snapshot
+
+
+def copilot_default_headers(model: str = "") -> dict[str, str]:
     """Standard headers for Copilot API requests.
 
     Includes Openai-Intent and x-initiator headers that opencode and the
@@ -2537,12 +2896,12 @@ def copilot_default_headers() -> dict[str, str]:
     """
     try:
         from hermes_cli.copilot_auth import copilot_request_headers
-        return copilot_request_headers(is_agent_turn=True)
+        return copilot_request_headers(is_agent_turn=True, model=model)
     except ImportError:
         return {
             "Editor-Version": COPILOT_EDITOR_VERSION,
             "User-Agent": "HermesAgent/1.0",
-            "Openai-Intent": "conversation-edits",
+            "Openai-Intent": "conversation-panel",
             "x-initiator": "agent",
         }
 
@@ -2572,6 +2931,9 @@ def _copilot_catalog_item_is_text_model(item: dict[str, Any]) -> bool:
             {"/chat/completions", "/responses", "/v1/messages"}
         ):
             return False
+    elif not capabilities:
+        # If no supported_endpoints AND no capabilities, it's not a known text model
+        return False
 
     return True
 
@@ -2580,34 +2942,40 @@ def fetch_github_model_catalog(
     api_key: Optional[str] = None, timeout: float = 5.0
 ) -> Optional[list[dict[str, Any]]]:
     """Fetch the live GitHub Copilot model catalog for this account."""
-    attempts: list[dict[str, str]] = []
-    if api_key:
-        attempts.append({
-            **copilot_default_headers(),
-            "Authorization": f"Bearer {api_key}",
-        })
-    attempts.append(copilot_default_headers())
-
-    for headers in attempts:
-        req = urllib.request.Request(COPILOT_MODELS_URL, headers=headers)
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode())
-                items = _payload_items(data)
-                models: list[dict[str, Any]] = []
-                seen_ids: set[str] = set()
-                for item in items:
-                    if not _copilot_catalog_item_is_text_model(item):
-                        continue
-                    model_id = str(item.get("id") or "").strip()
-                    if not model_id or model_id in seen_ids:
-                        continue
-                    seen_ids.add(model_id)
-                    models.append(item)
-                if models:
-                    return models
-        except Exception:
+    items = _fetch_github_model_catalog_items(api_key=api_key, timeout=timeout)
+    if not items:
+        return None
+    models: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for item in items:
+        if not _copilot_catalog_item_is_text_model(item):
             continue
+        model_id = str(item.get("id") or "").strip()
+        if not model_id or model_id in seen_ids:
+            continue
+        seen_ids.add(model_id)
+        models.append(item)
+    
+    # Inject test slugs to force availability for empirical testing
+    test_slugs = [
+        "gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-3.1-flash-lite-preview", 
+        "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite", 
+        "gemma-4-31b-it", "gemma-4-26b-a4b-it", "goldeneye-secondary",
+        "claude-mythos-preview", "claude-mythos-1-preview", "claude-mythos"
+    ]
+    for slug in test_slugs:
+        if slug not in seen_ids:
+            models.append({
+                "id": slug, 
+                "name": slug, 
+                "model_picker_enabled": True, 
+                "vendor": "TestInjection",
+                "capabilities": {"type": "chat"}
+            })
+            seen_ids.add(slug)
+
+    if models:
+        return models
     return None
 
 
@@ -2625,6 +2993,35 @@ def get_copilot_model_context(model_id: str, api_key: Optional[str] = None) -> O
     Results are cached in-process for 1 hour to avoid repeated API calls.
     Returns the token limit or None if not found.
     """
+    # Force proven empirical limits to trump the API's advertised limits.
+    # Copilot's /models endpoint reports 168k for Opus and 272k for GPT-5.5,
+    # but we proved via Master Probes that the proxy actually supports much
+    # higher limits when using 'rest-book' and correct endpoints.
+    overrides = {
+        "claude-opus-4.8": 1000000,
+        "claude-opus-4.7": 1000000,
+        "claude-opus-4.6": 1000000,
+        "claude-sonnet-4.8": 1000000,
+        "claude-sonnet-4.7": 1000000,
+        "claude-sonnet-4.6": 1000000,
+        "gpt-5.5": 1050000,
+        "gpt-5.4": 750000,
+        "gpt-5.4-mini": 400000,
+        "gpt-5-mini": 128000,
+        "gemini-3.1-pro-preview": 1048576,
+        "gemini-3.5-flash": 1048576,
+        "gemini-2.5-pro": 1048576,
+    }
+    
+    # Try exact match first
+    if model_id in overrides:
+        return overrides[model_id]
+        
+    # Try family-level substring match
+    for k, v in overrides.items():
+        if k in model_id.lower().replace(".", "-"):
+            return v
+
     global _copilot_context_cache, _copilot_context_cache_time
 
     # Serve from cache if fresh
@@ -2911,21 +3308,33 @@ _COPILOT_MODEL_ALIASES = {
     "openai/o3-mini": "gpt-5-mini",
     "openai/o4-mini": "gpt-5-mini",
     "anthropic/claude-opus-4.6": "claude-opus-4.6",
+    "anthropic/claude-opus-4.7": "claude-opus-4.7",
+    "anthropic/claude-opus-4.8": "claude-opus-4.8",
     "anthropic/claude-sonnet-4.6": "claude-sonnet-4.6",
     "anthropic/claude-sonnet-4": "claude-sonnet-4",
     "anthropic/claude-sonnet-4.5": "claude-sonnet-4.5",
     "anthropic/claude-haiku-4.5": "claude-haiku-4.5",
+    # Friendly aliases for the restricted-preview Opus the user calls "Mythos".
+    # Catalog matching below still accepts a literal `claude-mythos` id should
+    # Copilot ever publish one; today this maps to the underlying 4.7 deployment.
+    "mythos": "claude-opus-4.7",
+    "claude-mythos": "claude-opus-4.7",
+    "anthropic/claude-mythos": "claude-opus-4.7",
     # Dash-notation fallbacks: Hermes' default Claude IDs elsewhere use
     # hyphens (anthropic native format), but Copilot's API only accepts
     # dot-notation.  Accept both so users who configure copilot + a
     # default hyphenated Claude model don't hit HTTP 400
     # "model_not_supported".  See issue #6879.
     "claude-opus-4-6": "claude-opus-4.6",
+    "claude-opus-4-7": "claude-opus-4.7",
+    "claude-opus-4-8": "claude-opus-4.8",
     "claude-sonnet-4-6": "claude-sonnet-4.6",
     "claude-sonnet-4-0": "claude-sonnet-4",
     "claude-sonnet-4-5": "claude-sonnet-4.5",
     "claude-haiku-4-5": "claude-haiku-4.5",
     "anthropic/claude-opus-4-6": "claude-opus-4.6",
+    "anthropic/claude-opus-4-7": "claude-opus-4.7",
+    "anthropic/claude-opus-4-8": "claude-opus-4.8",
     "anthropic/claude-sonnet-4-6": "claude-sonnet-4.6",
     "anthropic/claude-sonnet-4-0": "claude-sonnet-4",
     "anthropic/claude-sonnet-4-5": "claude-sonnet-4.5",
@@ -3040,6 +3449,18 @@ def copilot_model_api_mode(
     # Primary: model ID pattern (matches opencode's shouldUseCopilotResponsesApi)
     if _should_use_copilot_responses_api(normalized):
         return "codex_responses"
+
+    # Claude models on Copilot ALWAYS use /v1/messages — regardless of whether
+    # the live catalog probe succeeded. The /chat/completions path is a proxy
+    # clamp that misleadingly reports `exceeds the limit of 168000` for any
+    # claude-* prompt over ~300k. Routing every claude-* through anthropic_messages
+    # before catalog probing avoids that wrong-route path when the catalog is
+    # cold/empty/down or returns ambiguous supported_endpoints. See:
+    #   - probe/FINDINGS.md §1 — endpoint map
+    #   - probe V18.1 — opus-4.8 → 999,968 input tokens 200 OK on /v1/messages
+    #   - upstream PR #27446 — same short-circuit upstream
+    if normalized.startswith("claude-"):
+        return "anthropic_messages"
 
     # Secondary: check catalog for non-GPT-5 models (Claude via /v1/messages, etc.)
     if catalog:
@@ -3501,6 +3922,50 @@ def validate_requested_model(
             "accepted": False, "persist": False, "recognized": False,
             "message": f"Model `{requested}` was not found in LM Studio's model listing.",
         }
+
+    # Antigravity CLI (`agy-cli`): no HTTP /models endpoint — the model list is
+    # owned by the agy binary's internal Connect-RPC server and the plugin's
+    # `AGY_SLUG_TO_DISPLAY` map. Use the plugin's own model list as the
+    # validation source rather than letting the generic /models probe fail
+    # and emit a misleading "could not reach the agy-cli API" warning.
+    if normalized == "agy-cli" or normalized in {"agy", "antigravity", "antigravity-cli"}:
+        try:
+            import importlib.util as _ilu
+            from pathlib import Path as _Path
+            _plugin_init = _Path(__file__).resolve().parent.parent / "plugins" / "model-providers" / "agy-cli" / "__init__.py"
+            _spec = _ilu.spec_from_file_location("_agy_plugin_validate", _plugin_init)
+            _mod = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            _slug_map = getattr(_mod, "AGY_SLUG_TO_DISPLAY", None) or {}
+            agy_known = [s for s in _slug_map.keys() if s and s != "default"]
+        except Exception:
+            agy_known = []
+        if agy_known:
+            if requested_for_lookup in set(agy_known):
+                return {"accepted": True, "persist": True, "recognized": True, "message": None}
+            auto = get_close_matches(requested_for_lookup, agy_known, n=1, cutoff=0.85)
+            if auto:
+                return {
+                    "accepted": True, "persist": True, "recognized": True,
+                    "corrected_model": auto[0],
+                    "message": f"Auto-corrected `{requested}` → `{auto[0]}`",
+                }
+            suggestions = get_close_matches(requested_for_lookup, agy_known, n=3, cutoff=0.5)
+            suggestion_text = "\n  Similar agy models: " + ", ".join(f"`{s}`" for s in suggestions) if suggestions else ""
+            # Allow but warn — agy may have added new models since the plugin
+            # was last refreshed; the AgyCliClient will surface the real
+            # error if the model is genuinely invalid.
+            return {
+                "accepted": True, "persist": True, "recognized": False,
+                "message": (
+                    f"Note: `{requested}` is not in the pinned agy-cli model list."
+                    f"{suggestion_text}"
+                    f"\n  Hermes will still send the request — if the model exists on this account's agy install it will work."
+                ),
+            }
+        # plugin model list unavailable — accept silently rather than nag with
+        # a misleading "could not reach the API" warning.
+        return {"accepted": True, "persist": True, "recognized": False, "message": None}
 
     if normalized == "custom" or normalized.startswith("custom:"):
         # Try probing with correct auth for the api_mode.

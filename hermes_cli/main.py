@@ -2090,6 +2090,14 @@ def cmd_chat(args):
     if getattr(args, "yolo", False):
         os.environ["HERMES_YOLO_MODE"] = "1"
 
+    # --autopilot: inject system-prompt rules telling the model NEVER to ask
+    # the user clarifying questions. See agent/prompt_builder.py
+    # AUTOPILOT_GUIDANCE. Implies --yolo for unattended ergonomics (no point
+    # bypassing the model's questions if the bash sandbox still prompts).
+    if getattr(args, "autopilot", False):
+        os.environ["HERMES_AUTOPILOT"] = "1"
+        os.environ["HERMES_YOLO_MODE"] = "1"
+
     # --ignore-user-config: make load_cli_config() / load_config() skip the
     # user's ~/.hermes/config.yaml and return built-in defaults. Set BEFORE
     # importing cli (which runs `CLI_CONFIG = load_cli_config()` at module
@@ -12464,7 +12472,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate",
         "model", "pairing", "plugins", "portal", "postinstall", "profile", "proxy",
         "prompt-size",
-        "send", "sessions", "setup",
+        "send", "sessions", "setup", "source",
         "skills", "slack", "status", "tools", "uninstall", "update",
         "version", "webhook", "whatsapp", "chat", "secrets", "security",
         # Help-ish invocations — plugin commands not being listed in
@@ -12810,6 +12818,13 @@ def main():
 
     parser, subparsers, chat_parser = build_top_level_parser()
     chat_parser.set_defaults(func=cmd_chat)
+
+    # Fast deterministic Hermes source/workspace lookup. Registered here instead
+    # of in the lightweight parser because it is a management command, not the
+    # hot chat/TUI startup path.
+    from hermes_cli.source import register_source_parser
+
+    register_source_parser(subparsers)
 
     # =========================================================================
     # model command

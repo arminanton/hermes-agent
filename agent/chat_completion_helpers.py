@@ -523,10 +523,115 @@ def interruptible_api_call(agent, api_kwargs: dict):
     return result["response"]
 
 
+def _copilot_auto_fallback_model(agent) -> str:
+    """Return a concrete Copilot model to use when auto routing cannot resolve one."""
+    last_model = str(getattr(agent, "_copilot_auto_last_model", "") or "").strip()
+    if last_model and last_model.lower() != "auto":
+        return last_model
+
+    try:
+        from hermes_cli.models import provider_model_ids
+
+        for model_id in provider_model_ids("copilot") or []:
+            candidate = str(model_id or "").strip()
+            if candidate and candidate.lower() != "auto":
+                return candidate
+    except Exception:
+        pass
+
+    current_model = str(getattr(agent, "model", "") or "").strip()
+    if current_model and current_model.lower() != "auto":
+        return current_model
+
+    return "gpt-5.4"
+
+
+def _maybe_apply_copilot_auto_route(agent, api_messages: list) -> None:
+    """Resolve `model=auto` for Copilot before the request body is built."""
+    provider = str(getattr(agent, "provider", "") or "").strip().lower()
+    requested_model = str(getattr(agent, "_requested_model", getattr(agent, "model", "")) or "").strip()
+    if provider != "copilot" or requested_model.lower() != "auto":
+        if getattr(agent, "_copilot_auto_session_token", ""):
+            agent._copilot_auto_session_token = ""
+            agent._copilot_auto_session = None
+            agent._copilot_auto_decision = None
+        return
+
+    fallback_model = _copilot_auto_fallback_model(agent)
+    try:
+        from agent.auto_router import default_router, _render_prompt_from_messages
+    except Exception as exc:
+        logger.warning(
+            "Copilot auto routing unavailable; using fallback model %s (%s)",
+            fallback_model,
+            exc,
+        )
+        chosen_model = fallback_model
+        agent._copilot_auto_session_token = ""
+        agent._copilot_auto_session = None
+        agent._copilot_auto_decision = None
+        agent._copilot_auto_last_model = chosen_model
+        agent._copilot_auto_resolved_model = chosen_model
+        agent.model = chosen_model
+        agent.api_mode = (
+            "codex_responses"
+            if agent._provider_model_requires_responses_api(chosen_model, provider=agent.provider)
+            else "chat_completions"
+        )
+        return
+
+    router = default_router()
+    prompt = _render_prompt_from_messages(api_messages)
+    result = router.resolve(
+        str(getattr(agent, "api_key", "") or ""),
+        prompt,
+        conversation_id=getattr(agent, "session_id", None),
+        timeout=10.0,
+        fallback_model=fallback_model,
+    )
+
+    chosen_model = str(result.chosen_model or fallback_model or "").strip() or fallback_model
+    if not chosen_model:
+        chosen_model = "gpt-5.4"
+
+    agent._copilot_auto_session = result.session
+    agent._copilot_auto_decision = result.decision
+    agent._copilot_auto_session_token = result.session_token if result.session_token else ""
+    agent._copilot_auto_last_model = chosen_model
+    agent._copilot_auto_resolved_model = chosen_model
+    agent.model = chosen_model
+    agent.api_mode = (
+        "codex_responses"
+        if agent._provider_model_requires_responses_api(chosen_model, provider=agent.provider)
+        else "chat_completions"
+    )
+
+    if result.decision is not None:
+        logger.info(
+            "Copilot auto routed conversation=%s model=%s fallback=%s method=%s",
+            getattr(agent, "session_id", ""),
+            chosen_model,
+            result.decision.fallback,
+            result.decision.routing_method or "session_selected",
+        )
+
+
+def _copilot_request_headers(agent, *, is_vision: bool) -> dict[str, str]:
+    from hermes_cli.copilot_auth import copilot_request_headers
+
+    headers = copilot_request_headers(
+        is_agent_turn=True, is_vision=is_vision, model=agent.model
+    )
+    session_token = str(getattr(agent, "_copilot_auto_session_token", "") or "").strip()
+    if session_token:
+        headers["Copilot-Session-Token"] = session_token
+    return headers
+
 
 def build_api_kwargs(agent, api_messages: list) -> dict:
     """Build the keyword arguments dict for the active API mode."""
     tools_for_api = agent.tools
+    _maybe_apply_copilot_auto_route(agent, api_messages)
 
     if agent.api_mode == "anthropic_messages":
         _transport = agent._get_transport()
@@ -682,7 +787,7 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
     if (_is_or or _is_nous) and "claude" in (agent.model or "").lower():
         try:
             from agent.anthropic_adapter import _get_anthropic_max_output
-            _ant_max = _get_anthropic_max_output(agent.model)
+            _ant_max = _get_anthropic_max_output(agent.model, base_url=getattr(agent, "base_url", None))
         except Exception:
             pass
 

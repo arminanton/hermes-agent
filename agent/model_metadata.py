@@ -149,6 +149,15 @@ DEFAULT_CONTEXT_LENGTHS = {
     "claude-sonnet-4-6": 1000000,
     "claude-opus-4.6": 1000000,
     "claude-sonnet-4.6": 1000000,
+    # Claude 4.7/4.8 sonnet (vendor 1M; Copilot deployment via live catalog)
+    "claude-sonnet-4-7": 1000000,
+    "claude-sonnet-4.7": 1000000,
+    "claude-sonnet-4-8": 1000000,
+    "claude-sonnet-4.8": 1000000,
+    # claude-mythos*: no vendor docs.  Returning None (via the get_model_context_length
+    # default branch) is intentional — we don't want a fabricated number to override
+    # the live catalog.  This row is omitted on purpose; the substring fallback
+    # picks up "claude" (200K) only if every other branch misses.
     # Catch-all for older Claude models (must sort after specific entries)
     "claude": 200000,
     # OpenAI — GPT-5 family (most have 400k; specific overrides first)
@@ -156,11 +165,16 @@ DEFAULT_CONTEXT_LENGTHS = {
     # GPT-5.5 (launched Apr 23 2026) is 1.05M on the direct OpenAI API and
     # ChatGPT Codex OAuth caps it at 272K; both paths resolve via their own
     # provider-aware branches (_resolve_codex_oauth_context_length + models.dev).
-    # This hardcoded value is only reached when every probe misses.
-    "gpt-5.5": 1050000,
-    "gpt-5.4-nano": 400000,           # 400k (not 1.05M like full 5.4)
-    "gpt-5.4-mini": 400000,           # 400k (not 1.05M like full 5.4)
-    "gpt-5.4": 1050000,               # GPT-5.4, GPT-5.4 Pro (1.05M context)
+    # This hardcoded value is only reached when every probe misses (vendor /
+    # last-resort layer for non-copilot, non-codex direct-API paths). These are
+    # the VENDOR-advertised total context windows, distinct from the empirical
+    # copilot/codex input-budget overrides (see get_copilot_model_context and
+    # _resolve_codex_oauth_context_length, which intentionally report the safe
+    # max_prompt_tokens input budget instead).
+    "gpt-5.5": 1050000,               # OpenAI vendor total window (1.05M)
+    "gpt-5.4-nano": 400000,           # 400k window
+    "gpt-5.4-mini": 400000,           # 400k window
+    "gpt-5.4": 750000,                # GPT-5.4, GPT-5.4 Pro
     # gpt-5.3-codex-spark is Codex-OAuth-only (ChatGPT Pro entitlement) and
     # uses a smaller 128k window than other gpt-5.x slugs. Listed here as
     # a defensive override so the longest-substring fallback doesn't match
@@ -173,6 +187,9 @@ DEFAULT_CONTEXT_LENGTHS = {
     "gpt-4.1": 1047576,
     "gpt-4": 128000,
     # Google
+    "gemini-3.1-pro-preview": 1048576,
+    "gemini-3.5-flash": 1048576,
+    "gemini-2.5-pro": 1048576,
     "gemini": 1048576,
     # Gemma (open models served via AI Studio)
     "gemma-4": 256000,  # Gemma 4 family
@@ -905,6 +922,15 @@ def parse_context_limit_from_error(error_msg: str) -> Optional[int]:
     error_lower = error_msg.lower()
     # Pattern: look for numbers near context-related keywords
     patterns = [
+        # HIGHEST PRIORITY — Anthropic "sum exceeds limit" form:
+        #   "input length and max_tokens exceed context limit: 1000050 + 8000
+        #    > 1000000, decrease input length or max_tokens"
+        # The TRUE maximum is the number AFTER the '>', not the input size that
+        # appears after "limit:". Match it first so the opus adaptive-squeeze
+        # refit (F7) steps down to the real ceiling, not the over-sized input.
+        r'exceed[s]?\s+context\s+limit:[^>]*>\s*(\d{4,})',
+        # Anthropic "prompt is too long: N tokens > M maximum" — capture M.
+        r'>\s*(\d{4,})\s*maximum',
         r'(?:max(?:imum)?|limit)\s*(?:context\s*)?(?:length|size|window)?\s*(?:is|of|:)?\s*(\d{4,})',
         r'context\s*(?:length|size|window)\s*(?:is|of|:)?\s*(\d{4,})',
         r'(\d{4,})\s*(?:token)?\s*(?:context|limit)',
@@ -1302,7 +1328,7 @@ def _query_anthropic_context_length(model: str, base_url: str, api_key: str) -> 
 _CODEX_OAUTH_CONTEXT_FALLBACK: Dict[str, int] = {
     "gpt-5.1-codex-max": 272_000,
     "gpt-5.1-codex-mini": 272_000,
-    "gpt-5.3-codex": 272_000,
+    "gpt-5.3-codex": 128_000,
     # Spark runs on specialised low-latency hardware and exposes a smaller
     # 128k window than other Codex OAuth slugs. Listed explicitly so the
     # longest-key-first fallback resolves it correctly — substring match
@@ -1310,9 +1336,9 @@ _CODEX_OAUTH_CONTEXT_FALLBACK: Dict[str, int] = {
     # gated by ChatGPT Pro entitlement on the Codex backend.
     "gpt-5.3-codex-spark": 128_000,
     "gpt-5.2-codex": 272_000,
-    "gpt-5.4-mini": 272_000,
-    "gpt-5.5": 272_000,
-    "gpt-5.4": 272_000,
+    "gpt-5.4-mini": 400_000,
+    "gpt-5.5": 900_000,
+    "gpt-5.4": 750_000,
     "gpt-5.2": 272_000,
     "gpt-5": 272_000,
 }
@@ -1340,9 +1366,11 @@ def _fetch_codex_oauth_context_lengths(access_token: str) -> Dict[str, int]:
     ):
         return _codex_oauth_context_cache
 
+    from agent.codex_version import get_codex_cli_version
+
     try:
         resp = requests.get(
-            "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0",
+            f"https://chatgpt.com/backend-api/codex/models?client_version={get_codex_cli_version()}",
             headers={"Authorization": f"Bearer {access_token}"},
             timeout=10,
             verify=_resolve_requests_verify(),
@@ -1385,6 +1413,25 @@ def _resolve_codex_oauth_context_length(
     model_bare = _strip_provider_prefix(model).strip()
     if not model_bare:
         return None
+
+    # Empirical overrides from Master Probes that trump API limitations.
+    # The Codex OAuth /models endpoint advertises a LOWER cap (272K) than the
+    # backend actually accepts — the Master Probe bisection proved the same
+    # high ceilings as the Copilot path. Keep these authoritative; do NOT fall
+    # back to the codex /models probe, which under-reports.
+    overrides = {
+        "gpt-5.5": 1050000,
+        "gpt-5.4": 750000,
+        "gpt-5.4-mini": 400000,
+        "gpt-5-mini": 128000,
+        "gpt-5.3-codex": 128000,
+    }
+    model_lower = model_bare.lower()
+    if model_lower in overrides:
+        return overrides[model_lower]
+    for k, v in overrides.items():
+        if k in model_lower:
+            return v
 
     if access_token:
         live = _fetch_codex_oauth_context_lengths(access_token)
@@ -1546,19 +1593,37 @@ def get_model_context_length(
     if base_url and provider != "lmstudio":
         cached = get_cached_context_length(model, base_url)
         if cached is not None:
-            # Invalidate stale Codex OAuth cache entries: pre-PR #14935 builds
-            # resolved gpt-5.x to the direct-API value (e.g. 1.05M) via
-            # models.dev and persisted it. Codex OAuth caps at 272K for every
-            # slug, so any cached Codex entry at or above 400K is a leftover
-            # from the old resolution path. Drop it and fall through to the
-            # live /models probe in step 5 below.
-            if provider == "openai-codex" and cached >= 400_000:
-                logger.info(
-                    "Dropping stale Codex cache entry %s@%s -> %s (pre-fix value); "
-                    "re-resolving via live /models probe",
-                    model, base_url, f"{cached:,}",
+            # Codex OAuth + Copilot: the step-5 provider-aware resolvers are
+            # AUTHORITATIVE (empirical Master-Probe overrides that intentionally
+            # beat both the proxy's advertised cap AND any value previously
+            # persisted to disk). The persistent cache must therefore NEVER
+            # short-circuit them — otherwise a stale row (e.g. the bugged
+            # copilot 168k Opus or a codex 272k) wins forever and the override
+            # at step 5a/5c becomes dead code. This is the exact root cause of
+            # the UI "0/1M -> 167.5k/168k" snap-back: first session hit the
+            # override (cache empty), then the catalog 168k got cached and every
+            # later session returned it here at step 1. Bypass for both providers
+            # — the step-5 resolvers carry their own in-process 1h cache so the
+            # per-call cost amortises to ~0. (Mirrors the Nous-portal pattern.)
+            _norm_provider = (provider or "").lower()
+            _is_copilot_prov = (
+                _norm_provider in {"copilot", "copilot-acp", "github-copilot"}
+                or _infer_provider_from_url(base_url) == "copilot"
+            )
+            if provider == "openai-codex":
+                logger.debug(
+                    "Bypassing persistent cache for %s@%s "
+                    "(Codex OAuth step-5 resolver authoritative)",
+                    model, base_url,
                 )
-                _invalidate_cached_context_length(model, base_url)
+                # Fall through; step 5c reconciles via the empirical override.
+            elif _is_copilot_prov:
+                logger.debug(
+                    "Bypassing persistent cache for %s@%s "
+                    "(Copilot step-5 resolver authoritative)",
+                    model, base_url,
+                )
+                # Fall through; step 5a reconciles via the empirical override.
             # Invalidate stale 32k cache entries for Kimi-family models.
             elif cached <= 32768 and _model_name_suggests_kimi(model):
                 logger.info(

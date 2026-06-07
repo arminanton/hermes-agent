@@ -1781,6 +1781,10 @@ def _session_info(agent, session: dict | None = None) -> dict:
         yolo = False
     info: dict = {
         "model": getattr(agent, "model", ""),
+        # Canonical persisted SessionDB id for this conversation lineage.
+        # Exposed to dashboard clients so they can reopen the same session
+        # after page refresh (instead of always starting a new conversation).
+        "session_key": getattr(agent, "session_id", "") or "",
         "reasoning_effort": reasoning_effort,
         "service_tier": service_tier,
         "fast": service_tier == "priority",
@@ -5743,7 +5747,39 @@ def _(rid, params: dict) -> dict:
             if bool((cfg.get("display") or {}).get("show_reasoning", False))
             else "hide"
         )
-        return _ok(rid, {"value": effort, "display": display})
+        # Surface any per-model effort clamp recorded by the anthropic adapter
+        # (copilot+claude often clamps xhigh→medium because GitHub's catalog
+        # caps opus-4.7/4.8 at effort=[medium]). The TUI status line can render
+        # this honestly: `effort: medium (xhigh requested → Copilot capped)`.
+        # See agent.anthropic_adapter._record_effort_clamp (Phase A6).
+        clamp_payload: Optional[dict] = None
+        try:
+            session_id = str(params.get("session_id", "") or "")
+            session = _sessions.get(session_id)
+            agent = session.get("agent") if session else None
+            model_id = (
+                str(getattr(agent, "model", "") or "")
+                if agent
+                else str((cfg.get("agent") or {}).get("model", "") or "")
+            )
+            if model_id:
+                from agent.anthropic_adapter import get_last_effort_clamp
+                clamp = get_last_effort_clamp(model_id)
+                if clamp and clamp.get("requested") and clamp.get("effective"):
+                    if clamp["requested"] != clamp["effective"]:
+                        clamp_payload = {
+                            "model": model_id,
+                            "requested": clamp["requested"],
+                            "effective": clamp["effective"],
+                            "note": clamp.get("note", ""),
+                        }
+        except Exception:
+            clamp_payload = None
+        out: dict[str, Any] = {"value": effort, "display": display}
+        if clamp_payload is not None:
+            out["effective_effort"] = clamp_payload["effective"]
+            out["clamp"] = clamp_payload
+        return _ok(rid, out)
     if key == "fast":
         return _ok(
             rid,
