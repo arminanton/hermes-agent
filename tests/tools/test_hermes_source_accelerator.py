@@ -4,7 +4,28 @@ import json
 import sys
 from pathlib import Path
 
-ACCEL_ROOT = Path(__file__).resolve().parents[3] / "workspace" / "scripts" / "source_accelerator"
+def _resolve_accel_root():
+    """Find the source_accelerator package — tolerate test-runs from both the
+    live tree (src is sibling of workspace) AND any candidate/quarantine tree
+    (where src may have no sibling workspace). Fall back to the canonical live
+    workspace path so tests pass when the candidate src is run in isolation."""
+    # First: sibling-of-src convention (parents[3] is the repo root: <root>/src/tests/tools/file.py)
+    candidate = Path(__file__).resolve().parents[3] / "workspace" / "scripts" / "source_accelerator"
+    if candidate.exists():
+        return candidate
+    # Fallback: canonical live workspace on this host
+    live = Path("/mnt/devvm/custom/hermes/workspace/scripts/source_accelerator")
+    if live.exists():
+        return live
+    # Last resort: env var override
+    import os as _os
+    env = _os.environ.get("HERMES_SOURCE_ACCELERATOR_PATH")
+    if env and Path(env).exists():
+        return Path(env)
+    return candidate  # original (will fail later with a clear ModuleNotFoundError)
+
+
+ACCEL_ROOT = _resolve_accel_root()
 if str(ACCEL_ROOT) not in sys.path:
     sys.path.insert(0, str(ACCEL_ROOT))
 

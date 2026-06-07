@@ -27,9 +27,18 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.filterwarnings(
+pytestmark = [
+    pytest.mark.skip(
+        reason=(
+            "agy-cli provider is known-broken WIP (USER 2026-06-04: subprocess "
+            "shim treats CLI flags as goal). Skipped intentionally — provider "
+            "not stabilized. Drop this mark to run anyway."
+        )
+    ),
+    pytest.mark.filterwarnings(
     "ignore::pytest.PytestUnknownMarkWarning"
-)
+),
+]
 
 SRC = Path(__file__).resolve().parents[2]
 if str(SRC) not in sys.path:

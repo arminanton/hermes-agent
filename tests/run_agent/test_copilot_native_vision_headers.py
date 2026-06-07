@@ -4,6 +4,18 @@ from hermes_cli.copilot_auth import copilot_request_headers
 from run_agent import AIAgent
 
 
+# Per-call volatile headers — copilot_request_headers() generates fresh UUIDs
+# for X-Request-Id and X-Interaction-Id on every call to mirror VS Code Copilot
+# Chat's trace-correlation behavior. Comparing two different calls' output via
+# strict equality is meaningless for these fields; strip them on both sides
+# before asserting structural equality.
+_VOLATILE_HEADERS = ("X-Request-Id", "X-Interaction-Id")
+
+
+def _strip_volatile(headers):
+    return {k: v for k, v in headers.items() if k not in _VOLATILE_HEADERS}
+
+
 def _make_copilot_agent():
     with patch("run_agent.OpenAI") as mock_openai:
         mock_openai.return_value = MagicMock()
@@ -20,8 +32,8 @@ def _make_copilot_agent():
 
 
 def _assert_copilot_text_headers(headers):
-    expected_headers = copilot_request_headers(is_agent_turn=True)
-    assert headers == expected_headers
+    expected_headers = copilot_request_headers(is_agent_turn=True, model="gpt-5.4")
+    assert _strip_volatile(headers) == _strip_volatile(expected_headers)
     assert "Copilot-Vision-Request" not in headers
 
 
@@ -53,8 +65,10 @@ def test_request_client_adds_copilot_vision_header_for_native_image_payload():
         agent._create_request_openai_client(reason="test", api_kwargs=api_kwargs)
 
     headers = built_kwargs[-1]["default_headers"]
-    expected_headers = copilot_request_headers(is_agent_turn=True)
-    assert headers == {**expected_headers, "Copilot-Vision-Request": "true"}
+    expected_headers = copilot_request_headers(is_agent_turn=True, model="gpt-5.4")
+    assert _strip_volatile(headers) == _strip_volatile(
+        {**expected_headers, "Copilot-Vision-Request": "true"}
+    )
 
 
 def test_request_client_leaves_copilot_text_requests_without_vision_header():

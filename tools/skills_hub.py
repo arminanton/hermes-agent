@@ -409,6 +409,10 @@ class GitHubSource(SkillSource):
         # `tools/skills_guard.py::TRUSTED_REPOS`). Sample layout:
         # https://github.com/NVIDIA/skills/tree/main/skills
         {"repo": "NVIDIA/skills", "path": "skills/"},
+        # obra/superpowers: community-curated agent superpowers, added to
+        # TRUSTED_REPOS in tools/skills_guard.py to allow installs with the
+        # caution gate. Maintained at https://github.com/obra/superpowers.
+        {"repo": "obra/superpowers", "path": "skills/"},
         {"repo": "garrytan/gstack", "path": ""},
     ]
 

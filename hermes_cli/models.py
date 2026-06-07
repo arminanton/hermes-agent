@@ -2956,23 +2956,28 @@ def fetch_github_model_catalog(
         seen_ids.add(model_id)
         models.append(item)
     
-    # Inject test slugs to force availability for empirical testing
-    test_slugs = [
-        "gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-3.1-flash-lite-preview", 
-        "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite", 
-        "gemma-4-31b-it", "gemma-4-26b-a4b-it", "goldeneye-secondary",
-        "claude-mythos-preview", "claude-mythos-1-preview", "claude-mythos"
-    ]
-    for slug in test_slugs:
-        if slug not in seen_ids:
-            models.append({
-                "id": slug, 
-                "name": slug, 
-                "model_picker_enabled": True, 
-                "vendor": "TestInjection",
-                "capabilities": {"type": "chat"}
-            })
-            seen_ids.add(slug)
+    # Inject test/preview slugs to force availability for empirical probing.
+    # Gated behind HERMES_COPILOT_INJECT_PROBE_SLUGS so it stays opt-in:
+    # without the env var the catalog returns ONLY what GitHub actually
+    # advertises for this account (keeps unit tests deterministic and avoids
+    # surfacing unreachable slugs in the picker for users who do not probe).
+    if os.environ.get("HERMES_COPILOT_INJECT_PROBE_SLUGS"):
+        _probe_slugs = [
+            "gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-3.1-flash-lite-preview",
+            "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite",
+            "gemma-4-31b-it", "gemma-4-26b-a4b-it", "goldeneye-secondary",
+            "claude-mythos-preview", "claude-mythos-1-preview", "claude-mythos",
+        ]
+        for slug in _probe_slugs:
+            if slug not in seen_ids:
+                models.append({
+                    "id": slug,
+                    "name": slug,
+                    "model_picker_enabled": True,
+                    "vendor": "TestInjection",
+                    "capabilities": {"type": "chat"},
+                })
+                seen_ids.add(slug)
 
     if models:
         return models
