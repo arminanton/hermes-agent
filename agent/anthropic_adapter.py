@@ -206,10 +206,15 @@ def _is_copilot_base_url(base_url: Optional[str]) -> bool:
 
 
 def _lookup_copilot_output_from_catalog(model: str) -> Optional[int]:
-    """Read max_output_tokens for *model* from the live Copilot catalog cache.
+    """Return the TRUE enforced max output tokens for a Copilot Claude model.
 
-    Uses the same cache populated by hermes_cli.models.get_copilot_model_context;
-    we extend that cache to include output limits as well.
+    The Copilot /models catalog UNDER-reports max_output_tokens (advertises
+    64,000 for opus, but the server enforces 128,000 — verified live: opus
+    max_tokens=128000 → 200, 200000 → 400). Opus-4.x is 128k on BOTH Copilot
+    and vendor-direct Anthropic, so it lives here (this helper also feeds the
+    unknown-base_url default). Sonnet differs by provider (64k vendor / 128k
+    Copilot) and is handled in the Copilot branch of
+    ``_resolve_anthropic_output_limit`` instead. Keyed by hyphenated id.
     """
     overrides = {
         "claude-opus-4.8": 128000,
@@ -309,6 +314,17 @@ def _resolve_anthropic_output_limit(model: str, base_url: Optional[str] = None) 
         table = _ANTHROPIC_OUTPUT_LIMITS_VENDOR_FALLBACK
         default = _ANTHROPIC_DEFAULT_OUTPUT_LIMIT_VENDOR_FALLBACK
     elif _is_copilot_base_url(base_url):
+        # Copilot UNDER-reports Claude max_output in its catalog (advertises
+        # 64k; the server enforces 128k for opus-4.x AND sonnet-4.6+ — verified
+        # live 2026-06-07: sonnet-4.6 max_tokens=128000 → 200, 200000 → 400
+        # "> 128000 maximum"). Apply the verified sonnet ceiling BEFORE the
+        # catalog lookup (which would otherwise return the under-reported 64k).
+        # Opus is handled inside _lookup_copilot_output_from_catalog (128k on
+        # both Copilot and vendor). This branch is Copilot-only, so it does not
+        # affect vendor-direct sonnet (which really is 64k).
+        norm = model.lower().replace(".", "-")
+        if "claude-sonnet-4-6" in norm or "claude-sonnet-4-7" in norm or "claude-sonnet-4-8" in norm:
+            return 128_000
         live = _lookup_copilot_output_from_catalog(model)
         if live:
             return live
@@ -514,20 +530,21 @@ def _reset_effort_clamp_state_for_tests() -> None:
     _effort_clamp_last.clear()
 
 
-# Offline fallback for Copilot's reasoning-effort allow-list, consulted when
-# the live catalog can't be fetched (no resolvable token in the calling
-# context, network down, model unlisted). Mirrors the override pattern in
-# _lookup_copilot_output_from_catalog. These are the *Copilot deployment*
-# values (more restrictive than vendor-direct Anthropic), verified live on
-# 2026-06-04 against api.githubcopilot.com (account e126380_magh):
-#   opus-4.7 / opus-4.8 → ['medium'] only (xhigh/high/max all 400)
-#   opus-4.6 / sonnet-4.6 → ['low','medium','high']
-# Keyed by the hyphenated, dot-normalized id so both "4.8" and "4-8" match.
+# Offline fallback for Copilot's reasoning-effort allow-list, consulted ONLY
+# when the live catalog is genuinely unreachable (no resolvable token AND the
+# network is down). The live catalog (capabilities.supports.reasoning_effort)
+# is authoritative and is now reliably fetched via an auto-resolved token, so
+# this path is rarely hit. Values verified live 2026-06-07 against
+# api.githubcopilot.com (account e126380_magh) — opus-4.7/4.8 accept the full
+# range up to 'max', opus-4.6 / sonnet-4.6 accept up to 'max' (no 'xhigh').
+# Keep these in sync with reality so the offline path never UNDER-reports and
+# wrongly clamps (the previous ['medium']-only opus snapshot caused exactly
+# that regression). Keyed by the hyphenated, dot-normalized id.
 _COPILOT_EFFORT_FALLBACK = {
-    "claude-opus-4-8": ["medium"],
-    "claude-opus-4-7": ["medium"],
-    "claude-opus-4-6": ["low", "medium", "high"],
-    "claude-sonnet-4-6": ["low", "medium", "high"],
+    "claude-opus-4-8": ["low", "medium", "high", "xhigh", "max"],
+    "claude-opus-4-7": ["low", "medium", "high", "xhigh", "max"],
+    "claude-opus-4-6": ["low", "medium", "high", "max"],
+    "claude-sonnet-4-6": ["low", "medium", "high", "max"],
 }
 
 

@@ -123,16 +123,22 @@ def test_copilot_anthropic_uses_bearer_not_apikey():
 def test_copilot_anthropic_identity_headers_present():
     low = _built_copilot_headers()
     assert low.get("editor-version", "").startswith("vscode/")
-    assert low.get("copilot-integration-id") == "vscode-chat"
+    # Integration-id is now copilot-cli (the official @github/copilot CLI's id),
+    # which exposes the full catalog incl gemini-3.x and the account's true
+    # per-model limits. The legacy vscode-chat value hid gemini-3.x.
+    assert low.get("copilot-integration-id") == "copilot-cli"
     assert low.get("x-github-api-version")          # date-versioned, e.g. 2026-06-01
     assert low.get("user-agent") == "rest-book"
     assert low.get("x-initiator") == "agent"
 
 
-def test_copilot_anthropic_1m_unlock_slug_present():
+def test_copilot_anthropic_no_inert_1m_slug():
     low = _built_copilot_headers()
-    # The slug is what lifts the 168k catalog clamp to the real 1M window.
-    assert low.get("x-copilot-agent-slug") == "copilot-1m-context"
+    # The old `X-Copilot-Agent-Slug: copilot-1m-context` was proven INERT
+    # (live probe 2026-06-07): it changed neither catalog visibility nor
+    # per-model limits. The real lever is Copilot-Integration-Id (copilot-cli),
+    # so the no-op slug must not be resent.
+    assert "x-copilot-agent-slug" not in low
 
 
 def test_copilot_anthropic_beta_triplet_present():

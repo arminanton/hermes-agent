@@ -2616,24 +2616,90 @@ def _sync_copilot_limit_freshness(snapshot: dict[str, Any]) -> None:
                 source_limits["freshness"] = dict(freshness)
 
 
+# ── Copilot catalog auth + caching ──────────────────────────────────────────
+# The /models catalog REQUIRES an Authorization token; without one the endpoint
+# returns 401 and capability lookups (reasoning effort, context, output) silently
+# fall back to stale hardcoded values (this was the root cause of "opus stuck at
+# medium"). Many internal call sites don't thread an api_key, so we auto-resolve
+# one here, memoized to bound `gh` subprocess calls. Raw catalog items are cached
+# per integration-id for an hour so repeated lookups don't re-hit the network.
+_copilot_catalog_items_cache: dict[str, tuple[list[dict[str, Any]], float]] = {}
+_COPILOT_CATALOG_ITEMS_TTL = 3600
+_copilot_catalog_token_memo: Optional[tuple[Optional[str], float]] = None
+_COPILOT_CATALOG_TOKEN_TTL = 1800
+
+
+def _auto_resolve_copilot_token() -> Optional[str]:
+    """Best-effort resolve a Copilot API token for catalog fetches.
+
+    Memoizes the result (including ``None``) for ``_COPILOT_CATALOG_TOKEN_TTL``
+    so non-Copilot users don't repeatedly shell out to ``gh``. Never raises.
+
+    Skipped entirely under pytest: ``gh auth token`` reads its own credential
+    store (hosts.yml) which the hermetic test wrapper can't unset, so allowing
+    it would make capability lookups perform live network calls during unit
+    tests. Tests that exercise the catalog path mock it explicitly instead.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return None
+    global _copilot_catalog_token_memo
+    now = time.time()
+    if (
+        _copilot_catalog_token_memo is not None
+        and now - _copilot_catalog_token_memo[1] < _COPILOT_CATALOG_TOKEN_TTL
+    ):
+        return _copilot_catalog_token_memo[0]
+    token: Optional[str] = None
+    try:
+        from hermes_cli.copilot_auth import (
+            resolve_copilot_token,
+            get_copilot_api_token,
+        )
+
+        raw, _source = resolve_copilot_token()
+        token = get_copilot_api_token(raw) or None
+    except Exception as exc:
+        logger.debug("Copilot catalog token auto-resolve failed: %s", exc)
+        token = None
+    _copilot_catalog_token_memo = (token, now)
+    return token
+
+
 def _fetch_github_model_catalog_items(
     api_key: Optional[str] = None, timeout: float = 5.0
 ) -> Optional[list[dict[str, Any]]]:
+    from hermes_cli.copilot_auth import _copilot_integration_id
+
+    # Skip the in-process cache under pytest: module state persists across tests
+    # in the same file (subprocess isolation is per-file), so a cached catalog
+    # would shadow a test's mocked urlopen response. Tests are hermetic and fast
+    # without it; production keeps the 1h cache to avoid repeated network hits.
+    _use_cache = not os.environ.get("PYTEST_CURRENT_TEST")
+    cache_key = _copilot_integration_id()
+    if _use_cache:
+        cached = _copilot_catalog_items_cache.get(cache_key)
+        if cached and time.time() - cached[1] < _COPILOT_CATALOG_ITEMS_TTL:
+            return cached[0]
+
     attempts: list[dict[str, str]] = []
-    # Try request without slug first to get the full catalog
-    attempts.append(copilot_default_headers(model="catalog"))
     if api_key:
         attempts.append({
             **copilot_default_headers(model="catalog"),
             "Authorization": f"Bearer {api_key}",
         })
+    # Last-resort unauthenticated attempt (works only if auth is injected by a
+    # surrounding context, e.g. a proxy). Kept for backward compatibility.
+    attempts.append(copilot_default_headers(model="catalog"))
 
     for headers in attempts:
         req = urllib.request.Request(COPILOT_MODELS_URL, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode())
-                return _payload_items(data)
+                items = _payload_items(data)
+                if items and _use_cache:
+                    _copilot_catalog_items_cache[cache_key] = (items, time.time())
+                return items
         except Exception:
             continue
     return None
@@ -2991,55 +3057,84 @@ _copilot_context_cache: dict[str, int] = {}
 _copilot_context_cache_time: float = 0.0
 _COPILOT_CONTEXT_CACHE_TTL = 3600  # 1 hour
 
+# Verified max INPUT-token budget for Copilot preview models that the live
+# /models endpoint omits non-deterministically (gemini-3.x flicker across
+# load-balanced backends). Consulted ONLY as a supplement when the catalog
+# lookup misses — it never overrides a value the catalog actually returned.
+# Verified live 2026-06-07 (account e126380_magh): gemini-3.x enforce the
+# prompt cap at the full 1M context window (like Claude), output is separate.
+_COPILOT_CONTEXT_SUPPLEMENT: dict[str, int] = {
+    "gemini-3.1-pro-preview": 1_000_000,
+    "gemini-3.5-flash": 1_000_000,
+    "gemini-3-pro-preview": 1_000_000,
+}
+
+
+def _copilot_input_budget_from_limits(
+    model_id: str, limits: dict[str, Any]
+) -> Optional[int]:
+    """Pick the true usable INPUT-token budget for a Copilot model.
+
+    Verified live 2026-06-07 (account e126380_magh):
+      - Claude (/v1/messages) and Gemini (/chat/completions) enforce the prompt
+        cap at the FULL ``max_context_window_tokens``; output tokens are billed
+        separately (opus accepted a 998,564-token prompt AND 128k output in the
+        same request). Their catalog ``max_prompt_tokens`` UNDER-reports by the
+        output reservation (936k = 1M − 64k), so using it wastes ~64k of usable
+        context — hence we use the full window for these families.
+      - GPT / o-series / codex (/responses) treat the window as a COMBINED
+        input+output budget; the enforced INPUT cap is ``max_prompt_tokens``
+        (gpt-5.5 rejects ~924k input though its window is 1.05M). Using the
+        window would over-budget and 400 near the top, so we keep max_prompt.
+    """
+    window = limits.get("max_context_window_tokens")
+    prompt = limits.get("max_prompt_tokens")
+    mid = model_id.lower()
+    window_is_input_cap = mid.startswith("claude") or mid.startswith("gemini")
+    if window_is_input_cap and isinstance(window, int) and window > 0:
+        return window
+    if isinstance(prompt, int) and prompt > 0:
+        return prompt
+    if isinstance(window, int) and window > 0:
+        return window
+    return None
+
 
 def get_copilot_model_context(model_id: str, api_key: Optional[str] = None) -> Optional[int]:
-    """Look up max_prompt_tokens for a Copilot model from the live /models API.
+    """Return the usable INPUT-token budget for a Copilot model (live /models).
 
     Results are cached in-process for 1 hour to avoid repeated API calls.
     Returns the token limit or None if not found.
-    """
-    # Force proven empirical limits to trump the API's advertised limits.
-    # Copilot's /models endpoint reports 168k for Opus and 272k for GPT-5.5,
-    # but we proved via Master Probes that the proxy actually supports much
-    # higher limits when using 'rest-book' and correct endpoints.
-    overrides = {
-        "claude-opus-4.8": 1000000,
-        "claude-opus-4.7": 1000000,
-        "claude-opus-4.6": 1000000,
-        "claude-sonnet-4.8": 1000000,
-        "claude-sonnet-4.7": 1000000,
-        "claude-sonnet-4.6": 1000000,
-        "gpt-5.5": 1050000,
-        "gpt-5.4": 750000,
-        "gpt-5.4-mini": 400000,
-        "gpt-5-mini": 128000,
-        "gemini-3.1-pro-preview": 1048576,
-        "gemini-3.5-flash": 1048576,
-        "gemini-2.5-pro": 1048576,
-    }
-    
-    # Try exact match first
-    if model_id in overrides:
-        return overrides[model_id]
-        
-    # Try family-level substring match
-    for k, v in overrides.items():
-        if k in model_id.lower().replace(".", "-"):
-            return v
 
+    Catalog-driven (matching the upstream v0.16.0 design); a previous hardcoded
+    override layer here was stale and partly WRONG once the catalog/token path
+    was fixed (it forced gemini-2.5-pro to 1,048,576 when the real Copilot cap
+    is 128,000, and gpt-5.4 to 750,000 when max_prompt is 922,000), so it was
+    removed. The per-model field selection lives in
+    ``_copilot_input_budget_from_limits``: Claude/Gemini use the full
+    ``max_context_window_tokens`` (their enforced prompt cap; catalog
+    max_prompt UNDER-reports by the output reservation — opus is really 1M, not
+    936k), while GPT/codex use ``max_prompt_tokens`` (their window is a combined
+    input+output budget). Verified live 2026-06-07. The only remaining
+    hardcoded layer is _COPILOT_CONTEXT_SUPPLEMENT, a catalog-miss fallback for
+    the preview models the endpoint flakily omits.
+    """
     global _copilot_context_cache, _copilot_context_cache_time
 
     # Serve from cache if fresh
     if _copilot_context_cache and (time.time() - _copilot_context_cache_time < _COPILOT_CONTEXT_CACHE_TTL):
         if model_id in _copilot_context_cache:
             return _copilot_context_cache[model_id]
-        # Cache is fresh but model not in it — don't re-fetch
-        return None
+        # Cache is fresh but model not in it — the catalog may have flakily
+        # omitted a preview model; consult the supplement before giving up.
+        return _COPILOT_CONTEXT_SUPPLEMENT.get(model_id)
 
     # Fetch and populate cache
+    if not api_key:
+        api_key = _auto_resolve_copilot_token()
     catalog = fetch_github_model_catalog(api_key=api_key)
     if not catalog:
-        return None
+        return _COPILOT_CONTEXT_SUPPLEMENT.get(model_id)
 
     cache: dict[str, int] = {}
     for item in catalog:
@@ -3048,14 +3143,19 @@ def get_copilot_model_context(model_id: str, api_key: Optional[str] = None) -> O
             continue
         caps = item.get("capabilities") or {}
         limits = caps.get("limits") or {}
-        max_prompt = limits.get("max_prompt_tokens")
-        if isinstance(max_prompt, int) and max_prompt > 0:
-            cache[mid] = max_prompt
+        budget = _copilot_input_budget_from_limits(mid, limits)
+        if isinstance(budget, int) and budget > 0:
+            cache[mid] = budget
 
     _copilot_context_cache = cache
     _copilot_context_cache_time = time.time()
 
-    return cache.get(model_id)
+    # The Copilot /models endpoint is non-deterministic for preview models:
+    # gemini-3.x flicker in and out across load-balanced backends, so a given
+    # fetch may omit them even though inference works fine. Supplement (NOT
+    # override) with verified max_prompt values so a flaky omission doesn't
+    # break context budgeting. Verified live 2026-06-07 (account e126380_magh).
+    return cache.get(model_id) or _COPILOT_CONTEXT_SUPPLEMENT.get(model_id)
 
 
 def _is_github_models_base_url(base_url: Optional[str]) -> bool:
@@ -3592,8 +3692,15 @@ def github_model_reasoning_efforts(
     catalog_entry = None
     if catalog is not None:
         catalog_entry = next((item for item in catalog if item.get("id") == normalized), None)
-    elif api_key:
-        fetched_catalog = fetch_github_model_catalog(api_key=api_key)
+    else:
+        # api_key may be None here — auto-resolve a Copilot token so this works
+        # on call paths that don't thread one (the common case, and the root
+        # cause of Claude effort being stuck at the offline fallback). Callers
+        # are all Copilot/GitHub-Models gated, so this never fires for other
+        # providers. Skipped under pytest (see _auto_resolve_copilot_token).
+        fetched_catalog = fetch_github_model_catalog(
+            api_key=api_key or _auto_resolve_copilot_token()
+        )
         if fetched_catalog:
             catalog_entry = next((item for item in fetched_catalog if item.get("id") == normalized), None)
 

@@ -879,6 +879,30 @@ def save_context_length(model: str, base_url: str, length: int) -> None:
         logger.debug("Failed to save context length cache: %s", e)
 
 
+
+def invalidate_cached_context_length(model: str, base_url: str) -> None:
+    """Drop a single cached entry from context_length_cache.yaml.
+
+    Best-effort: silently skip if the cache file is missing or corrupt.
+    Used by Codex OAuth resolver to clear stale entries cached as the
+    vendor-total window before the 272k Codex cap was understood.
+    """
+    cache_path = _get_context_cache_path()
+    if not cache_path or not cache_path.exists():
+        return
+    try:
+        import yaml as _yaml_invalidate
+        data = _yaml_invalidate.safe_load(cache_path.read_text()) or {}
+        cache_dict = data.get("context_lengths") or {}
+        key = f"{model}@{base_url}"
+        if key in cache_dict:
+            del cache_dict[key]
+            data["context_lengths"] = cache_dict
+            cache_path.write_text(_yaml_invalidate.safe_dump(data, default_flow_style=False))
+    except Exception:
+        pass
+
+
 def get_cached_context_length(model: str, base_url: str) -> Optional[int]:
     """Look up a previously discovered context length for model+provider."""
     key = f"{model}@{base_url}"
@@ -1326,21 +1350,46 @@ def _query_anthropic_context_length(model: str, base_url: str, api_key: str) -> 
 # Used as a fallback when the live probe fails (no token, network error).
 # Longest keys first so substring match picks the most specific entry.
 _CODEX_OAUTH_CONTEXT_FALLBACK: Dict[str, int] = {
+    # Per probe-verified invariant: chatgpt.com/backend-api/codex enforces a
+    # 272K cap for every gpt-5.x slug regardless of the model's vendor-side
+    # window. The exception is gpt-5.3-codex-spark (ChatGPT Pro low-latency
+    # hardware) which is 128k.
+    #
+    # Longest-key-first ordering matters for the substring-match fallback
+    # below — list more-specific slugs before generic ones.
     "gpt-5.1-codex-max": 272_000,
     "gpt-5.1-codex-mini": 272_000,
-    "gpt-5.3-codex": 128_000,
     # Spark runs on specialised low-latency hardware and exposes a smaller
-    # 128k window than other Codex OAuth slugs. Listed explicitly so the
-    # longest-key-first fallback resolves it correctly — substring match
-    # on "gpt-5.3-codex" otherwise wins and reports 272k. Availability is
-    # gated by ChatGPT Pro entitlement on the Codex backend.
+    # 128k window than other Codex OAuth slugs. Listed BEFORE gpt-5.3-codex
+    # so the longest-key-first fallback resolves it correctly — substring
+    # match on "gpt-5.3-codex" otherwise wins and reports 272k. Availability
+    # is gated by ChatGPT Pro entitlement on the Codex backend.
     "gpt-5.3-codex-spark": 128_000,
+    "gpt-5.3-codex": 272_000,
     "gpt-5.2-codex": 272_000,
-    "gpt-5.4-mini": 400_000,
-    "gpt-5.5": 900_000,
-    "gpt-5.4": 750_000,
+    "gpt-5.4-mini": 272_000,
+    "gpt-5.4": 272_000,
+    "gpt-5.5": 272_000,
     "gpt-5.2": 272_000,
     "gpt-5": 272_000,
+}
+
+
+# Empirically-verified Codex backend caps that the /models endpoint
+# UNDER-reports. The codex /models `context_window` is the DEFAULT
+# input-budget-after-output-reservation, NOT the hard cap. Verified live
+# 2026-06-08 against chatgpt.com/backend-api/codex with a fresh ChatGPT Pro
+# token (account 94125662): gpt-5.4 actually accepts ~900K input (891,509 →
+# OK, ~957K → context_length_exceeded) even though /models advertises 272K.
+# gpt-5.4-mini and gpt-5.5 ARE genuinely ~272K input (gpt-5.5's documented
+# 400K total minus a fixed 128K output reservation; no API lever — model
+# variant, max_output_tokens, reasoning effort, headers — raises it). So we
+# override ONLY the slugs the endpoint demonstrably under-reports, BEFORE the
+# live probe; everything else defers to the live probe / 272K fallback.
+# Longest-key-first so "gpt-5.4-mini" resolves to 272K, not the gpt-5.4 900K.
+_CODEX_OAUTH_CONTEXT_EMPIRICAL: Dict[str, int] = {
+    "gpt-5.4-mini": 272_000,
+    "gpt-5.4": 900_000,
 }
 
 
@@ -1402,6 +1451,23 @@ def _fetch_codex_oauth_context_lengths(access_token: str) -> Dict[str, int]:
     return result
 
 
+def _codex_empirical_override(model: str) -> Optional[int]:
+    """Return the empirically-verified Codex context for *model*, or None.
+
+    Longest-key-first so the more-specific slug wins (gpt-5.4-mini → 272K,
+    not gpt-5.4's 900K). See ``_CODEX_OAUTH_CONTEXT_EMPIRICAL``.
+    """
+    norm = _strip_provider_prefix(model).strip().lower()
+    if not norm:
+        return None
+    for slug, ctx in sorted(
+        _CODEX_OAUTH_CONTEXT_EMPIRICAL.items(), key=lambda x: len(x[0]), reverse=True
+    ):
+        if slug in norm:
+            return ctx
+    return None
+
+
 def _resolve_codex_oauth_context_length(
     model: str, access_token: str = ""
 ) -> Optional[int]:
@@ -1414,24 +1480,18 @@ def _resolve_codex_oauth_context_length(
     if not model_bare:
         return None
 
-    # Empirical overrides from Master Probes that trump API limitations.
-    # The Codex OAuth /models endpoint advertises a LOWER cap (272K) than the
-    # backend actually accepts — the Master Probe bisection proved the same
-    # high ceilings as the Copilot path. Keep these authoritative; do NOT fall
-    # back to the codex /models probe, which under-reports.
-    overrides = {
-        "gpt-5.5": 1050000,
-        "gpt-5.4": 750000,
-        "gpt-5.4-mini": 400000,
-        "gpt-5-mini": 128000,
-        "gpt-5.3-codex": 128000,
-    }
-    model_lower = model_bare.lower()
-    if model_lower in overrides:
-        return overrides[model_lower]
-    for k, v in overrides.items():
-        if k in model_lower:
-            return v
+    # Empirical override BEFORE the live probe: the Codex /models endpoint
+    # under-reports some slugs (notably gpt-5.4, which is ~900K not 272K).
+    _empirical = _codex_empirical_override(model_bare)
+    if _empirical is not None:
+        return _empirical
+
+    # The Codex OAuth /models endpoint advertises a 272K default for most
+    # gpt-5.x slugs (except gpt-5.3-codex-spark = 128k). For the models NOT in
+    # the empirical-override table above, that value is correct — gpt-5.5 in
+    # particular is genuinely capped at 272K input on Codex (OpenAI's
+    # server-side regression; verified unmovable). Live probe first (when token
+    # available), then the hardcoded _CODEX_OAUTH_CONTEXT_FALLBACK table.
 
     if access_token:
         live = _fetch_codex_oauth_context_lengths(access_token)
@@ -1611,12 +1671,33 @@ def get_model_context_length(
                 or _infer_provider_from_url(base_url) == "copilot"
             )
             if provider == "openai-codex":
-                logger.debug(
-                    "Bypassing persistent cache for %s@%s "
-                    "(Codex OAuth step-5 resolver authoritative)",
-                    model, base_url,
-                )
-                # Fall through; step 5c reconciles via the empirical override.
+                # Step-5 Codex resolver (_resolve_codex_oauth_context_length) is
+                # authoritative. Re-resolve (bypass the cached value) when:
+                #   * cached >= 400k — a pre-fix build leaked the vendor-total
+                #     window (e.g. gpt-5.5 cached as 1.05M); Codex is lower.
+                #   * the cached value disagrees with an empirical override —
+                #     e.g. gpt-5.4 cached at the under-reported 272K but the
+                #     backend really accepts ~900K (verified live 2026-06-08).
+                # Otherwise the fresh < 400k value (e.g. gpt-5.5 = 272K) is
+                # trusted and returned without a re-probe.
+                _emp = _codex_empirical_override(model)
+                if cached >= 400_000 or (_emp is not None and cached != _emp):
+                    logger.info(
+                        "Invalidating stale Codex cache entry %s@%s = %s "
+                        "(re-resolving via step 5c; empirical=%s).",
+                        model, base_url, cached, _emp,
+                    )
+                    try:
+                        invalidate_cached_context_length(model, base_url)
+                    except Exception:
+                        pass
+                    # Fall through to step 5c.
+                else:
+                    logger.debug(
+                        "Respecting fresh Codex cache entry %s@%s = %s",
+                        model, base_url, cached,
+                    )
+                    return cached
             elif _is_copilot_prov:
                 logger.debug(
                     "Bypassing persistent cache for %s@%s "

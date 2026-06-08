@@ -455,6 +455,22 @@ _COPILOT_API_VERSION_FALLBACK = "2026-06-01"
 _COPILOT_API_VERSION_CACHE_PATH = (
     Path.home() / ".cache" / "hermes" / "copilot_api_version.json"
 )
+
+# Copilot-Integration-Id sent on Copilot API inference calls. The official
+# @github/copilot CLI uses "copilot-cli"; verified live (2026-06-07, account
+# e126380_magh) this integrator exposes the FULL model catalog — including
+# gemini-3.1-pro-preview / gemini-3.5-flash at 1M context — and the account's
+# true per-model limits and reasoning-effort range (opus low..max). The legacy
+# "vscode-chat" value hides gemini-3.x from the catalog and is not what a CLI
+# agent should present as. Override via HERMES_COPILOT_INTEGRATION_ID when a
+# different integrator is required (e.g. copilot-developer-cli, vscode-chat).
+_COPILOT_INTEGRATION_ID_DEFAULT = "copilot-cli"
+
+
+def _copilot_integration_id() -> str:
+    """Return the Copilot-Integration-Id to send (env-overridable)."""
+    override = os.getenv("HERMES_COPILOT_INTEGRATION_ID", "").strip()
+    return override or _COPILOT_INTEGRATION_ID_DEFAULT
 # Candidate paths for the @github/copilot CLI bundle (global npm install).
 _COPILOT_CLI_BUNDLE_CANDIDATES = (
     "/usr/local/lib/node_modules/@github/copilot/sdk/index.js",
@@ -845,7 +861,7 @@ def copilot_request_headers(
         "Editor-Version": f"vscode/{_latest_vscode_version()}",
         "Editor-Plugin-Version": f"copilot-chat/{chat_ver}",
         "User-Agent": "rest-book",
-        "Copilot-Integration-Id": "vscode-chat",
+        "Copilot-Integration-Id": _copilot_integration_id(),
         "Openai-Intent": intent,
         # Mirror of Openai-Intent (extension sends both unless overridden).
         "X-Interaction-Type": intent,
@@ -858,14 +874,15 @@ def copilot_request_headers(
         "X-Interaction-Id": interaction_id or str(_uuid.uuid4()),
     }
 
-    # Inject the 1M context slug for all model inferences. This is required
-    # not just for 1M context, but because the backend maps this slug to the
-    # 'copilot-developer-app' integrator. Without it, the token defaults to
-    # 'copilot-4-cli', which rejects newer models like Gemini 3.1.
-    # We only exclude the slug when accessing the catalog ('catalog' model slug)
-    # because the catalog endpoint filters out models when the slug is present.
-    if model and model.lower() != "catalog":
-        headers["X-Copilot-Agent-Slug"] = "copilot-1m-context"
+    # NOTE: hermes previously injected `X-Copilot-Agent-Slug: copilot-1m-context`
+    # here, believing it mapped the token to the developer-app integrator and
+    # unlocked 1M context / Gemini-3.x. Live probing (2026-06-07) proved that
+    # slug is INERT — it changes neither catalog visibility nor per-model limits.
+    # What actually exposes gemini-3.x and the full limits is the
+    # Copilot-Integration-Id (now `copilot-cli`, matching the official CLI). The
+    # slug was removed to avoid sending a misleading no-op header. The official
+    # @github/copilot CLI sends `copilot-developer-sandbox` only on specific
+    # (non-inference) endpoints; we don't need it for chat/messages/responses.
 
     if is_vision:
         headers["Copilot-Vision-Request"] = "true"

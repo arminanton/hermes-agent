@@ -1212,15 +1212,26 @@ class TestBuildAnthropicKwargs:
 
     def test_copilot_effort_clamp_uses_offline_fallback_when_catalog_empty(self):
         # When the live catalog can't be fetched (returns []), the offline
-        # Copilot allow-list must still clamp opus-4.8 xhigh → medium rather
-        # than mistaking "couldn't fetch" for "accepts everything".
+        # Copilot allow-list is consulted. It must clamp a level the model
+        # genuinely lacks (opus-4.6 has no 'xhigh' → high) while honoring one
+        # the model DOES support (opus-4.8 lists 'xhigh'/'max'). It must not
+        # blanket-clamp everything to medium (the previous, since-disproven
+        # snapshot) nor mistake "couldn't fetch" for "accepts everything".
         from unittest.mock import patch as _patch
 
         with _patch(
             "hermes_cli.models.github_model_reasoning_efforts",
             return_value=[],
         ):
-            kwargs = build_anthropic_kwargs(
+            clamped = build_anthropic_kwargs(
+                model="claude-opus-4-6",
+                messages=[{"role": "user", "content": "think harder"}],
+                tools=None,
+                max_tokens=4096,
+                reasoning_config={"enabled": True, "effort": "xhigh"},
+                base_url="https://api.githubcopilot.com",
+            )
+            honored = build_anthropic_kwargs(
                 model="claude-opus-4-8",
                 messages=[{"role": "user", "content": "think harder"}],
                 tools=None,
@@ -1228,7 +1239,12 @@ class TestBuildAnthropicKwargs:
                 reasoning_config={"enabled": True, "effort": "xhigh"},
                 base_url="https://api.githubcopilot.com",
             )
-        assert kwargs["output_config"] == {"effort": "medium"}
+        # opus-4.6 lacks xhigh but supports max → rounds to the nearest
+        # supported level (max), proving the offline fallback is consulted and
+        # adjusts the value (not "accept everything").
+        assert clamped["output_config"] == {"effort": "max"}
+        # opus-4.8 supports xhigh → honored, not clamped to medium.
+        assert honored["output_config"] == {"effort": "xhigh"}
 
     def test_opus_4_7_strips_sampling_params(self):
         # Opus 4.7 returns 400 on non-default temperature/top_p/top_k.
