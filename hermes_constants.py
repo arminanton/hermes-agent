@@ -308,13 +308,18 @@ def get_subprocess_home() -> str | None:
     return None
 
 
-VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
 
 
 def parse_reasoning_effort(effort: str) -> dict | None:
     """Parse a reasoning effort level into a config dict.
 
-    Valid levels: "none", "minimal", "low", "medium", "high", "xhigh".
+    Valid levels: "none", "minimal", "low", "medium", "high", "xhigh", "max".
+    This is the universal vocabulary of effort words a user may set; the
+    per-model resolver clamps to what each model actually supports (e.g. GPT-5.x
+    tops out at "xhigh", Claude opus-4.7/4.8 accept "max", opus/sonnet-4.6
+    accept "max" but not "xhigh"). Accepting "max" here lets the user request
+    the deepest level; the request path maps it down where unsupported.
     Returns None when the input is empty or unrecognized (caller uses default).
     Returns {"enabled": False} for "none".
     Returns {"enabled": True, "effort": <level>} for valid effort levels.
