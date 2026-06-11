@@ -205,6 +205,26 @@ def _is_copilot_base_url(base_url: Optional[str]) -> bool:
     return host == "api.githubcopilot.com"
 
 
+def _request_messages_have_image_parts(messages: Any) -> bool:
+    """Return True when any message carries image content.
+
+    Matches both OpenAI-style parts (``image_url`` / ``input_image``) — the
+    shape ``build_anthropic_kwargs`` receives before ``convert_messages_to_anthropic``
+    runs — and already-converted Anthropic blocks (``{"type": "image"}``), so the
+    check is robust regardless of where it is called in the pipeline.
+    """
+    def _contains_image(value: Any) -> bool:
+        if isinstance(value, dict):
+            if value.get("type") in {"image_url", "input_image", "image"}:
+                return True
+            return any(_contains_image(v) for v in value.values())
+        if isinstance(value, list):
+            return any(_contains_image(v) for v in value)
+        return False
+
+    return isinstance(messages, list) and any(_contains_image(m) for m in messages)
+
+
 def _lookup_copilot_output_from_catalog(model: str) -> Optional[int]:
     """Return the TRUE enforced max output tokens for a Copilot Claude model.
 
@@ -2841,5 +2861,15 @@ def build_anthropic_kwargs(
             betas.extend(_OAUTH_ONLY_BETAS)
         betas.append(_FAST_MODE_BETA)
         kwargs["extra_headers"] = {"anthropic-beta": ",".join(betas)}
+
+    # Copilot's /v1/messages proxy only processes image input when the
+    # Copilot-Vision-Request header is set. The persistent Anthropic client is
+    # built with is_vision=False (no such header), so image-bearing turns to
+    # Copilot otherwise return an empty content block (HTTP 200) that the loop
+    # fails as "invalid response". Add it per-request only when an image is
+    # present, gated to the Copilot endpoint so it never leaks to
+    # api.anthropic.com or Bedrock-hosted Anthropic.
+    if _is_copilot_base_url(base_url) and _request_messages_have_image_parts(messages):
+        kwargs.setdefault("extra_headers", {})["Copilot-Vision-Request"] = "true"
 
     return kwargs

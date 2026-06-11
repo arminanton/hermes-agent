@@ -3342,7 +3342,7 @@ class AIAgent:
         def _contains_image(value: Any) -> bool:
             if isinstance(value, dict):
                 ptype = value.get("type")
-                if ptype in {"image_url", "input_image"}:
+                if ptype in {"image_url", "input_image", "image"}:
                     return True
                 return any(_contains_image(v) for v in value.values())
             if isinstance(value, list):

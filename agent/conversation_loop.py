@@ -808,7 +808,23 @@ def run_conversation(
     if agent._memory_manager:
         try:
             _query = original_user_message if isinstance(original_user_message, str) else ""
-            _ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""
+            # Cap query length before memory recall (embedding/hybrid search).
+            # Hosts like gsd's hermes-cli ACP bridge pack their whole system
+            # prompt + tool catalogue into the prompt text, arriving here as a
+            # 50-100KB "user message". Embedding that blob stalls the aux backend
+            # and the signal is boilerplate, not intent. Bound it; 0 disables.
+            _PREFETCH_QUERY_MAX_CHARS = int(
+                os.environ.get("HERMES_PREFETCH_QUERY_MAX_CHARS", "1500")
+            )
+            if len(_query) > _PREFETCH_QUERY_MAX_CHARS:
+                logger.info(
+                    "Memory prefetch query truncated: %d -> %d chars "
+                    "(set HERMES_PREFETCH_QUERY_MAX_CHARS to override; 0 disables)",
+                    len(_query), _PREFETCH_QUERY_MAX_CHARS,
+                )
+                _query = _query[:_PREFETCH_QUERY_MAX_CHARS] if _PREFETCH_QUERY_MAX_CHARS > 0 else ""
+            if _query:
+                _ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""
         except Exception:
             pass
 
@@ -826,6 +842,58 @@ def run_conversation(
             should_review_memory=_should_review_memory,
         )
 
+    # Autopilot: reset per-turn goal-chasing state (continuation count and
+    # no-progress tracking) once at the start of each user turn, before the loop.
+    try:
+        from agent import autopilot as _autopilot_mod
+        _autopilot_mod.reset_turn_state(agent)
+    except Exception:  # noqa: BLE001 — autopilot must never block a normal turn
+        pass
+
+    def _autopilot_reenter(_final, _kind):
+        """Belt-and-suspenders re-entry for abnormal loop exits that bypass
+        Seam B (the no-tool-calls autopilot gate at the bottom of this loop).
+
+        Empty-response and partial-stream / prior-turn-content recovery all
+        ``break`` out of the no-tool-calls branch BEFORE Seam B runs, so a
+        transient bad turn would silently end an autopilot run mid-goal. This
+        re-uses the SAME gate (``reenter_after_abnormal_exit`` -> the Council
+        judge, with the no-progress + user-cap safeties) and, when it says keep
+        going, injects the synthetic directive and returns True so the caller
+        can ``continue`` instead of breaking. Returns False (deliver/stop as
+        before) when autopilot is inactive, interrupted, the goal is verifiably
+        complete, or anything errors.
+        """
+        nonlocal _turn_exit_reason
+        try:
+            from agent import autopilot as _ap
+            directive = _ap.reenter_after_abnormal_exit(
+                agent, messages, _final, original_user_message,
+                exit_kind=_kind, interrupted=interrupted,
+            )
+        except Exception as _exc:  # noqa: BLE001
+            logger.debug("autopilot reenter guard failed (%s): %s", _kind, _exc)
+            return False
+        if not directive:
+            return False
+        # Preserve a valid role sequence. The directive is a USER turn, so the
+        # transcript must not already end on a user turn (or a bare tool result),
+        # otherwise downstream message-sequence repair collapses the pair and the
+        # directive is lost. Record whatever the model produced this turn (real
+        # recovered text, or the "(empty)" sentinel) as the preceding assistant
+        # turn when one isn't already present.
+        _last = messages[-1] if messages else None
+        if not (isinstance(_last, dict) and _last.get("role") == "assistant"):
+            messages.append({"role": "assistant", "content": _final or "(empty)"})
+        messages.append({
+            "role": "user",
+            "content": directive,
+            "_autopilot_synthetic": True,
+        })
+        agent._session_messages = messages
+        _turn_exit_reason = f"autopilot_continue({_kind})"
+        return True
+
     while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
         # Reset per-turn checkpoint dedup so each iteration can take one snapshot
         agent._checkpoint_mgr.new_turn()
@@ -837,7 +905,19 @@ def run_conversation(
             if not agent.quiet_mode:
                 agent._safe_print("\n⚡ Breaking out of tool loop due to interrupt...")
             break
-        
+
+        # Autopilot: keep the iteration budget ahead of usage so a long
+        # goal-chasing run is never silently terminated by budget exhaustion
+        # (which exits the loop BEFORE the no-tool-calls branch where the
+        # autopilot continuation gate lives). The goal gate / no-progress
+        # detector / optional user cap remain the real terminators. No-op when
+        # autopilot is inactive.
+        try:
+            from agent import autopilot as _autopilot_mod
+            _autopilot_mod.keep_budget_ahead(agent)
+        except Exception:  # noqa: BLE001
+            pass
+
         api_call_count += 1
         agent._api_call_count = api_call_count
         agent._touch_activity(f"starting API call #{api_call_count}")
@@ -1441,7 +1521,39 @@ def run_conversation(
                         if response is None:
                             error_details.append("response is None")
                         else:
-                            error_details.append("response.content invalid (not a non-empty list)")
+                            # Surface WHY the content was rejected. stop_reason +
+                            # the block types present distinguish an image reject
+                            # (empty content), a refusal, a thinking-only turn,
+                            # and a truncated stream — previously invisible, which
+                            # made empty-response failures undiagnosable from logs.
+                            _stop_reason = getattr(response, "stop_reason", None)
+                            _content = getattr(response, "content", None)
+                            _block_types = (
+                                [getattr(b, "type", None) for b in _content]
+                                if isinstance(_content, list) else None
+                            )
+                            _has_image_req = agent._api_kwargs_have_image_parts(api_kwargs or {})
+                            error_details.append(
+                                "response.content invalid (not a non-empty list); "
+                                f"stop_reason={_stop_reason}, blocks={_block_types}, "
+                                f"image_request={_has_image_req}"
+                            )
+                            logger.warning(
+                                "%sAnthropic invalid response: stop_reason=%s blocks=%s "
+                                "image_request=%s model=%s id=%s",
+                                agent.log_prefix, _stop_reason, _block_types,
+                                _has_image_req, getattr(response, "model", None),
+                                getattr(response, "id", None),
+                            )
+                            if agent.verbose_logging:
+                                try:
+                                    logger.debug(
+                                        "%sAnthropic invalid response raw: %s",
+                                        agent.log_prefix,
+                                        str(response.model_dump())[:2000],
+                                    )
+                                except Exception:
+                                    pass
                 elif agent.api_mode == "bedrock_converse":
                     _btv = agent._get_transport()
                     if not _btv.validate_response(response):
@@ -1486,7 +1598,48 @@ def run_conversation(
                         thinking_spinner = None
                     if agent.thinking_callback:
                         agent.thinking_callback("")
-                    
+
+                    # A refusal (Anthropic stop_reason="refusal") is the model
+                    # declining on policy grounds, returned as an empty content
+                    # block. It is DETERMINISTIC — retrying the identical request
+                    # just yields the same refusal — so don't burn the 3-retry
+                    # budget and emit the misleading "Invalid API response after
+                    # N retries" error. Try a fallback model once (a different
+                    # backend may not refuse); if none is available, surface the
+                    # refusal clearly so the user knows what actually happened.
+                    _is_refusal = (
+                        agent.api_mode == "anthropic_messages"
+                        and getattr(response, "stop_reason", None) == "refusal"
+                    )
+                    if _is_refusal:
+                        logger.warning(
+                            "%sModel refused (stop_reason=refusal) — not retrying; "
+                            "trying fallback if available.", agent.log_prefix,
+                        )
+                        if agent._try_activate_fallback():
+                            retry_count = 0
+                            compression_attempts = 0
+                            primary_recovery_attempted = False
+                            continue
+                        _refusal_msg = (
+                            "⚠️ The model declined to respond to this request "
+                            "(safety refusal). This usually means the request "
+                            "tripped a content policy — try rephrasing, narrowing "
+                            "the scope, or switching models."
+                        )
+                        agent._flush_status_buffer()
+                        agent._emit_status(_refusal_msg)
+                        agent._persist_session(messages, conversation_history)
+                        return {
+                            "final_response": _refusal_msg,
+                            "messages": messages,
+                            "completed": False,
+                            "api_calls": api_call_count,
+                            "error": "Model refused the request (stop_reason=refusal)",
+                            "refused": True,
+                            "failed": True,
+                        }
+
                     # Invalid response — could be rate limiting, provider timeout,
                     # upstream server error, or malformed response.
                     retry_count += 1
@@ -3718,6 +3871,27 @@ def run_conversation(
                 else:
                     assistant_message.content = str(raw)
 
+            # H2 (Option A): post-response grounding enforcement. No-op unless the
+            # active context engine advertises ``enforce_response`` — so the built-in
+            # ContextCompressor and LCM are entirely unaffected. cmx audits the final
+            # answer against the verbatim record and, if it is ungrounded, replaces it
+            # with a refuse-to-guess message. Wrapped so enforcement can never break
+            # the turn.
+            try:
+                _eng = getattr(agent, "context_compressor", None)
+                _content = assistant_message.content
+                _has_tools = bool(getattr(assistant_message, "tool_calls", None))
+                _caps = getattr(_eng, "capabilities", None)
+                if (_eng is not None and not _has_tools
+                        and isinstance(_content, str) and _content.strip()
+                        and callable(_caps) and _caps().get("enforce_response")):
+                    _verdict = _eng.enforce_response(
+                        _content, messages, model=getattr(agent, "model", ""), final=True)
+                    if isinstance(_verdict, dict) and _verdict.get("action") == "replace":
+                        assistant_message.content = _verdict.get("text", _content)
+            except Exception:
+                pass  # enforcement must never break the turn
+
             try:
                 from hermes_cli.plugins import (
                     has_hook,
@@ -4248,6 +4422,8 @@ def run_conversation(
                         )
                         final_response = _recovered
                         agent._response_was_previewed = True
+                        if _autopilot_reenter(final_response, "partial_stream_recovery"):
+                            continue
                         break
 
                     # If the previous turn already delivered real content alongside
@@ -4274,6 +4450,8 @@ def run_conversation(
                         # fallback text as the final response and break.
                         final_response = agent._strip_think_blocks(fallback).strip()
                         agent._response_was_previewed = True
+                        if _autopilot_reenter(final_response, "fallback_prior_turn_content"):
+                            continue
                         break
 
                     # ── Post-tool-call empty response nudge ───────────
@@ -4481,6 +4659,8 @@ def run_conversation(
                         )
 
                     final_response = "(empty)"
+                    if _autopilot_reenter(final_response, "empty_response"):
+                        continue
                     break
                 
                 # Reset retry counter/signature on successful content
@@ -4543,7 +4723,31 @@ def run_conversation(
                     messages.pop()
 
                 messages.append(final_msg)
-                
+
+                # ── Autopilot: engine-enforced goal-chasing ──────────────
+                # Before delivering, ask the independent judge (Hermes Council)
+                # whether the GOAL is verifiably complete. If not, inject a
+                # synthetic directive and keep working instead of stopping.
+                # Termination is governed by the goal quality-gate, not a turn
+                # count. Fails open (delivers) on any error.
+                try:
+                    from agent import autopilot as _autopilot_mod
+                    if _autopilot_mod.is_autopilot_active(agent):
+                        _ap_directive = _autopilot_mod.maybe_continue(
+                            agent, messages, final_response, original_user_message
+                        )
+                        if _ap_directive:
+                            messages.append({
+                                "role": "user",
+                                "content": _ap_directive,
+                                "_autopilot_synthetic": True,
+                            })
+                            agent._session_messages = messages
+                            _turn_exit_reason = "autopilot_continue"
+                            continue
+                except Exception as _ap_exc:  # noqa: BLE001
+                    logger.debug("autopilot continuation check failed: %s", _ap_exc)
+
                 _turn_exit_reason = f"text_response(finish_reason={finish_reason})"
                 if not agent.quiet_mode:
                     agent._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")

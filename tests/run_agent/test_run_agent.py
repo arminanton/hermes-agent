@@ -3647,6 +3647,47 @@ class TestRunConversation:
         assert "No reply:" in result["final_response"]
         assert result["api_calls"] == 4  # 1 original + 3 retries
 
+    def test_anthropic_refusal_surfaces_without_retrying(self, agent):
+        """stop_reason=refusal is terminal: surface it clearly, do NOT retry 3x.
+
+        A refusal is deterministic — retrying the identical request yields the
+        same refusal — so the loop must short-circuit (try fallback once, then
+        surface) instead of burning the retry budget and emitting the cryptic
+        "Invalid API response after 3 retries" error.
+        """
+        self._setup_agent(agent)
+        agent.api_mode = "anthropic_messages"
+        agent.provider = "copilot"
+        agent.base_url = "https://api.githubcopilot.com"
+        agent._fallback_chain = []
+        agent._fallback_index = 0
+
+        calls = {"n": 0}
+        refusal = SimpleNamespace(
+            content=[], stop_reason="refusal", model="claude-opus-4.8",
+            id="msg_test_refusal", usage=None,
+        )
+
+        def _fake_api_call(api_kwargs, **_kw):
+            calls["n"] += 1
+            return refusal
+
+        agent._interruptible_api_call = _fake_api_call
+        agent._interruptible_streaming_api_call = _fake_api_call
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("read all macos skills and access requirements")
+
+        assert result.get("refused") is True
+        assert "refus" in result["error"].lower()
+        assert "declined" in result["final_response"].lower()
+        # Deterministic refusal must NOT burn the 3-retry budget.
+        assert calls["n"] == 1
+
     def test_truly_empty_response_succeeds_on_nudge(self, agent):
         """Model produces content after being nudged for empty response."""
         self._setup_agent(agent)
