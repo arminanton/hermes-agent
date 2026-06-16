@@ -624,3 +624,91 @@ def test_phase_b_agy_provider_plugin_loadable():
     assert "agy" in mod.agy_cli.aliases
     assert mod.agy_cli.api_mode == "agy_cli"
     assert mod.agy_cli.base_url == "agy://antigravity"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fable 5 (claude-fable-5) — Mythos-class GA, modeled on opus-4.8
+#
+# Source of truth: official @github/copilot 1.0.61 bundle, which defines
+# claude-fable-5 by spreading opus-4.8's base config (`{...qmt, ...}`) with
+# supportedReasoningEfforts:["low","medium","high","xhigh","max"]. These are
+# INVARIANT/contract tests (fable shares opus-4.8's wire behavior), not catalog
+# snapshots — they don't assert the live /models catalog contents.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_fable_routes_to_anthropic_messages_without_catalog(monkeypatch):
+    """claude-fable-5 must short-circuit to /v1/messages like every claude id,
+    even with a cold/empty catalog (the account may not be entitled yet)."""
+    from hermes_cli import models as hcm
+
+    monkeypatch.setattr(hcm, "fetch_github_model_catalog", lambda *a, **k: None)
+    assert hcm.copilot_model_api_mode("claude-fable-5", api_key="fake") == "anthropic_messages"
+
+
+def test_fable_is_canonical_slug_not_aliased():
+    """claude-fable-5 is the real GA slug; normalization must leave it intact
+    (unlike the `mythos` preview alias which maps to a working opus deployment)."""
+    from hermes_cli import models as hcm
+
+    assert hcm.normalize_copilot_model_id("claude-fable-5", catalog=None, api_key=None) == "claude-fable-5"
+
+
+def test_fable_shares_opus48_adapter_contract():
+    """Fable clones opus-4.8's config in the bundle, so the adapter must treat
+    it identically: adaptive-only thinking, xhigh accepted, no sampling params."""
+    from agent import anthropic_adapter as aa
+
+    m = "claude-fable-5"
+    assert aa._supports_adaptive_thinking(m) is True
+    assert aa._supports_xhigh_effort(m) is True
+    assert any(v in m for v in aa._NO_SAMPLING_PARAMS_SUBSTRINGS)
+
+
+def test_fable_output_ceiling_matches_opus_128k():
+    """Fable shares opus-4.8's 128k output ceiling (the Copilot catalog
+    under-reports it, like opus)."""
+    from agent import anthropic_adapter as aa
+
+    assert aa._lookup_copilot_output_from_catalog("claude-fable-5") == 128000
+
+
+def test_fable_offline_effort_fallback_is_full_range():
+    """Offline effort allow-list must match the bundle verbatim so the adapter
+    never clamps high/xhigh/max → medium when the catalog is unreachable."""
+    from agent import anthropic_adapter as aa
+
+    assert aa._copilot_effort_fallback("claude-fable-5") == [
+        "low", "medium", "high", "xhigh", "max",
+    ]
+
+
+def test_fable_effort_not_clamped_offline():
+    """With no catalog token, requesting max on fable must resolve to max
+    (the opus-stuck-at-medium regression must not recur for fable)."""
+    from agent import anthropic_adapter as aa
+
+    base = "https://api.githubcopilot.com"
+    for eff in ("high", "xhigh", "max"):
+        resolved, _reason = aa._resolve_copilot_effort_ceiling("claude-fable-5", eff, base)
+        assert resolved == eff
+
+
+def test_fable_context_fallback_models_opus_1m():
+    """Until the org enables Fable, the catalog omits it; the catalog-miss
+    fallback must model its window on opus-4.8 (1M)."""
+    from hermes_cli import models as hcm
+    from agent.model_metadata import DEFAULT_CONTEXT_LENGTHS
+
+    assert hcm._COPILOT_CONTEXT_SUPPLEMENT.get("claude-fable-5") == 1_000_000
+    assert DEFAULT_CONTEXT_LENGTHS.get("claude-fable-5") == 1_000_000
+
+
+def test_fable_in_copilot_picker_and_no_stale_mythos():
+    """Fable is the canonical pick; the stale preview-codename guesses
+    (claude-mythos-*) must be gone from the curated picker list."""
+    from hermes_cli import models as hcm
+
+    copilot = hcm._PROVIDER_MODELS["copilot"]
+    assert "claude-fable-5" in copilot
+    assert not any("mythos" in m for m in copilot)

@@ -318,7 +318,17 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # ── Volatile tier (changes per session/turn — never cached) ───
     volatile_parts: List[str] = []
 
-    if agent._memory_store:
+    # When the cmx context engine is active it OWNS memory injection: cmx ingests
+    # MEMORY.md/USER.md into its durable store and injects only the turn-relevant,
+    # budget-sized slices (retrieval-first), instead of this verbatim full-file dump
+    # that otherwise costs ~200K tokens EVERY turn (fatal for small-context models).
+    # The legacy store stays alive (memory WRITE tools + on-disk files unchanged) — we
+    # suppress only the verbatim read-dump; the content still reaches the model, via
+    # cmx retrieval + on-demand cmx_grep (nothing is dropped). No-op for any other
+    # engine, so non-cmx setups are unaffected.
+    _cmx_owns_memory = getattr(
+        getattr(agent, "context_compressor", None), "name", "") == "cmx"
+    if agent._memory_store and not _cmx_owns_memory:
         if agent._memory_enabled:
             mem_block = agent._memory_store.format_for_system_prompt("memory")
             if mem_block:

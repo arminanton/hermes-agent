@@ -154,7 +154,13 @@ DEFAULT_CONTEXT_LENGTHS = {
     "claude-sonnet-4.7": 1000000,
     "claude-sonnet-4-8": 1000000,
     "claude-sonnet-4.8": 1000000,
-    # claude-mythos*: no vendor docs.  Returning None (via the get_model_context_length
+    # claude-fable-5 (Mythos-class GA): modeled on opus-4.8 (1M) since the
+    # official 1.0.61 bundle clones opus-4.8's config for it. This is a fallback
+    # for catalog misses / non-Copilot surfaces; the live Copilot catalog
+    # (max_context_window_tokens) overrides it once the org enables Fable.
+    "claude-fable-5": 1000000,
+    # claude-mythos* (the pre-GA preview codename): no vendor docs.  Returning
+    # None (via the get_model_context_length
     # default branch) is intentional — we don't want a fabricated number to override
     # the live catalog.  This row is omitted on purpose; the substring fallback
     # picks up "claude" (200K) only if every other branch misses.
@@ -864,6 +870,17 @@ def save_context_length(model: str, base_url: str, length: int) -> None:
     Cache key is ``model@base_url`` so the same model name served from
     different providers can have different limits.
     """
+    # Never persist a sub-1M context length for Copilot Claude-Opus: Copilot /v1/messages
+    # serves Opus at 1M; a sub-1M value is the /chat/completions misroute artifact (168k)
+    # that poisons every future session via the step-1 cache read. (root-caused 2026-06-16)
+    try:
+        if ("githubcopilot.com" in (base_url or "").lower()
+                and "claude-opus" in (model or "").lower() and int(length) < 1_000_000):
+            logger.info("Refusing to cache misroute context length %s@%s = %s "
+                        "(Copilot Opus is 1M)", model, base_url, length)
+            return
+    except Exception:
+        pass
     key = f"{model}@{base_url}"
     cache = _load_context_cache()
     if cache.get(key) == length:
@@ -1843,8 +1860,16 @@ def get_model_context_length(
     # returns the provider-enforced limit which is what users can actually use.
     if effective_provider in {"copilot", "copilot-acp", "github-copilot"}:
         try:
-            from hermes_cli.models import get_copilot_model_context
-            ctx = get_copilot_model_context(model, api_key=api_key)
+            from hermes_cli.models import (get_copilot_model_context,
+                                           _resolve_copilot_catalog_api_key)
+            # Probe with the PROPER Copilot catalog token, not whatever generic
+            # api_key flowed in. A non-Copilot/MaxAI token (or an empty one picked
+            # up mid-session) under-authenticates the /models probe, so GitHub
+            # returns the reduced BASE window (opus 200K) instead of the entitled
+            # 1M — which then gets cached for the session. Fall back to the passed
+            # api_key only if proper resolution yields nothing.
+            _cop_key = _resolve_copilot_catalog_api_key() or api_key
+            ctx = get_copilot_model_context(model, api_key=_cop_key)
             if ctx:
                 return ctx
         except Exception:

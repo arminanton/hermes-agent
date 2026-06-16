@@ -15991,6 +15991,16 @@ Examples:
     # trigger consent prompts for hooks the user is still inspecting.
     _prepare_agent_startup(args)
 
+    # Universal --autopilot / --yolo env wiring. The `chat` subcommand sets these
+    # in cmd_chat(), but the top-level -z/--oneshot path (and any other non-chat
+    # entry) bypasses it — without this, `hermes -z "..." --autopilot` would not
+    # activate the autopilot engine. Idempotent; safe to set again in cmd_chat.
+    if getattr(args, "yolo", False):
+        os.environ["HERMES_YOLO_MODE"] = "1"
+    if getattr(args, "autopilot", False):
+        os.environ["HERMES_AUTOPILOT"] = "1"
+        os.environ["HERMES_YOLO_MODE"] = "1"
+
     # Handle top-level --oneshot / -z: single-shot mode, stdout = final
     # response only, nothing else. Bypasses cli.py entirely.
     if getattr(args, "oneshot", None):

@@ -4538,6 +4538,15 @@ def run_conversation(
                     )
                     if _has_structured and agent._thinking_prefill_retries < 2:
                         agent._thinking_prefill_retries += 1
+                        if getattr(agent, "provider", "") == "copilot":
+                            # copilot's proxy rejects assistant-message prefill ("conversation
+                            # must end with a user message"); nudge with a USER turn instead so
+                            # the request stays valid and the reasoning model still emits its
+                            # visible answer (no 400 crash). Bounded by the same retry counter.
+                            messages.append({"role": "user",
+                                             "content": "Please continue with your answer."})
+                            agent._session_messages = messages
+                            continue
                         logger.info(
                             "Thinking-only response (no visible content) — "
                             "prefilling to continue (%d/2)",

@@ -946,10 +946,21 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 agent._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")
         elif function_name == "clarify":
             from tools.clarify_tool import clarify_tool as _clarify_tool
+            # Autopilot Seam A: auto-answer clarify via the Council (most-
+            # recommended choice) instead of blocking for an absent human.
+            _clarify_cb = agent.clarify_callback
+            try:
+                from agent import autopilot as _autopilot_mod
+                if _autopilot_mod.is_autopilot_active(agent):
+                    _clarify_cb = _autopilot_mod.make_clarify_autoanswer(
+                        agent, fallback=agent.clarify_callback
+                    )
+            except Exception:  # noqa: BLE001 — never block a clarify on autopilot wiring
+                pass
             function_result = _clarify_tool(
                 question=function_args.get("question", ""),
                 choices=function_args.get("choices"),
-                callback=agent.clarify_callback,
+                callback=_clarify_cb,
             )
             tool_duration = time.time() - tool_start_time
             if agent._should_emit_quiet_tool_messages():

@@ -77,16 +77,23 @@ ADAPTIVE_EFFORT_MAP = {
 # xhigh as a distinct level between high and max; older adaptive-thinking
 # models (4.6) reject it with a 400.  Keep this substring list in sync with
 # the Anthropic migration guide as new model families ship.
-_XHIGH_EFFORT_SUBSTRINGS = ("4-7", "4.7", "4-8", "4.8")
+# "fable" → claude-fable-5 (Mythos-class GA, Jun 2026). The official
+# @github/copilot 1.0.61 bundle defines it by spreading the SAME base config
+# object as claude-opus-4.8 (`{...qmt, ...}`) with
+# supportedReasoningEfforts:["low","medium","high","xhigh","max"], so it shares
+# opus-4.8's wire contract (xhigh, adaptive-only thinking, no sampling params).
+# These substrings let hermes treat it correctly the moment the org enables it;
+# the live catalog remains authoritative for the exact effort allow-list.
+_XHIGH_EFFORT_SUBSTRINGS = ("4-7", "4.7", "4-8", "4.8", "fable")
 
 # Models where extended thinking is deprecated/removed (4.6+ behavior: adaptive
 # is the only supported mode; 4.7 additionally forbids manual thinking entirely
 # and drops temperature/top_p/top_k).
-_ADAPTIVE_THINKING_SUBSTRINGS = ("4-6", "4.6", "4-7", "4.7", "4-8", "4.8")
+_ADAPTIVE_THINKING_SUBSTRINGS = ("4-6", "4.6", "4-7", "4.7", "4-8", "4.8", "fable")
 
 # Models where temperature/top_p/top_k return 400 if set to non-default values.
 # This is the Opus 4.7 contract; future 4.x+ models are expected to follow it.
-_NO_SAMPLING_PARAMS_SUBSTRINGS = ("4-7", "4.7", "4-8", "4.8")
+_NO_SAMPLING_PARAMS_SUBSTRINGS = ("4-7", "4.7", "4-8", "4.8", "fable")
 _FAST_MODE_SUPPORTED_SUBSTRINGS = ("opus-4-6", "opus-4.6")
 
 # ── Max output token limits per Anthropic model ───────────────────────
@@ -243,6 +250,10 @@ def _lookup_copilot_output_from_catalog(model: str) -> Optional[int]:
         "claude-opus-4-7": 128000,
         "claude-opus-4.6": 128000,
         "claude-opus-4-6": 128000,
+        # claude-fable-5 (Mythos-class GA): the 1.0.61 bundle clones opus-4.8's
+        # config, so it shares opus's 128k output ceiling. Catalog overrides
+        # this once the org enables Fable (it currently under-reports, like opus).
+        "claude-fable-5": 128000,
     }
     if model in overrides:
         return overrides[model]
@@ -565,6 +576,11 @@ _COPILOT_EFFORT_FALLBACK = {
     "claude-opus-4-7": ["low", "medium", "high", "xhigh", "max"],
     "claude-opus-4-6": ["low", "medium", "high", "max"],
     "claude-sonnet-4-6": ["low", "medium", "high", "max"],
+    # claude-fable-5: efforts taken verbatim from the official 1.0.61 bundle
+    # (supportedReasoningEfforts:["low","medium","high","xhigh","max"],
+    # default "medium"). Offline fallback only — the live catalog wins once
+    # the org enables Fable.
+    "claude-fable-5": ["low", "medium", "high", "xhigh", "max"],
 }
 
 
@@ -1977,20 +1993,35 @@ def convert_tools_to_anthropic(tools: List[Dict]) -> List[Dict]:
     result = []
     seen_names: set = set()
     for t in tools:
-        fn = t.get("function", {})
-        name = fn.get("name", "")
+        fn = t.get("function", {}) if isinstance(t, dict) else {}
+        if not isinstance(fn, dict):
+            fn = {}
+        name = (fn.get("name") or (t.get("name") if isinstance(t, dict) else "") or "")
+        name = str(name).strip()
+        # Drop tools with an empty/missing name. Anthropic rejects the ENTIRE request
+        # ("tools.N.custom.name: String should have at least 1 character") if any single
+        # tool name is blank — a misbehaving MCP server can inject one and break every
+        # turn. An unnamed tool is uncallable anyway, so dropping it is strictly safe and
+        # keeps the request valid. This is the last transform before the request, so it
+        # catches tools merged after registry sanitization (MCP, context-engine, etc.).
+        if not name:
+            logger.warning(
+                "convert_tools_to_anthropic: dropping tool with empty/missing name "
+                "(type=%r) — it would 400 the whole request. Tool: %.200s",
+                (t.get("type") if isinstance(t, dict) else type(t).__name__), repr(t),
+            )
+            continue
         # Defensive dedup: Anthropic rejects requests with duplicate tool
         # names.  Upstream injection paths already dedup, but this guard
         # converts a hard API failure into a warning.  See: #18478
-        if name and name in seen_names:
+        if name in seen_names:
             logger.warning(
                 "convert_tools_to_anthropic: duplicate tool name '%s' "
                 "— dropping second occurrence",
                 name,
             )
             continue
-        if name:
-            seen_names.add(name)
+        seen_names.add(name)
         anthropic_tool: Dict[str, Any] = {
             "name": name,
             "description": fn.get("description", ""),

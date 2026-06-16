@@ -29,6 +29,13 @@ COPILOT_EDITOR_VERSION = "vscode/1.104.1"
 COPILOT_REASONING_EFFORTS_GPT5 = ["minimal", "low", "medium", "high", "xhigh"]
 COPILOT_REASONING_EFFORTS_O_SERIES = ["low", "medium", "high"]
 
+# Account-usable Copilot models the live /models catalog OMITS (hidden/preview
+# slugs that work for inference but aren't listed — verified live 2026-06-15:
+# gemini-3.5-flash returns 200, gemini-3.1-pro-preview is integrator-gated but
+# reachable). Appended to the live catalog so they don't vanish from the picker
+# when /models under-reports. Keep to models confirmed reachable on the account.
+_COPILOT_HIDDEN_USABLE = ["gemini-3.1-pro-preview", "gemini-3.5-flash"]
+
 
 # Fallback OpenRouter snapshot used when the live catalog is unavailable.
 # (model_id, display description shown in menus)
@@ -239,9 +246,13 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "gemini-2.5-flash-lite",
         "gemma-4-31b-it",
         "gemma-4-26b-a4b-it",
-        "claude-mythos-preview",
-        "claude-mythos-1-preview",
-        "claude-mythos",
+        # claude-fable-5 = the GA slug for the Mythos-class model (preview
+        # codename "claude-mythos-*"). Confirmed canonical 3 ways: web changelog,
+        # server error-code differentiation, and the official @github/copilot
+        # 1.0.61 bundle. Requires an org admin to enable Fable 5 in Copilot
+        # policies (30-day data-retention opt-in); until then the catalog omits
+        # it and selecting it returns model_not_available_for_integrator.
+        "claude-fable-5",
         "goldeneye-secondary",
     ],
     "gemini": [
@@ -2082,7 +2093,15 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
         try:
             live = _fetch_github_models(_resolve_copilot_catalog_api_key())
             if live:
-                return live
+                # The /models catalog omits some account-usable models (hidden/preview
+                # slugs that work for inference but aren't listed — e.g. gemini-3.5-flash).
+                # Append them so they don't silently vanish from the picker. Deduped;
+                # live entries win, supplements only fill gaps.
+                merged = list(live)
+                for _m in _COPILOT_HIDDEN_USABLE:
+                    if _m not in merged:
+                        merged.append(_m)
+                return merged
         except Exception:
             pass
         if normalized == "copilot-acp":
@@ -3067,6 +3086,11 @@ _COPILOT_CONTEXT_SUPPLEMENT: dict[str, int] = {
     "gemini-3.1-pro-preview": 1_000_000,
     "gemini-3.5-flash": 1_000_000,
     "gemini-3-pro-preview": 1_000_000,
+    # claude-fable-5: catalog-miss fallback only. The 1.0.61 bundle clones
+    # opus-4.8's config, so we model its window on opus-4.8 (1M, the enforced
+    # Claude prompt cap). UNVERIFIED live (account not yet entitled); the live
+    # catalog's max_context_window_tokens overrides this once Fable is enabled.
+    "claude-fable-5": 1_000_000,
 }
 
 
