@@ -1107,6 +1107,25 @@ class AnthropicAuxiliaryClient:
         if callable(close_fn):
             close_fn()
 
+    @property
+    def embeddings(self):
+        """OpenAI-wire embeddings passthrough.
+
+        The Anthropic chat wrapper speaks Messages, but endpoints that also serve
+        embeddings (Copilot's /embeddings, /anthropic gateways behind an OpenAI
+        proxy) expose them OpenAI-wire on the SAME base_url. Force-wrapping
+        copilot+claude to Anthropic (the 1M-window/prefill fix) otherwise strips
+        ``.embeddings`` and silently degrades any caller that needs vectors
+        (HermesEmbedder → cmx semantic retrieval falls back to lexical-only).
+        Lazily build a plain OpenAI client so ``.embeddings.create(...)`` keeps
+        working regardless of the chat transport."""
+        emb = getattr(self, "_embeddings_client", None)
+        if emb is None:
+            from openai import OpenAI
+            emb = OpenAI(base_url=str(self.base_url), api_key=str(self.api_key))
+            self._embeddings_client = emb
+        return emb.embeddings
+
 
 class _AsyncAnthropicCompletionsAdapter:
     def __init__(self, sync_adapter: _AnthropicCompletionsAdapter):
