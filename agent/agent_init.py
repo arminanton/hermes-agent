@@ -1591,7 +1591,23 @@ def init_agent(
             if isinstance(t, dict)
         }
         for _schema in agent.context_compressor.get_tool_schemas():
-            _tname = _schema.get("name", "")
+            # Defensive unwrap: get_tool_schemas() is contracted to return BARE
+            # schemas ({name, description, parameters}). Some plugins/engines
+            # mistakenly pre-wrap their schemas in the OpenAI envelope
+            # ({"type": "function", "function": {...}}). If we wrap such a
+            # schema again we get {"function": {"function": {...}}} whose outer
+            # name is empty -> the provider rejects it (HTTP 400 "tools[N].
+            # function.name: empty string"). Detect the envelope and unwrap to
+            # the inner schema before processing so both already-wrapped and
+            # bare schemas are handled.
+            if (
+                isinstance(_schema, dict)
+                and _schema.get("type") == "function"
+                and isinstance(_schema.get("function"), dict)
+                and "name" not in _schema
+            ):
+                _schema = _schema["function"]
+            _tname = _schema.get("name", "") if isinstance(_schema, dict) else ""
             if _tname and _tname in _existing_tool_names:
                 continue  # already registered via plugin/cache path
             _wrapped = {"type": "function", "function": _schema}
