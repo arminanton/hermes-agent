@@ -188,10 +188,12 @@ def test_operating_mode_marker_prepended_when_mode_set(tmp_path, monkeypatch):
     _make_env(tmp_path, monkeypatch, [{"match": "*opus*", "operating_mode": "Fable 5", "files": ["f.md"]}])
     res = resolve_prelude("anthropic/claude-opus-4-6")
     assert res.operating_mode == "Fable 5"
-    assert res.text.lstrip().startswith("<system-reminder>")
+    assert res.text.lstrip().startswith("<policy_spec>")
+    assert "</policy_spec>" in res.text and "<system-reminder>" in res.text  # hybrid: both tags
+    assert "MANDATORY" in res.text                                          # the hard mandate
     assert "operating as Fable 5" in res.text  # the transparent self-description hook
     assert "FABLE_BODY" in res.text            # the prelude body still follows
-    assert res.text.index('system-reminder') < res.text.index("FABLE_BODY")
+    assert res.text.index('policy_spec') < res.text.index("FABLE_BODY")
 
 
 def test_profile_alias_still_accepted(tmp_path, monkeypatch):
@@ -200,7 +202,7 @@ def test_profile_alias_still_accepted(tmp_path, monkeypatch):
     _make_env(tmp_path, monkeypatch, [{"match": "*opus*", "profile": "Fable 5", "files": ["f.md"]}])
     res = resolve_prelude("anthropic/claude-opus-4-6")
     assert res.operating_mode == "Fable 5"
-    assert res.text.lstrip().startswith("<system-reminder>")
+    assert res.text.lstrip().startswith("<policy_spec>")
 
 
 def test_no_marker_when_mode_absent(tmp_path, monkeypatch):
@@ -208,7 +210,7 @@ def test_no_marker_when_mode_absent(tmp_path, monkeypatch):
     _make_env(tmp_path, monkeypatch, [{"match": "*opus*", "files": ["f.md"]}])
     res = resolve_prelude("anthropic/claude-opus-4-6")
     assert res.operating_mode is None
-    assert "system-reminder" not in res.text
+    assert "system-reminder" not in res.text and "policy_spec" not in res.text
     assert res.text == "BODY"
 
 
@@ -232,7 +234,7 @@ def test_empty_marker_disables_marker_but_keeps_mode(tmp_path, monkeypatch):
     )
     res = resolve_prelude("anthropic/claude-opus-4-6")
     assert res.operating_mode == "Fable 5"   # mode name still resolved
-    assert "system-reminder" not in res.text
+    assert "system-reminder" not in res.text and "policy_spec" not in res.text
     assert res.text == "BODY"               # but no marker text injected
 
 
