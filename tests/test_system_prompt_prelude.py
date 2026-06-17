@@ -23,17 +23,18 @@ def _write(d, name, body):
     return p
 
 
-def _make_env(tmp_path, monkeypatch, rules, *, enabled=True, first_match=True, base_dir=None):
+def _make_env(tmp_path, monkeypatch, rules, *, enabled=True, first_match=True, base_dir=None, extra=None):
     """Create prelude files + a standalone config YAML, point the resolver at it."""
     base = base_dir or str(tmp_path)
-    cfg = {
-        "system_prompt_prelude": {
-            "enabled": enabled,
-            "base_dir": base,
-            "first_match": first_match,
-            "rules": rules,
-        }
+    blk = {
+        "enabled": enabled,
+        "base_dir": base,
+        "first_match": first_match,
+        "rules": rules,
     }
+    if extra:
+        blk.update(extra)
+    cfg = {"system_prompt_prelude": blk}
     import yaml
 
     cfg_path = os.path.join(str(tmp_path), "prelude-map.yaml")
@@ -180,6 +181,51 @@ def test_no_config_returns_empty(monkeypatch):
     # Point at a nonexistent override to force the fail-soft path deterministically
     monkeypatch.setenv("HERMES_PRELUDE_CONFIG", "/nonexistent/path/xyz.yaml")
     assert resolve_prelude("anthropic/claude-opus-4-6").text == ""
+
+
+def test_profile_marker_prepended_when_profile_set(tmp_path, monkeypatch):
+    _write(str(tmp_path), "f.md", "FABLE_BODY")
+    _make_env(tmp_path, monkeypatch, [{"match": "*opus*", "profile": "Fable 5", "files": ["f.md"]}])
+    res = resolve_prelude("anthropic/claude-opus-4-6")
+    assert res.profile == "Fable 5"
+    assert res.text.lstrip().startswith('<operating_profile name="Fable 5">')
+    assert "running as Fable 5" in res.text  # the transparent self-description hook
+    assert "FABLE_BODY" in res.text          # the prelude body still follows
+    # marker must lead, body must follow
+    assert res.text.index('operating_profile') < res.text.index("FABLE_BODY")
+
+
+def test_no_marker_when_profile_absent(tmp_path, monkeypatch):
+    _write(str(tmp_path), "f.md", "BODY")
+    _make_env(tmp_path, monkeypatch, [{"match": "*opus*", "files": ["f.md"]}])
+    res = resolve_prelude("anthropic/claude-opus-4-6")
+    assert res.profile is None
+    assert "operating_profile" not in res.text
+    assert res.text == "BODY"
+
+
+def test_custom_profile_marker_template(tmp_path, monkeypatch):
+    _write(str(tmp_path), "f.md", "BODY")
+    _make_env(
+        tmp_path, monkeypatch,
+        [{"match": "*opus*", "profile": "Fable 5", "files": ["f.md"]}],
+        extra={"profile_marker": "PROFILE={profile}!"},
+    )
+    res = resolve_prelude("anthropic/claude-opus-4-6")
+    assert res.text.startswith("PROFILE=Fable 5!")
+
+
+def test_empty_profile_marker_disables_marker_but_keeps_profile(tmp_path, monkeypatch):
+    _write(str(tmp_path), "f.md", "BODY")
+    _make_env(
+        tmp_path, monkeypatch,
+        [{"match": "*opus*", "profile": "Fable 5", "files": ["f.md"]}],
+        extra={"profile_marker": ""},
+    )
+    res = resolve_prelude("anthropic/claude-opus-4-6")
+    assert res.profile == "Fable 5"        # profile name still resolved
+    assert "operating_profile" not in res.text
+    assert res.text == "BODY"              # but no marker text injected
 
 
 if __name__ == "__main__":
