@@ -183,49 +183,57 @@ def test_no_config_returns_empty(monkeypatch):
     assert resolve_prelude("anthropic/claude-opus-4-6").text == ""
 
 
-def test_profile_marker_prepended_when_profile_set(tmp_path, monkeypatch):
+def test_operating_mode_marker_prepended_when_mode_set(tmp_path, monkeypatch):
     _write(str(tmp_path), "f.md", "FABLE_BODY")
+    _make_env(tmp_path, monkeypatch, [{"match": "*opus*", "operating_mode": "Fable 5", "files": ["f.md"]}])
+    res = resolve_prelude("anthropic/claude-opus-4-6")
+    assert res.operating_mode == "Fable 5"
+    assert res.text.lstrip().startswith('<operating_mode name="Fable 5">')
+    assert "operating as Fable 5" in res.text  # the transparent self-description hook
+    assert "FABLE_BODY" in res.text            # the prelude body still follows
+    assert res.text.index('operating_mode') < res.text.index("FABLE_BODY")
+
+
+def test_profile_alias_still_accepted(tmp_path, monkeypatch):
+    """Backward-compat: the deprecated 'profile' key still names the mode."""
+    _write(str(tmp_path), "f.md", "BODY")
     _make_env(tmp_path, monkeypatch, [{"match": "*opus*", "profile": "Fable 5", "files": ["f.md"]}])
     res = resolve_prelude("anthropic/claude-opus-4-6")
-    assert res.profile == "Fable 5"
-    assert res.text.lstrip().startswith('<operating_profile name="Fable 5">')
-    assert "running as Fable 5" in res.text  # the transparent self-description hook
-    assert "FABLE_BODY" in res.text          # the prelude body still follows
-    # marker must lead, body must follow
-    assert res.text.index('operating_profile') < res.text.index("FABLE_BODY")
+    assert res.operating_mode == "Fable 5"
+    assert res.text.lstrip().startswith('<operating_mode name="Fable 5">')
 
 
-def test_no_marker_when_profile_absent(tmp_path, monkeypatch):
+def test_no_marker_when_mode_absent(tmp_path, monkeypatch):
     _write(str(tmp_path), "f.md", "BODY")
     _make_env(tmp_path, monkeypatch, [{"match": "*opus*", "files": ["f.md"]}])
     res = resolve_prelude("anthropic/claude-opus-4-6")
-    assert res.profile is None
-    assert "operating_profile" not in res.text
+    assert res.operating_mode is None
+    assert "operating_mode" not in res.text
     assert res.text == "BODY"
 
 
-def test_custom_profile_marker_template(tmp_path, monkeypatch):
+def test_custom_operating_mode_marker_template(tmp_path, monkeypatch):
     _write(str(tmp_path), "f.md", "BODY")
     _make_env(
         tmp_path, monkeypatch,
-        [{"match": "*opus*", "profile": "Fable 5", "files": ["f.md"]}],
-        extra={"profile_marker": "PROFILE={profile}!"},
+        [{"match": "*opus*", "operating_mode": "Fable 5", "files": ["f.md"]}],
+        extra={"operating_mode_marker": "MODE={mode}!"},
     )
     res = resolve_prelude("anthropic/claude-opus-4-6")
-    assert res.text.startswith("PROFILE=Fable 5!")
+    assert res.text.startswith("MODE=Fable 5!")
 
 
-def test_empty_profile_marker_disables_marker_but_keeps_profile(tmp_path, monkeypatch):
+def test_empty_marker_disables_marker_but_keeps_mode(tmp_path, monkeypatch):
     _write(str(tmp_path), "f.md", "BODY")
     _make_env(
         tmp_path, monkeypatch,
-        [{"match": "*opus*", "profile": "Fable 5", "files": ["f.md"]}],
-        extra={"profile_marker": ""},
+        [{"match": "*opus*", "operating_mode": "Fable 5", "files": ["f.md"]}],
+        extra={"operating_mode_marker": ""},
     )
     res = resolve_prelude("anthropic/claude-opus-4-6")
-    assert res.profile == "Fable 5"        # profile name still resolved
-    assert "operating_profile" not in res.text
-    assert res.text == "BODY"              # but no marker text injected
+    assert res.operating_mode == "Fable 5"   # mode name still resolved
+    assert "operating_mode" not in res.text
+    assert res.text == "BODY"               # but no marker text injected
 
 
 if __name__ == "__main__":

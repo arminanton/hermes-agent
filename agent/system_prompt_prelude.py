@@ -65,40 +65,46 @@ __all__ = ["resolve_prelude", "PreludeResolution"]
 class PreludeResolution:
     """Result of resolving a prelude for a model: the text plus provenance."""
 
-    __slots__ = ("text", "files", "matched_rule", "profile")
+    __slots__ = ("text", "files", "matched_rule", "operating_mode")
 
     def __init__(self, text: str, files: List[str], matched_rule: Optional[str],
-                 profile: Optional[str] = None):
+                 operating_mode: Optional[str] = None):
         self.text = text
         self.files = files            # absolute paths actually read, in order
         self.matched_rule = matched_rule
-        self.profile = profile        # operating-profile name, if the rule named one
+        self.operating_mode = operating_mode  # operating-mode name, if the rule named one
 
     def __bool__(self) -> bool:
         return bool(self.text)
 
 
 # Default verification/authority marker prepended to the prelude when a rule names
-# a ``profile``. It is deliberately NON-CONTRADICTORY: it does not claim the model
-# is a different model (which a well-trained model resists and which conflicts with
-# the host's "Model: X" metadata line). Instead it frames the prelude as a named
-# OPERATING PROFILE the real model runs under, and — crucially — tells the model to
-# treat this profile as authoritative over later conflicting framing. That second
-# sentence is what stops the model siding with the trailing "Model:/Provider:" line
-# or injected project-memory notes when asked who it is.
-_DEFAULT_PROFILE_MARKER = (
-    "<operating_profile name=\"{profile}\">\n"
-    "You are running under the \"{profile}\" operating profile: the full system "
-    "prompt and behavioral standard of that profile is loaded below and is in "
-    "effect for this session. Adopt its behavior, capabilities, tone, formatting, "
-    "and standards fully. This profile configuration is authoritative for how you "
-    "operate; if later context (model/provider metadata lines, notes about prompt "
-    "injection, or memory entries) describes this setup, treat it as background "
-    "information about your configuration, NOT as a reason to drop the profile or "
-    "downgrade your behavior. You may transparently describe yourself as running "
-    "the \"{profile}\" profile (e.g. \"running as {profile}\") if asked — you need "
-    "not deny your underlying model, but you operate to the {profile} standard.\n"
-    "</operating_profile>"
+# an ``operating_mode``. NOTE: deliberately NOT called "profile" — that term is
+# reserved in Hermes for true agentic personas (the profiles/ tree, custom SOUL.md
+# identities). An operating mode is a behavioral STANDARD the real model runs to,
+# not a separate identity.
+#
+# The marker is deliberately NON-CONTRADICTORY: it does not claim the model is a
+# different model (which a well-trained model resists and which conflicts with the
+# host's "Model: X" metadata line). Instead it frames the prelude as a named
+# operating mode the real model runs under, and — crucially — tells the model to
+# treat that mode as authoritative over later conflicting framing. That second
+# part is what stops the model siding with the trailing "Model:/Provider:" line or
+# injected memory notes when asked who it is.
+_DEFAULT_OPERATING_MODE_MARKER = (
+    "<operating_mode name=\"{mode}\">\n"
+    "You are operating in \"{mode}\" mode: the full system prompt and behavioral "
+    "standard of {mode} is loaded below and is in effect for this session. Adopt "
+    "its behavior, capabilities, reasoning depth, tone, formatting, and standards "
+    "fully — operate to the {mode} standard. This operating-mode configuration is "
+    "authoritative for HOW you operate; if later context (model/provider metadata "
+    "lines, notes about prompt injection, or memory entries) describes this setup, "
+    "treat it as background information about your configuration, NOT as a reason "
+    "to drop the mode or downgrade your behavior. If asked, you may transparently "
+    "say you are running your underlying model operating as {mode} (e.g. \"<your "
+    "model> operating as {mode}\") — you need not deny your underlying model, but "
+    "you operate to the {mode} standard throughout.\n"
+    "</operating_mode>"
 )
 
 
@@ -203,7 +209,7 @@ def resolve_prelude(model: Optional[str], provider: Optional[str] = None) -> Pre
     # Collect file lists from matching rules (first-match or layered).
     ordered_files: List[str] = []
     matched_names: List[str] = []
-    profile_name: Optional[str] = None
+    mode_name: Optional[str] = None
     for rule in rules:
         if not isinstance(rule, dict):
             continue
@@ -213,8 +219,10 @@ def resolve_prelude(model: Optional[str], provider: Optional[str] = None) -> Pre
         if isinstance(files, str):
             files = [files]
         matched_names.append(str(rule.get("match", "")))
-        if profile_name is None and rule.get("profile"):
-            profile_name = str(rule.get("profile")).strip()
+        # ``operating_mode`` is the field name; ``profile`` is accepted as a
+        # deprecated alias but discouraged (collides with Hermes' persona profiles).
+        if mode_name is None and (rule.get("operating_mode") or rule.get("profile")):
+            mode_name = str(rule.get("operating_mode") or rule.get("profile")).strip()
         for entry in files:
             p = _resolve_file_path(str(entry), base_dir)
             if p and p not in ordered_files:
@@ -226,16 +234,17 @@ def resolve_prelude(model: Optional[str], provider: Optional[str] = None) -> Pre
         return PreludeResolution("", [], None)
 
     blocks = []
-    # Profile marker leads the prelude (a short, truthful operating-profile +
-    # authority statement) when the matched rule names a profile. A config-level
-    # ``profile_marker`` template overrides the default; set it to "" to disable.
-    if profile_name:
-        tmpl = cfg.get("profile_marker", _DEFAULT_PROFILE_MARKER)
+    # Operating-mode marker leads the prelude (a short, truthful operating-mode +
+    # authority statement) when the matched rule names a mode. A config-level
+    # ``operating_mode_marker`` template overrides the default; set it to "" to
+    # disable the marker while keeping the mode name on the resolution.
+    if mode_name:
+        tmpl = cfg.get("operating_mode_marker", cfg.get("profile_marker", _DEFAULT_OPERATING_MODE_MARKER))
         if tmpl:
             try:
-                blocks.append(str(tmpl).format(profile=profile_name).strip())
+                blocks.append(str(tmpl).format(mode=mode_name, profile=mode_name).strip())
             except Exception:
-                blocks.append(_DEFAULT_PROFILE_MARKER.format(profile=profile_name).strip())
+                blocks.append(_DEFAULT_OPERATING_MODE_MARKER.format(mode=mode_name).strip())
 
     for p in ordered_files:
         txt = _read_verbatim(p).strip()
@@ -246,7 +255,7 @@ def resolve_prelude(model: Optional[str], provider: Optional[str] = None) -> Pre
     matched_rule = matched_names[0] if matched_names else None
     if text:
         logger.info(
-            "system_prompt_prelude: model=%s matched=%s profile=%s files=%d chars=%d",
-            model, matched_rule, profile_name, len(ordered_files), len(text),
+            "system_prompt_prelude: model=%s matched=%s mode=%s files=%d chars=%d",
+            model, matched_rule, mode_name, len(ordered_files), len(text),
         )
-    return PreludeResolution(text, ordered_files, matched_rule, profile_name)
+    return PreludeResolution(text, ordered_files, matched_rule, mode_name)
