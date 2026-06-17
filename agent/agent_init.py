@@ -59,6 +59,34 @@ from utils import base_url_host_matches
 logger = logging.getLogger("run_agent")
 
 
+def _normalize_context_engine_schema(schema: Any) -> Any:
+    """Defensively unwrap an already-enveloped context-engine tool schema.
+
+    ``ContextEngine.get_tool_schemas()`` is contracted to return BARE schemas
+    (``{name, description, parameters}``); the host wraps each one in the
+    OpenAI envelope (``{"type": "function", "function": {...}}``) before adding
+    it to ``agent.tools``. Some engines/plugins mistakenly pre-wrap their
+    schemas in that envelope. Wrapping an already-wrapped schema again yields
+    ``{"function": {"function": {...}}}`` whose OUTER ``function.name`` is empty,
+    and the provider rejects the whole request (HTTP 400
+    ``tools[N].function.name: empty string``), breaking every turn.
+
+    Detect the envelope (a ``type == "function"`` dict carrying a ``function``
+    dict but no top-level ``name``) and return the inner bare schema so both
+    already-wrapped and bare inputs register with a correct name. Non-dict or
+    bare inputs are returned unchanged.
+    """
+    if (
+        isinstance(schema, dict)
+        and schema.get("type") == "function"
+        and isinstance(schema.get("function"), dict)
+        and "name" not in schema
+    ):
+        return schema["function"]
+    return schema
+
+
+
 def _ra():
     """Lazy reference to ``run_agent`` so callers can patch
     ``run_agent.OpenAI`` / ``run_agent.cleanup_vm`` / ... and have those
@@ -1601,7 +1629,8 @@ def init_agent(
             if isinstance(t, dict)
         }
         for _schema in agent.context_compressor.get_tool_schemas():
-            _tname = _schema.get("name", "")
+            _schema = _normalize_context_engine_schema(_schema)
+            _tname = _schema.get("name", "") if isinstance(_schema, dict) else ""
             if _tname and _tname in _existing_tool_names:
                 continue  # already registered via plugin/cache path
             _wrapped = {"type": "function", "function": _schema}
