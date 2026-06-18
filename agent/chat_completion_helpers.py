@@ -125,8 +125,8 @@ def _env_float(name: str, default: float) -> float:
 def _ensure_copilot_request_ends_with_user(agent, api_kwargs: dict) -> None:
     """Copilot's proxy rejects assistant-message prefill ("This model does not support
     assistant message prefill. The conversation must end with a user message."). Any path
-    that leaves a trailing assistant turn — incomplete-text continuation, thinking prefill,
-    or configured prefill_messages — 400s on Copilot. Stock Hermes gap (present in v0.16.0
+    that leaves a trailing assistant turn (incomplete-text continuation, thinking prefill,
+    or configured prefill_messages) 400s on Copilot. Stock Hermes gap (present in v0.16.0
     too): direct Anthropic ALLOWS prefill, the Copilot proxy does NOT. For Copilot only,
     append a minimal user continuation so the request is valid; the trailing assistant text
     stays as context so the model continues from it. No-op on every other provider."""

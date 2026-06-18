@@ -977,8 +977,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 _load_gateway_config(), "api_server", "show_reasoning", False,
             ))
         except Exception as exc:
-            # Broad on purpose — config load can raise import/parse/IO errors,
-            # and a broken config must not 500 every /v1/responses request — but
+            # Broad on purpose: config load can raise import/parse/IO errors,
+            # and a broken config must not 500 every /v1/responses request, but
             # never silently: surface why the gate fell back to off.
             logger.debug(
                 "show_reasoning gate resolution failed; defaulting to off: %s", exc
@@ -2953,7 +2953,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     input_messages.append({"role": "user", "content": item})
                 elif isinstance(item, dict):
                     # Spec-compliant clients may echo ``reasoning`` output
-                    # items back in input.  They carry no role/content —
+                    # items back in input.  They carry no role/content,
                     # treating them as messages injects empty user turns
                     # (or a 400 when last), so skip them outright (#21655).
                     if str(item.get("type") or "").strip().lower() == "reasoning":
@@ -2980,7 +2980,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     status=400,
                 )
             for i, entry in enumerate(raw_history):
-                # Echoed reasoning output items carry no role/content —
+                # Echoed reasoning output items carry no role/content,
                 # skip them here exactly like the input array does, instead
                 # of rejecting the whole request (#21655).
                 if isinstance(entry, dict) and str(entry.get("type") or "").strip().lower() == "reasoning":
@@ -3052,7 +3052,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 so progress events are ignored here.  Note in particular
                 that ``reasoning.available`` is NOT forwarded: it carries
                 the assistant message *content* (see conversation_loop), not
-                the model's reasoning — real reasoning arrives through
+                the model's reasoning. Real reasoning arrives through
                 ``reasoning_callback`` below (#21655, #7556).
                 """
                 return

@@ -1124,7 +1124,7 @@ DEFAULT_CONFIG = {
         "max_attempts": 3,            # P2: compression-retry ceiling on context_overflow/413.
                                       # Default 3 (historical). LCM users that persist content
                                       # to files and reference them by a single line can afford
-                                      # many more passes — set to 6/12 for deep rolling compaction.
+                                      # many more passes; set to 6/12 for deep rolling compaction.
         "chunk_oversized_input": False,  # P3: when a SINGLE message alone exceeds the model max
                                       # (history compression can't help), save it to
                                       # $HERMES_HOME/pastes/ and pass a file reference instead of
@@ -1724,7 +1724,7 @@ DEFAULT_CONFIG = {
         "max_turns": 20,
     },
 
-    # Autopilot — engine-enforced goal-chasing (agent/autopilot/). When enabled,
+    # Autopilot: engine-enforced goal-chasing (agent/autopilot/). When enabled,
     # the agent keeps working until an independent Hermes Council pass confirms
     # the goal is verifiably complete, and clarify questions are auto-answered
     # with the most-recommended choice. Distinct from "goals" above: autopilot is
@@ -2289,7 +2289,7 @@ DEFAULT_CONFIG = {
     "updates": {
         # Update checks default to the historical moving-branch comparison.
         # Set check_strategy: stable-tags (or stable_tags: true) to compare
-        # against release tags only — useful for locally customized installs
+        # against release tags only, useful for locally customized installs
         # that intentionally stay pinned to a stable tag and carry overlays.
         "check_strategy": "branch",
         "stable_tags": False,

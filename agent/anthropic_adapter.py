@@ -115,16 +115,16 @@ _FAST_MODE_SUPPORTED_SUBSTRINGS = ("opus-4-6", "opus-4.6")
 #
 # Values are Armin's VSCode-observed Copilot deployments (2026-06-01) per
 # ~/fix-hermes.md. They intentionally diverge from what `gh`'s catalog
-# returns for any single token — different Copilot tokens see different
+# returns for any single token; different Copilot tokens see different
 # deployment numbers, and these values are the canonical baseline.
 
 # Vendor-direct (Anthropic API): max output per response, standard tier.
 _ANTHROPIC_OUTPUT_LIMITS_VENDOR_FALLBACK = {
-    # Claude 4.8 — vendor-confirmed 128K
+    # Claude 4.8: vendor-confirmed 128K
     "claude-opus-4-8":   128_000,
-    # Claude 4.7 — Armin override (matches opus-4.8 surface)
+    # Claude 4.7: Armin override (matches opus-4.8 surface)
     "claude-opus-4-7":   128_000,
-    # Claude 4.6 — Armin override (opus = 128K out, sonnet = 64K)
+    # Claude 4.6: Armin override (opus = 128K out, sonnet = 64K)
     "claude-opus-4-6":   128_000,
     "claude-sonnet-4-6":  64_000,
     # Claude 4.5
@@ -215,9 +215,9 @@ def _is_copilot_base_url(base_url: Optional[str]) -> bool:
 def _request_messages_have_image_parts(messages: Any) -> bool:
     """Return True when any message carries image content.
 
-    Matches both OpenAI-style parts (``image_url`` / ``input_image``) — the
+    Matches both OpenAI-style parts (``image_url`` / ``input_image``): the
     shape ``build_anthropic_kwargs`` receives before ``convert_messages_to_anthropic``
-    runs — and already-converted Anthropic blocks (``{"type": "image"}``), so the
+    runs, and already-converted Anthropic blocks (``{"type": "image"}``), so the
     check is robust regardless of where it is called in the pipeline.
     """
     def _contains_image(value: Any) -> bool:
@@ -236,7 +236,7 @@ def _lookup_copilot_output_from_catalog(model: str) -> Optional[int]:
     """Return the TRUE enforced max output tokens for a Copilot Claude model.
 
     The Copilot /models catalog UNDER-reports max_output_tokens (advertises
-    64,000 for opus, but the server enforces 128,000 — verified live: opus
+    64,000 for opus, but the server enforces 128,000; verified live: opus
     max_tokens=128000 → 200, 200000 → 400). Opus-4.x is 128k on BOTH Copilot
     and vendor-direct Anthropic, so it lives here (this helper also feeds the
     unknown-base_url default). Sonnet differs by provider (64k vendor / 128k
@@ -346,7 +346,7 @@ def _resolve_anthropic_output_limit(model: str, base_url: Optional[str] = None) 
         default = _ANTHROPIC_DEFAULT_OUTPUT_LIMIT_VENDOR_FALLBACK
     elif _is_copilot_base_url(base_url):
         # Copilot UNDER-reports Claude max_output in its catalog (advertises
-        # 64k; the server enforces 128k for opus-4.x AND sonnet-4.6+ — verified
+        # 64k; the server enforces 128k for opus-4.x AND sonnet-4.6+; verified
         # live 2026-06-07: sonnet-4.6 max_tokens=128000 → 200, 200000 → 400
         # "> 128000 maximum"). Apply the verified sonnet ceiling BEFORE the
         # catalog lookup (which would otherwise return the under-reported 64k).
@@ -526,7 +526,7 @@ def get_last_effort_clamp(model: str) -> Optional[dict]:
     effort honestly:
       effort: medium (xhigh requested → Copilot capped at medium)
 
-    Tolerates dot/dash variants — Hermes normalizes ``claude-opus-4.7`` →
+    Tolerates dot/dash variants; Hermes normalizes ``claude-opus-4.7`` →
     ``claude-opus-4-7`` (Anthropic SDK shape) deep in the kwargs build, but
     the agent.model string the TUI knows about is the user-typed dot form.
     """
@@ -556,7 +556,7 @@ def get_last_effort_clamp(model: str) -> Optional[dict]:
 
 
 def _reset_effort_clamp_state_for_tests() -> None:
-    """Clear surfacing state. Test-only — not part of the public surface."""
+    """Clear surfacing state. Test-only; not part of the public surface."""
     _effort_clamps_seen.clear()
     _effort_clamp_last.clear()
 
@@ -566,7 +566,7 @@ def _reset_effort_clamp_state_for_tests() -> None:
 # network is down). The live catalog (capabilities.supports.reasoning_effort)
 # is authoritative and is now reliably fetched via an auto-resolved token, so
 # this path is rarely hit. Values verified live 2026-06-07 against
-# api.githubcopilot.com (account e126380_magh) — opus-4.7/4.8 accept the full
+# api.githubcopilot.com (account e126380_magh): opus-4.7/4.8 accept the full
 # range up to 'max', opus-4.6 / sonnet-4.6 accept up to 'max' (no 'xhigh').
 # Keep these in sync with reality so the offline path never UNDER-reports and
 # wrongly clamps (the previous ['medium']-only opus snapshot caused exactly
@@ -578,7 +578,7 @@ _COPILOT_EFFORT_FALLBACK = {
     "claude-sonnet-4-6": ["low", "medium", "high", "max"],
     # claude-fable-5: efforts taken verbatim from the official 1.0.61 bundle
     # (supportedReasoningEfforts:["low","medium","high","xhigh","max"],
-    # default "medium"). Offline fallback only — the live catalog wins once
+    # default "medium"). Offline fallback only; the live catalog wins once
     # the org enables Fable.
     "claude-fable-5": ["low", "medium", "high", "xhigh", "max"],
 }
@@ -650,7 +650,7 @@ def _resolve_copilot_effort_ceiling(
     allowed = _copilot_supported_efforts_from_catalog(model)
 
     if allowed is None:
-        # Catalog unavailable — fall back to the vendor-direct substring guard
+        # Catalog unavailable; fall back to the vendor-direct substring guard
         # (best effort; matches pre-existing offline behavior).
         if req == "xhigh" and not _supports_xhigh_effort(model):
             return "max", (
@@ -660,7 +660,7 @@ def _resolve_copilot_effort_ceiling(
         return requested, None
 
     if not allowed:
-        # Catalog explicitly lists no efforts for this model — leave the
+        # Catalog explicitly lists no efforts for this model; leave the
         # caller's value untouched (caller may omit output_config entirely).
         return requested, None
 
@@ -1234,7 +1234,7 @@ def build_anthropic_client(
     elif _is_copilot_base_url(normalized_base_url):
         # GitHub Copilot's Anthropic deployment (POST /v1/messages) is the ONLY
         # Copilot endpoint that serves Claude at the real 1,000,000-token input
-        # window — /chat/completions clamps it and returns a misleading
+        # window; /chat/completions clamps it and returns a misleading
         # "exceeds the limit of 168000" error (see probe/FINDINGS.md §2).  It
         # requires:
         #   1. Authorization: Bearer <copilot-token>  (NOT Anthropic x-api-key)
@@ -1266,7 +1266,7 @@ def build_anthropic_client(
             # 1M unlock slug.
             _copilot_headers = {}
         # The proven anthropic-beta triplet (computed in common_betas) is
-        # authoritative — apply it last so it always wins over any value the
+        # authoritative; apply it last so it always wins over any value the
         # identity header set may carry.
         if common_betas:
             _copilot_headers["anthropic-beta"] = ",".join(common_betas)
@@ -2000,14 +2000,14 @@ def convert_tools_to_anthropic(tools: List[Dict]) -> List[Dict]:
         name = str(name).strip()
         # Drop tools with an empty/missing name. Anthropic rejects the ENTIRE request
         # ("tools.N.custom.name: String should have at least 1 character") if any single
-        # tool name is blank — a misbehaving MCP server can inject one and break every
+        # tool name is blank; a misbehaving MCP server can inject one and break every
         # turn. An unnamed tool is uncallable anyway, so dropping it is strictly safe and
         # keeps the request valid. This is the last transform before the request, so it
         # catches tools merged after registry sanitization (MCP, context-engine, etc.).
         if not name:
             logger.warning(
                 "convert_tools_to_anthropic: dropping tool with empty/missing name "
-                "(type=%r) — it would 400 the whole request. Tool: %.200s",
+                "(type=%r); it would 400 the whole request. Tool: %.200s",
                 (t.get("type") if isinstance(t, dict) else type(t).__name__), repr(t),
             )
             continue
@@ -2859,13 +2859,13 @@ def build_anthropic_kwargs(
                 # restrictive effort allow-list than vendor-direct Anthropic
                 # (e.g. opus-4.7/4.8 accept only "medium" on
                 # api.githubcopilot.com and 400 with invalid_reasoning_effort
-                # otherwise — which crash-loops the conversation). Clamp to the
+                # otherwise, which crash-loops the conversation). Clamp to the
                 # live-catalog allow-list for the Copilot endpoint, annotating
                 # the downgrade instead of letting the request fail. No-op on
                 # vendor-direct Anthropic (base_url guard inside the resolver).
                 #
                 # SURFACING (Phase A6, 2026-06-04):
-                #   The downgrade was previously logged at DEBUG only — users
+                #   The downgrade was previously logged at DEBUG only; users
                 #   typed `-e xhigh` on opus-4.7 and silently got medium with
                 #   no indication. Now we ALSO record the downgrade in a
                 #   module-level seen-set so we log INFO once per (model,

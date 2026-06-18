@@ -1,7 +1,7 @@
 """Google Gemini CLI fingerprint helpers.
 
 Hermes' Code Assist (cloudcode-pa) and Generative Language API paths must
-present a User-Agent that Google's backend recognizes — internal endpoints
+present a User-Agent that Google's backend recognizes; internal endpoints
 have been observed to reject unknown UAs.
 
 The real ``@google/gemini-cli`` v0.44.1 (verified by inspecting the bundled
@@ -22,7 +22,7 @@ Env overrides
 - ``HERMES_GEMINI_CLI_SURFACE``      override the ``surface`` segment
                                      (default ``hermes``; the real CLI uses
                                      values like ``vscode`` / ``unknown``)
-- ``HERMES_GEMINI_CLIENT_PROFILE``   ``antigravity`` (default — "Antigravity
+- ``HERMES_GEMINI_CLIENT_PROFILE``   ``antigravity`` (default: "Antigravity
                                      2.0", current product), ``antigravity_ide``
                                      (legacy "Antigravity IDE" 2.0.3),
                                      ``cloud_code`` (Gemini Code Assist VS
@@ -87,7 +87,7 @@ def _gemini_cli_version() -> str:
       4. ``GET https://registry.npmjs.org/@google/gemini-cli/latest``.
       5. Hard fallback ``_GEMINI_CLI_VERSION_FALLBACK``.
 
-    Network failures are swallowed — we always return *something*.
+    Network failures are swallowed; we always return *something*.
     """
     override = os.getenv("HERMES_GEMINI_CLI_VERSION", "").strip()
     if override:
@@ -208,16 +208,16 @@ def gemini_cli_x_goog_api_client() -> str:
 # ``clientMetadata`` field describing who the caller is. Two profiles
 # observed in real Google clients:
 #
-# 1. ``cli``         — what ``@google/gemini-cli`` sends. Three fields, all
+# 1. ``cli``         : what ``@google/gemini-cli`` sends. Three fields, all
 #                      "unspecified". This is the path Hermes used to take.
-# 2. ``cloud_code``  — what the official Gemini Code Assist VS Code extension
+# 2. ``cloud_code``  : what the official Gemini Code Assist VS Code extension
 #                      (``google.geminicodeassist``) sends. Claims to be an
 #                      IDE plugin: uppercase platform like ``LINUX_AMD64``,
 #                      ``ideType: "VSCODE"`` (or workstation / cloud-shell
 #                      variants), ``pluginType: "CLOUD_CODE"``, plus
 #                      ``ideName``, ``ideVersion``, ``pluginVersion``,
 #                      ``updateChannel``.
-# 3. ``antigravity`` — claims to be Google Antigravity 2.0 (the current
+# 3. ``antigravity`` : claims to be Google Antigravity 2.0 (the current
 #                      product, ``https://antigravity.google/product/antigravity-2``).
 #                      The IdeType enum in the Code Assist proto includes
 #                      ``ANTIGRAVITY=9``, so the server recognizes this
@@ -239,18 +239,18 @@ def gemini_cli_x_goog_api_client() -> str:
 #                      cloudcode-pa endpoint. Note that ``subclient_type``
 #                      is internal to the Jetski/Codeium LS proto and is
 #                      NOT a cloudcode-pa ``ClientMetadata`` field.
-# 4. ``antigravity_ide`` — legacy Antigravity *IDE* 2.0.3 fingerprint
+# 4. ``antigravity_ide`` : legacy Antigravity *IDE* 2.0.3 fingerprint
 #                      (``ideName: "Antigravity IDE"``). Use as a fallback
 #                      if the new ``antigravity`` (2.0) fingerprint is
 #                      rejected server-side.
 #
-# The ``antigravity`` profile is the default — it tracks the freshest
+# The ``antigravity`` profile is the default; it tracks the freshest
 # product. Override with ``HERMES_GEMINI_CLIENT_PROFILE=antigravity_ide``
 # / ``cloud_code`` / ``cli`` to switch.
 
 _CLIENT_PROFILE_DEFAULT = "antigravity"
 
-# Pinned IDE / plugin versions. These only need to be plausible — Google
+# Pinned IDE / plugin versions. These only need to be plausible; Google
 # doesn't gate on specific values, but they should look like a real recent
 # install.
 _GEMINI_CODE_ASSIST_PLUGIN_VERSION_FALLBACK = "2.86.0"
@@ -295,7 +295,7 @@ def _parse_brew_version(blob: bytes) -> str:
     """Pull the cask version from formulae.brew.sh JSON, stripping build suffix."""
     payload = json.loads(blob.decode())
     raw = str(payload.get("version") or "")
-    # brew encodes "version,build" — we only want the version half.
+    # brew encodes "version,build"; we only want the version half.
     return raw.split(",", 1)[0].lstrip("v").strip()
 
 
@@ -496,7 +496,7 @@ def gemini_client_metadata(profile: Optional[str] = None) -> dict:
                 "updateChannel": "stable",
             }
         else:
-            # cloud_code — fingerprint matches google.geminicodeassist
+            # cloud_code: fingerprint matches google.geminicodeassist
             ide_version = (
                 os.getenv("HERMES_GEMINI_IDE_VERSION", "").strip()
                 or _VSCODE_VERSION_FALLBACK
@@ -511,7 +511,7 @@ def gemini_client_metadata(profile: Optional[str] = None) -> dict:
                 "updateChannel": "stable",
             }
 
-    # Final A/B-testing overrides — apply after profile resolution so they
+    # Final A/B-testing overrides: apply after profile resolution so they
     # work for every profile (including ``cli``).
     ide_type_override = os.getenv("HERMES_GEMINI_IDE_TYPE", "").strip()
     if ide_type_override:

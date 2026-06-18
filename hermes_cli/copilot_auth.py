@@ -430,7 +430,7 @@ _JWT_REFRESH_MARGIN_SECONDS = 120  # refresh 2 min before expiry
 # subscribers. The editor version is fetched dynamically from the VS Code
 # GitHub releases so we always look like the latest stable build.
 # NOTE: the exchange endpoint itself is no longer used by the official
-# Copilot CLI for /chat/completions or /models — those accept the raw gh
+# Copilot CLI for /chat/completions or /models (those accept the raw gh
 # token as a Bearer credential directly. Kept for opt-in compatibility
 # (HERMES_COPILOT_FORCE_EXCHANGE=1).
 _TOKEN_EXCHANGE_URL = "https://api.github.com/copilot_internal/v2/token"
@@ -458,8 +458,8 @@ _COPILOT_API_VERSION_CACHE_PATH = (
 
 # Copilot-Integration-Id sent on Copilot API inference calls. The official
 # @github/copilot CLI uses "copilot-cli"; verified live (2026-06-07, account
-# e126380_magh) this integrator exposes the FULL model catalog — including
-# gemini-3.1-pro-preview / gemini-3.5-flash at 1M context — and the account's
+# e126380_magh) this integrator exposes the FULL model catalog, including
+# gemini-3.1-pro-preview / gemini-3.5-flash at 1M context, and the account's
 # true per-model limits and reasoning-effort range (opus low..max). The legacy
 # "vscode-chat" value hides gemini-3.x from the catalog and is not what a CLI
 # agent should present as. Override via HERMES_COPILOT_INTEGRATION_ID when a
@@ -699,7 +699,7 @@ def _latest_copilot_api_version() -> str:
       1. ``HERMES_COPILOT_API_VERSION`` env override.
       2. In-process memo (TTL ``_VSCODE_VERSION_CACHE_TTL``).
       3. On-disk cache at ``_COPILOT_API_VERSION_CACHE_PATH``.
-      4. Local ``@github/copilot`` npm bundle (the live source of truth —
+      4. Local ``@github/copilot`` npm bundle (the live source of truth,
          updates whenever the user runs ``npm i -g @github/copilot``).
       5. Hard fallback ``_COPILOT_API_VERSION_FALLBACK``.
     """
@@ -818,7 +818,7 @@ def get_copilot_api_token(raw_token: str) -> str:
     """Return the API token to use against ``api.githubcopilot.com``.
 
     The Copilot API accepts the raw GitHub OAuth/PAT token directly as
-    ``Authorization: Bearer <token>`` — no exchange step is required.
+    ``Authorization: Bearer ***``; no exchange step is required.
     This was verified against the official ``@github/copilot`` CLI bundle:
     its SDK calls Copilot endpoints with ``Bearer <gh-token>`` directly.
 
@@ -877,7 +877,7 @@ def copilot_request_headers(
     # NOTE: hermes previously injected `X-Copilot-Agent-Slug: copilot-1m-context`
     # here, believing it mapped the token to the developer-app integrator and
     # unlocked 1M context / Gemini-3.x. Live probing (2026-06-07) proved that
-    # slug is INERT — it changes neither catalog visibility nor per-model limits.
+    # slug is INERT: it changes neither catalog visibility nor per-model limits.
     # What actually exposes gemini-3.x and the full limits is the
     # Copilot-Integration-Id (now `copilot-cli`, matching the official CLI). The
     # slug was removed to avoid sending a misleading no-op header. The official

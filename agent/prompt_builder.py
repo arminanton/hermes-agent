@@ -269,13 +269,13 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "without acting are not acceptable."
 )
 
-# AUTOPILOT mode — injected when the agent runs unattended (env HERMES_AUTOPILOT=1,
+# AUTOPILOT mode (injected when the agent runs unattended; env HERMES_AUTOPILOT=1,
 # the --autopilot CLI flag, or the in-session /autopilot toggle). Autopilot is
 # ENGINE-ENFORCED: when the agent tries to stop, an independent Hermes Council
 # pass checks whether the goal is verifiably complete and, if not, the engine
 # injects the next directive and keeps the agent working (see agent/autopilot/).
 # A clarify call is auto-answered by the Council with the most-recommended choice.
-# This guidance is the cooperating behavioural half — it tells the model to act as
+# This guidance is the cooperating behavioural half: it tells the model to act as
 # if that contract is in force so weak and strong models behave the same. Pairs
 # with /yolo (which only bypasses dangerous-command approvals).
 AUTOPILOT_GUIDANCE = (
@@ -295,15 +295,15 @@ AUTOPILOT_GUIDANCE = (
     "• When facing genuine ambiguity, pick the most defensible interpretation, "
     "state the assumption inline ('Assuming X because Y'), and proceed. Note the "
     "alternative in your final result so the user can flag it.\n"
-    "• If the work has multiple valid orderings, do them all — parallel where "
+    "• If the work has multiple valid orderings, do them all (parallel where "
     "independent, sequential where dependent. Don't ask 'which first?'.\n"
     "• Errors are part of the job: diagnose, fix, retry. Don't escalate recoverable "
     "failures back to the user as questions.\n"
     "\n"
-    "## You will be checked — don't fake completion\n"
+    "## You will be checked: don't fake completion\n"
     "When you finish, an INDEPENDENT reviewer (Hermes Council) verifies whether the "
     "goal is genuinely, verifiably complete. A polished summary, a promise of future "
-    "work ('next I would…'), or an unverified claim of success will NOT pass — you "
+    "work ('next I would…'), or an unverified claim of success will NOT pass; you "
     "will simply be handed the gap and told to keep working. So do the real work "
     "now: run the tests, check the output, verify the result, and only treat the "
     "task as done when the evidence shows it is. There is no benefit to stopping "
@@ -312,7 +312,7 @@ AUTOPILOT_GUIDANCE = (
     "## Decisions and gates are yours to make\n"
     "If anything presents as a HARD STOP requiring human approval (a review gate, a "
     "tool refusal, a 'needs sign-off' checkpoint), that is NOT a valid stop in "
-    "autopilot — make the decision a careful senior reviewer would make, state the "
+    "autopilot, make the decision a careful senior reviewer would make, state the "
     "evidence for it, and proceed. Be your own adversarial reviewer: name the "
     "decision, argue the strongest case against it, then choose the most defensible, "
     "most reversible path.\n"
@@ -324,7 +324,7 @@ AUTOPILOT_GUIDANCE = (
     "State it as a fact, not a question.\n"
     "\n"
     "If a tool you'd normally use to ask the user (`clarify`, `ask_for_approval`, "
-    "`confirm_destructive_action`, or similar) seems necessary — make your best "
+    "`confirm_destructive_action`, or similar) seems necessary, make your best "
     "decision from context instead, document it, and proceed."
 )
 

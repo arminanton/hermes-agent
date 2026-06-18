@@ -269,7 +269,7 @@ def check_for_updates() -> Optional[int]:
     except Exception:
         pass
 
-    # Read cache — invalidate if embedded rev, installed version, or
+    # Read cache: invalidate if embedded rev, installed version, or
     # update-check mode (incl. stable-tags pattern/remote) changed.
     now = time.time()
     try:
@@ -817,12 +817,12 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
                 if target_tag:
                     line = f"[bold yellow]⚠ stable release {target_tag} available[/]"
                 if current_tag and target_tag and current_tag != target_tag:
-                    line += f"[dim yellow] — current {current_tag}[/]"
+                    line += f"[dim yellow], current {current_tag}[/]"
                 stable_cmd = update_context.get("update_command")
                 if stable_cmd:
-                    line += f"[dim yellow] — run [bold]{stable_cmd}[/bold][/]"
+                    line += f"[dim yellow], run [bold]{stable_cmd}[/bold][/]"
                 else:
-                    line += "[dim yellow] — run your stable-tag update workflow[/]"
+                    line += "[dim yellow], run your stable-tag update workflow[/]"
                 right_lines.append(line)
             elif behind > 0:
                 commits_word = "commit" if behind == 1 else "commits"

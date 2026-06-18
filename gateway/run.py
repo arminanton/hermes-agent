@@ -16179,7 +16179,7 @@ class GatewayRunner:
         """Extract Honcho identity keys, memoized by honcho.json content.
 
         The memo key is (path, mtime_ns, size, content_sha256). mtime alone
-        is not safe — filesystems with second-resolution mtime (or two
+        is not safe: filesystems with second-resolution mtime (or two
         writes within the same nanosecond on ns-resolution filesystems)
         can produce identical mtime_ns for distinct content. Including
         size + a content hash makes the memo robust to both cases.

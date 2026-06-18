@@ -30,7 +30,7 @@ COPILOT_REASONING_EFFORTS_GPT5 = ["minimal", "low", "medium", "high", "xhigh"]
 COPILOT_REASONING_EFFORTS_O_SERIES = ["low", "medium", "high"]
 
 # Account-usable Copilot models the live /models catalog OMITS (hidden/preview
-# slugs that work for inference but aren't listed — verified live 2026-06-15:
+# slugs that work for inference but aren't listed (verified live 2026-06-15):
 # gemini-3.5-flash returns 200, gemini-3.1-pro-preview is integrator-gated but
 # reachable). Appended to the live catalog so they don't vanish from the picker
 # when /models under-reports. Keep to models confirmed reachable on the account.
@@ -2094,7 +2094,7 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
             live = _fetch_github_models(_resolve_copilot_catalog_api_key())
             if live:
                 # The /models catalog omits some account-usable models (hidden/preview
-                # slugs that work for inference but aren't listed — e.g. gemini-3.5-flash).
+                # slugs that work for inference but aren't listed, e.g. gemini-3.5-flash).
                 # Append them so they don't silently vanish from the picker. Deduped;
                 # live entries win, supplements only fill gaps.
                 merged = list(live)
@@ -3079,7 +3079,7 @@ _COPILOT_CONTEXT_CACHE_TTL = 3600  # 1 hour
 # Verified max INPUT-token budget for Copilot preview models that the live
 # /models endpoint omits non-deterministically (gemini-3.x flicker across
 # load-balanced backends). Consulted ONLY as a supplement when the catalog
-# lookup misses — it never overrides a value the catalog actually returned.
+# lookup misses; it never overrides a value the catalog actually returned.
 # Verified live 2026-06-07 (account e126380_magh): gemini-3.x enforce the
 # prompt cap at the full 1M context window (like Claude), output is separate.
 _COPILOT_CONTEXT_SUPPLEMENT: dict[str, int] = {
@@ -3105,7 +3105,7 @@ def _copilot_input_budget_from_limits(
         separately (opus accepted a 998,564-token prompt AND 128k output in the
         same request). Their catalog ``max_prompt_tokens`` UNDER-reports by the
         output reservation (936k = 1M − 64k), so using it wastes ~64k of usable
-        context — hence we use the full window for these families.
+        context, hence we use the full window for these families.
       - GPT / o-series / codex (/responses) treat the window as a COMBINED
         input+output budget; the enforced INPUT cap is ``max_prompt_tokens``
         (gpt-5.5 rejects ~924k input though its window is 1.05M). Using the
@@ -3137,7 +3137,7 @@ def get_copilot_model_context(model_id: str, api_key: Optional[str] = None) -> O
     removed. The per-model field selection lives in
     ``_copilot_input_budget_from_limits``: Claude/Gemini use the full
     ``max_context_window_tokens`` (their enforced prompt cap; catalog
-    max_prompt UNDER-reports by the output reservation — opus is really 1M, not
+    max_prompt UNDER-reports by the output reservation; opus is really 1M, not
     936k), while GPT/codex use ``max_prompt_tokens`` (their window is a combined
     input+output budget). Verified live 2026-06-07. The only remaining
     hardcoded layer is _COPILOT_CONTEXT_SUPPLEMENT, a catalog-miss fallback for
@@ -3149,7 +3149,7 @@ def get_copilot_model_context(model_id: str, api_key: Optional[str] = None) -> O
     if _copilot_context_cache and (time.time() - _copilot_context_cache_time < _COPILOT_CONTEXT_CACHE_TTL):
         if model_id in _copilot_context_cache:
             return _copilot_context_cache[model_id]
-        # Cache is fresh but model not in it — the catalog may have flakily
+        # Cache is fresh but model not in it; the catalog may have flakily
         # omitted a preview model; consult the supplement before giving up.
         return _COPILOT_CONTEXT_SUPPLEMENT.get(model_id)
 
@@ -3579,15 +3579,15 @@ def copilot_model_api_mode(
     if _should_use_copilot_responses_api(normalized):
         return "codex_responses"
 
-    # Claude models on Copilot ALWAYS use /v1/messages — regardless of whether
+    # Claude models on Copilot ALWAYS use /v1/messages, regardless of whether
     # the live catalog probe succeeded. The /chat/completions path is a proxy
     # clamp that misleadingly reports `exceeds the limit of 168000` for any
     # claude-* prompt over ~300k. Routing every claude-* through anthropic_messages
     # before catalog probing avoids that wrong-route path when the catalog is
     # cold/empty/down or returns ambiguous supported_endpoints. See:
-    #   - probe/FINDINGS.md §1 — endpoint map
-    #   - probe V18.1 — opus-4.8 → 999,968 input tokens 200 OK on /v1/messages
-    #   - upstream PR #27446 — same short-circuit upstream
+    #   - probe/FINDINGS.md §1: endpoint map
+    #   - probe V18.1: opus-4.8 → 999,968 input tokens 200 OK on /v1/messages
+    #   - upstream PR #27446: same short-circuit upstream
     if normalized.startswith("claude-"):
         return "anthropic_messages"
 
@@ -3717,7 +3717,7 @@ def github_model_reasoning_efforts(
     if catalog is not None:
         catalog_entry = next((item for item in catalog if item.get("id") == normalized), None)
     else:
-        # api_key may be None here — auto-resolve a Copilot token so this works
+        # api_key may be None here; auto-resolve a Copilot token so this works
         # on call paths that don't thread one (the common case, and the root
         # cause of Claude effort being stuck at the offline fallback). Callers
         # are all Copilot/GitHub-Models gated, so this never fires for other
@@ -4059,7 +4059,7 @@ def validate_requested_model(
             "message": f"Model `{requested}` was not found in LM Studio's model listing.",
         }
 
-    # Antigravity CLI (`agy-cli`): no HTTP /models endpoint — the model list is
+    # Antigravity CLI (`agy-cli`): no HTTP /models endpoint; the model list is
     # owned by the agy binary's internal Connect-RPC server and the plugin's
     # `AGY_SLUG_TO_DISPLAY` map. Use the plugin's own model list as the
     # validation source rather than letting the generic /models probe fail
@@ -4088,7 +4088,7 @@ def validate_requested_model(
                 }
             suggestions = get_close_matches(requested_for_lookup, agy_known, n=3, cutoff=0.5)
             suggestion_text = "\n  Similar agy models: " + ", ".join(f"`{s}`" for s in suggestions) if suggestions else ""
-            # Allow but warn — agy may have added new models since the plugin
+            # Allow but warn: agy may have added new models since the plugin
             # was last refreshed; the AgyCliClient will surface the real
             # error if the model is genuinely invalid.
             return {
@@ -4096,10 +4096,10 @@ def validate_requested_model(
                 "message": (
                     f"Note: `{requested}` is not in the pinned agy-cli model list."
                     f"{suggestion_text}"
-                    f"\n  Hermes will still send the request — if the model exists on this account's agy install it will work."
+                    f"\n  Hermes will still send the request. If the model exists on this account's agy install it will work."
                 ),
             }
-        # plugin model list unavailable — accept silently rather than nag with
+        # plugin model list unavailable; accept silently rather than nag with
         # a misleading "could not reach the API" warning.
         return {"accepted": True, "persist": True, "recognized": False, "message": None}
 

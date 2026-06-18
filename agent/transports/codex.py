@@ -126,7 +126,7 @@ class ResponsesApiTransport(ProviderTransport):
 
         # Clamp efforts the OpenAI/Codex Responses API does not accept.
         # Supported: none, minimal, low, medium, high, xhigh.  "max" is an
-        # Anthropic-only level — sending it here returns HTTP 400
+        # Anthropic-only level: sending it here returns HTTP 400
         # invalid_value, which (e.g. on a Codex fallback from an Anthropic
         # primary configured with effort=max) kills the request.  "minimal"
         # is mapped to "low" for older deployments that reject it.

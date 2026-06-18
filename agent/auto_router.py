@@ -1,4 +1,4 @@
-"""Copilot auto-mode router — unlocks the 10% billing discount.
+"""Copilot auto-mode router: unlocks the 10% billing discount.
 
 Implements the three-call dance that GitHub Copilot Chat uses internally
 to route ``model: auto`` selections through a server-side ML router and
@@ -9,7 +9,7 @@ have token costs charged at a 0.9× multiplier:
     3. ``POST /chat/completions``       → request with ``Copilot-Session-Token``
        (or ``/responses`` / ``/v1/messages`` depending on chosen_model family)
 
-Step 2 is optional — *only step 1 + step 3 are required for the discount*.
+Step 2 is optional (*only step 1 + step 3 are required for the discount*).
 The session_token from step 1 already encodes the ``discounted_costs`` map;
 the server applies the 0.9× multiplier whenever the header is present.
 
@@ -226,7 +226,7 @@ def _render_message_content(content) -> str:
 class AutoRouter:
     """Caches auto-mode sessions and applies the discount header.
 
-    Session JWTs are reused across requests within their TTL — matching the
+    Session JWTs are reused across requests within their TTL, matching the
     extension's ``oUe._autoModelCache`` keyed by conversation-id. Pass a
     stable ``conversation_id`` to share a session across turns; pass
     ``None`` for a one-shot bank.

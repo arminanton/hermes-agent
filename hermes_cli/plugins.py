@@ -436,7 +436,7 @@ class PluginContext:
         as free-form chat.
 
         Names conflicting with built-in commands are rejected with a warning,
-        unless ``override=True`` is passed — in which case the plugin command
+        unless ``override=True`` is passed, in which case the plugin command
         shadows the built-in (mirrors the ``override`` semantics of
         :meth:`register_tool`). Use this to enhance or wrap a built-in command
         from a plugin (e.g. add lineage metadata to ``/new``).

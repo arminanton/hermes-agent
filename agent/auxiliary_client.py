@@ -1225,7 +1225,7 @@ def _maybe_wrap_anthropic(
 
     # Copilot serves Claude on BOTH /chat/completions (168k clamp, assistant-prefill
     # REJECTED) and /v1/messages (genuine 1M input window, prefill OK). Claude on Copilot
-    # MUST ride Anthropic Messages — force it even over an explicit chat_completions
+    # MUST ride Anthropic Messages, force it even over an explicit chat_completions
     # api_mode, mirroring agent_init's copilot+claude override, so the aux/compression
     # path never misroutes to the 168k clamp (the "1M -> snap to 168k + assistant-prefill
     # 400" failure). build_anthropic_client (below) reuses the copilot token here and
@@ -1236,7 +1236,7 @@ def _maybe_wrap_anthropic(
         and "claude" in (model or "").lower()
     )
 
-    # Explicit non-anthropic api_mode wins over URL heuristics — except Copilot+Claude.
+    # Explicit non-anthropic api_mode wins over URL heuristics, except Copilot+Claude.
     if not _force_copilot_claude and api_mode and api_mode != "anthropic_messages":
         return client_obj
 

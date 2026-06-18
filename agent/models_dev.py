@@ -689,7 +689,7 @@ def get_provider_info(provider_id: str) -> Optional[ProviderInfo]:
 
 
 # ---------------------------------------------------------------------------
-# Probe-verified overrides — authoritative (Phase A8, 2026-06-04)
+# Probe-verified overrides: authoritative (Phase A8, 2026-06-04)
 # ---------------------------------------------------------------------------
 #
 # models.dev is a community catalog that consistently UNDER-reports limits
@@ -712,11 +712,11 @@ def get_provider_info(provider_id: str) -> Optional[ProviderInfo]:
 #   3. exact match wins; substring family match (claude-opus-4.7 → claude-opus-4)
 #      provides a graceful fallback for un-versioned aliases like "claude-opus-4".
 #
-# Adding a model here OVERRIDES models.dev for that provider+model — context
+# Adding a model here OVERRIDES models.dev for that provider+model (context
 # window, max output, and (optionally) reasoning_effort. Other ModelInfo fields
 # (modalities, cost, etc.) still come from models.dev when available.
 #
-# Update when probes change. Do NOT edit ~/.hermes/models_dev_cache.json — it
+# Update when probes change. Do NOT edit ~/.hermes/models_dev_cache.json; it
 # gets clobbered every TTL refresh from the upstream community catalog.
 
 # Per-(provider, model_canonical) override entries.
@@ -727,9 +727,9 @@ _PROBE_VERIFIED_OVERRIDES: Dict[Tuple[str, str], Dict[str, Any]] = {
     # /v1/messages, beta triplet + X-Copilot-Agent-Slug: copilot-1m-context.
     # Probe V18.1 reached 999,968 input tokens (1M − 32 system overhead) on
     # opus-4.8. We use the round 1,000,000 here to match how the user thinks
-    # about the cap — the conversation_loop's response-error path will adopt
+    # about the cap; the conversation_loop's response-error path will adopt
     # the precise server cap (~999,968) on first turn if it matters.
-    # Keyed on dot form — the resolver also tries the dash variant on lookup.
+    # Keyed on dot form; the resolver also tries the dash variant on lookup.
     ("github-copilot", "claude-opus-4.8"):     {"context_window": 1_000_000, "max_output": 128_000},
     ("github-copilot", "claude-opus-4.7"):     {"context_window": 1_000_000, "max_output": 128_000},
     ("github-copilot", "claude-opus-4.6"):     {"context_window": 1_000_000, "max_output": 128_000},
@@ -752,7 +752,7 @@ _PROBE_VERIFIED_OVERRIDES: Dict[Tuple[str, str], Dict[str, Any]] = {
     # matches OpenAI's documented total window (input+output combined).
     # gpt-5.5 / gpt-5.4 explicitly tested 512k output → SUCCESS.
     # NOTE: 2026-06-04 the Codex `/models` endpoint reports 272k for gpt-5.5
-    # — that's a conservative routing default, NOT the real cap. The probe
+    # that's a conservative routing default, NOT the real cap. The probe
     # V18.1 evidence stands.
     ("github-copilot", "gpt-5.5"):             {"context_window": 1_050_000, "max_output": 512_000},
     ("github-copilot", "gpt-5.4"):             {"context_window":   750_000, "max_output": 512_000},
@@ -771,7 +771,7 @@ _PROBE_VERIFIED_OVERRIDES: Dict[Tuple[str, str], Dict[str, Any]] = {
     # captured 2026-06-04 via /codex/models endpoint:
     #   gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex-spark, codex-auto-review
     # The numeric limits below are the probe-verified empirical caps, NOT the
-    # catalog's conservative defaults — Codex's /models reports 272k for
+    # catalog's conservative defaults. Codex's /models reports 272k for
     # gpt-5.5 but the actual /responses endpoint accepts ~1M (the same way
     # Copilot's /models lies about Claude). All 4 visible models support
     # reasoning_effort low/medium/high/xhigh.
@@ -782,7 +782,7 @@ _PROBE_VERIFIED_OVERRIDES: Dict[Tuple[str, str], Dict[str, Any]] = {
     # codex-auto-review is hidden in catalog (visibility=hide) but reachable;
     # only Codex spawns it internally for auto-review.
     ("openai-codex", "codex-auto-review"):     {"context_window":   272_000, "max_output": 128_000},
-    # Hermes legacy alias — points to the renamed -spark on this account.
+    # Hermes legacy alias: points to the renamed -spark on this account.
     ("openai-codex", "gpt-5.3-codex"):         {"context_window":   128_000, "max_output": 128_000},
 
     # ─── provider=github-copilot, gemini family ────────────────────────────
@@ -793,7 +793,7 @@ _PROBE_VERIFIED_OVERRIDES: Dict[Tuple[str, str], Dict[str, Any]] = {
     ("github-copilot", "gemini-2.5-pro"):      {"context_window":   128_000, "max_output":  65_536},
     ("github-copilot", "gemini-3-flash-preview"): {"context_window":   128_000, "max_output":  65_536},
     # gemini-3.1-pro-preview unreachable through Copilot proxy. Set to 0 so
-    # the UI shows "n/a" — users should pick provider=google instead, which
+    # the UI shows "n/a"; users should pick provider=google instead, which
     # unlocks the model via cloudcode-pa OAuth (Phase A9, 2026-06-04).
     ("github-copilot", "gemini-3.1-pro-preview"): {"context_window":         0, "max_output":       0},
     ("github-copilot", "gemini-3.5-flash"):    {"context_window":   200_000, "max_output":  65_536},
@@ -815,7 +815,7 @@ _PROBE_VERIFIED_OVERRIDES: Dict[Tuple[str, str], Dict[str, Any]] = {
     # ─── provider=agy-cli (Antigravity CLI subprocess, Phase B 2026-06-04) ─
     # Catalog from `agy models` v1.0.5 + ~/.gsd/agent/extensions/agy-cli/models.js.
     # All zero-cost, 1M context (gpt-oss capped at 131,072). Reasoning level is
-    # baked into the slug (Low/Medium/High) — no separate effort knob.
+    # baked into the slug (Low/Medium/High); no separate effort knob.
     # output ceiling is 65,536 for gemini-3.x and gpt-oss; Anthropic models on
     # Antigravity keep their vendor 64k/128k surface.
     ("agy-cli", "default"):                       {"context_window": 1_000_000, "max_output":  65_536},
@@ -856,7 +856,7 @@ _OVERRIDE_PROVIDER_ALIASES = {
     "google-vertex": "google",
     "anthropic": "anthropic",
     "claude": "anthropic",
-    # Antigravity CLI — its own override table (zero-cost, 1M ctx, agy slugs)
+    # Antigravity CLI: its own override table (zero-cost, 1M ctx, agy slugs)
     "agy-cli": "agy-cli",
     "agy": "agy-cli",
     "antigravity": "agy-cli",
@@ -871,7 +871,7 @@ def _canonicalize_model_id(model_id: str) -> str:
     - strip ``vendor/`` prefix (e.g. ``anthropic/claude-opus-4.7`` → ``claude-opus-4.7``)
     - strip date stamps (``-20250929``)
 
-    Dots are PRESERVED — Hermes config / catalog ids are dot-form
+    Dots are PRESERVED. Hermes config / catalog ids are dot-form
     (``gpt-5.5``, ``gemini-2.5-pro``, ``claude-opus-4.7``). The override
     table is keyed on dot form to match. The lookup function additionally
     tries the dash variant (``claude-opus-4-7``) so the Anthropic SDK shape
@@ -922,7 +922,7 @@ def _resolve_probe_override(provider_id: str, model_id: str) -> Optional[Dict[st
     dash_to_dot_last = _re.sub(r"-(\d+)$", r".\1", canonical)
     if dash_to_dot_last not in variants:
         variants.append(dash_to_dot_last)
-    # Dot variant — covers Anthropic SDK shape (claude-opus-4-7 ↔ claude-opus-4.7)
+    # Dot variant: covers Anthropic SDK shape (claude-opus-4-7 ↔ claude-opus-4.7)
     # when canonical IS the dot form.
     if "." in canonical:
         dash_form = canonical.replace(".", "-")
@@ -956,7 +956,7 @@ def get_model_info(
 ) -> Optional[ModelInfo]:
     """Get full model metadata from models.dev, with probe-verified overrides
     applied for providers where models.dev is known to lie (notably
-    github-copilot — see _PROBE_VERIFIED_OVERRIDES above).
+    github-copilot, see _PROBE_VERIFIED_OVERRIDES above).
 
     Accepts Hermes or models.dev provider ID.  Tries exact match then
     case-insensitive fallback.  Returns None if not found in models.dev AND
@@ -968,7 +968,7 @@ def get_model_info(
          on top (context_window/max_output/etc are replaced; cost,
          capabilities, modalities preserved).
       3. If models.dev has no entry but we DO have an override, synthesizes
-         a minimal ModelInfo from the override alone — better to surface a
+         a minimal ModelInfo from the override alone: better to surface a
          partial-but-honest entry than fall back to ``None``.
     """
     mdev_id = PROVIDER_TO_MODELS_DEV.get(provider_id, provider_id)
@@ -995,10 +995,10 @@ def get_model_info(
 
     if override:
         if base is not None:
-            # Apply override on top — replace numeric limits, keep everything else.
+            # Apply override on top: replace numeric limits, keep everything else.
             from dataclasses import replace as _replace
             return _replace(base, **{k: v for k, v in override.items() if hasattr(base, k)})
-        # No models.dev entry — synthesize a minimal honest one.
+        # No models.dev entry: synthesize a minimal honest one.
         return ModelInfo(
             id=model_id,
             name=model_id,

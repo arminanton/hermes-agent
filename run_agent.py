@@ -4564,7 +4564,7 @@ class AIAgent:
 
         # ``supported_efforts`` is the live Copilot catalog allow-list
         # (capabilities.supports.reasoning_effort). Honor the requested level
-        # when the catalog says it's supported — including ``xhigh`` for
+        # when the catalog says it's supported, including ``xhigh`` for
         # gpt-5.5/gpt-5.4, which DO support it. Only downgrade when the level
         # is genuinely absent from the catalog, and annotate the downgrade in
         # the DEBUG log instead of doing it silently.
@@ -4793,7 +4793,7 @@ class AIAgent:
             return False
 
         # Per-policy: file-reference is the default for an oversized single
-        # message (D-P3c — no part-count math; the reference is tiny).  Find
+        # message (D-P3c; no part-count math; the reference is tiny).  Find
         # the largest text message and, if it alone dominates the window,
         # offload it.  Walk from the tail so the most-recent (usually the
         # culprit) is found first on ties.
@@ -4808,7 +4808,7 @@ class AIAgent:
             content = msg.get("content")
             if not isinstance(content, str) or not content:
                 continue
-            # Never offload the system head or a tool-protocol message —
+            # Never offload the system head or a tool-protocol message:
             # only user/assistant text bodies are safe to externalize.
             if msg.get("role") not in {"user", "assistant"}:
                 continue
@@ -4859,9 +4859,9 @@ class AIAgent:
             "content": placeholder,
         }
 
-        # Honest UX — tell the user exactly what happened (no silent magic).
+        # Honest UX: tell the user exactly what happened (no silent magic).
         self._buffer_status(
-            f"📎 Message too large (~{biggest_tokens:,} tokens) — saved to "
+            f"📎 Message too large (~{biggest_tokens:,} tokens), saved to "
             f"{ref_path} and passed as a file reference; I'll read it on "
             f"demand."
         )

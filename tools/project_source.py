@@ -2,8 +2,8 @@
 
 These mirror ``hermes_source_*`` but are parameterized by a project root,
 allowing the same blazing-fast deterministic recognition layer (SQLite
-FTS5/trigram + ctags) to work on ANY user project — not just the Hermes
-source tree — without an LLM, Graphify rebuild, or GitNexus full reindex.
+FTS5/trigram + ctags) to work on ANY user project, not just the Hermes
+source tree, without an LLM, Graphify rebuild, or GitNexus full reindex.
 
 Per-project layout (created by ``pintel init``):
 
@@ -168,17 +168,17 @@ def _refresh(args: dict[str, Any], **kw):
 
 SEARCH_DESCRIPTION = (
     "Blazing-fast deterministic recognition for ANYTHING inside a user "
-    "project (NOT the Hermes source — for that use hermes_source_search). "
+    "project (NOT the Hermes source; for that use hermes_source_search). "
     "Backed by a per-project SQLite FTS5/trigram hot index under "
     "<PROJECT_ROOT>/.planning/intelligence/indexes/project-index.sqlite. "
     "ALWAYS try this BEFORE search_files / read_file / grep / find / "
     "terminal when the question is about a project file, symbol, config "
     "key, route, feature, doc, log, or session. Pass project_root=<abs "
     "path> (or set $PINTEL_PROJECT_ROOT). Examples: "
-    "(a) `project_root: /home/ndsadmin/dev/dashboard, query: AccountController` — find a class; "
-    "(b) `project_root: /mnt/devvm/projects/<svc>, query: signin, scope: src` — find a feature; "
-    "(c) `project_root: <root>, query: API_KEY, scope: configs` — find a config key; "
-    "(d) `project_root: <root>, query: ERROR, scope: logs` — search runtime logs. "
+    "(a) `project_root: /home/ndsadmin/dev/dashboard, query: AccountController` (find a class); "
+    "(b) `project_root: /mnt/devvm/projects/<svc>, query: signin, scope: src` (find a feature); "
+    "(c) `project_root: <root>, query: API_KEY, scope: configs` (find a config key); "
+    "(d) `project_root: <root>, query: ERROR, scope: logs` (search runtime logs). "
     "Scopes: auto (default), src, tests, scripts, configs, docs, routes, "
     "logs, sessions. For cross-project / Hermes-internal lookups use "
     "hermes_source_search. For 'who calls X' / 'what would break' use "

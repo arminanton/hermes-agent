@@ -21,7 +21,7 @@ Output:
          "is_error": false, "result_size_bytes": 5998}
 
 The trace script merges this back into the message timeline.
-Never raises — failures are silently swallowed so this can never break tool
+Never raises. Failures are silently swallowed so this can never break tool
 execution.
 """
 from __future__ import annotations

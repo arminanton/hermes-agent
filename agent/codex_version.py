@@ -7,16 +7,16 @@ like ``codex_cli_rs/MAJOR.MINOR.PATCH``. The same value is sent as the
 ``client_version`` query parameter on ``/models`` and friends.
 
 Per upstream openai/codex (``codex-rs/models-manager/src/lib.rs``), the value
-is just the codex CLI's own ``CARGO_PKG_VERSION`` (major.minor.patch — any
+is just the codex CLI's own ``CARGO_PKG_VERSION`` (major.minor.patch; any
 prerelease suffix is stripped). It is used as the ``models_cache.json`` cache
 key, not an API contract version.
 
 We resolve it dynamically so Hermes always advertises a plausible, current
 codex CLI version without manual upkeep:
 
-  1. ``HERMES_CODEX_CLI_VERSION`` env var — operator override.
+  1. ``HERMES_CODEX_CLI_VERSION`` env var: operator override.
   2. On-disk cache (``~/.cache/hermes/codex_version.json``) if fresh.
-  3. GitHub releases API for ``openai/codex`` — parse ``tag_name`` for the
+  3. GitHub releases API for ``openai/codex``: parse ``tag_name`` for the
      first ``MAJOR.MINOR.PATCH`` substring (tags are shaped ``rust-v0.136.0``).
   4. Hard-coded fallback constant.
 
@@ -89,7 +89,7 @@ def _fetch_github_release() -> str | None:
 
     Uses ``urllib`` (stdlib) so this module has no third-party import cost on
     the cold path. GitHub release tags for openai/codex are shaped
-    ``rust-v0.136.0`` — we match the first ``\\d+\\.\\d+\\.\\d+`` substring,
+    ``rust-v0.136.0``. We match the first ``\\d+\\.\\d+\\.\\d+`` substring,
     which tolerates either ``rust-v`` or ``v`` prefixes (or none).
     """
     try:
@@ -127,7 +127,7 @@ def get_codex_cli_version() -> str:
     """Return the codex CLI semver to advertise on chatgpt.com backend calls.
 
     Always returns a ``MAJOR.MINOR.PATCH`` string. Network failures, cache
-    errors, and missing dependencies are non-fatal — the fallback constant
+    errors, and missing dependencies are non-fatal; the fallback constant
     is returned instead. Within a single process, the result is memoized for
     ``_MEMO_TTL_SECONDS`` to keep this safe on hot paths.
     """

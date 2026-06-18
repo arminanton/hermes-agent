@@ -297,7 +297,7 @@ def _log_trigram_unavailable_once(exc: Exception) -> None:
             return
         _trigram_unavailable_warned = True
     logger.warning(
-        "state.db: SQLite trigram tokenizer unavailable (%s) — "
+        "state.db: SQLite trigram tokenizer unavailable (%s); "
         "continuing without trigram FTS index. "
         "SessionDB remains available; CJK/substring search falls back to LIKE. "
         "Upgrade SQLite to >=3.34 to restore trigram search.",

@@ -244,8 +244,8 @@ class CodexAppServerSession:
                 codex_bin=self._codex_bin, codex_home=self._codex_home
             )
         # Local JSON-RPC handshake to the spawned codex sub-process. These
-        # strings are codex-side telemetry only — they are NOT forwarded to
-        # chatgpt.com — but we present a codex-shaped client identity so
+        # strings are codex-side telemetry only, they are NOT forwarded to
+        # chatgpt.com, but we present a codex-shaped client identity so
         # codex's own logs/diagnostics see a plausible peer rather than a
         # placeholder. ``client_name`` stays "hermes" because some codex
         # versions branch on the LSP-style name for host-specific behavior;

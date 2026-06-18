@@ -144,7 +144,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("yolo", "Toggle YOLO mode (skip all dangerous command approvals)",
                "Configuration"),
     CommandDef("autopilot",
-               "Toggle autopilot — keep working until the goal is verifiably complete (Council-checked)",
+               "Toggle autopilot: keep working until the goal is verifiably complete (Council-checked)",
                "Configuration", args_hint="[on|off|status|goal <text>|clear]",
                subcommands=("on", "off", "status", "goal", "clear"), cli_only=True),
     CommandDef("reasoning", "Manage reasoning effort and display", "Configuration",

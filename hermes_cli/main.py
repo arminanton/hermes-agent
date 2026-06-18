@@ -15993,7 +15993,7 @@ Examples:
 
     # Universal --autopilot / --yolo env wiring. The `chat` subcommand sets these
     # in cmd_chat(), but the top-level -z/--oneshot path (and any other non-chat
-    # entry) bypasses it — without this, `hermes -z "..." --autopilot` would not
+    # entry) bypasses it. Without this, `hermes -z "..." --autopilot` would not
     # activate the autopilot engine. Idempotent; safe to set again in cmd_chat.
     if getattr(args, "yolo", False):
         os.environ["HERMES_YOLO_MODE"] = "1"

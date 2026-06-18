@@ -36,7 +36,7 @@ class CopilotProfile(ProviderProfile):
                 if supported_efforts and reasoning_config:
                     effort = reasoning_config.get("effort", "medium")
                     # Honor the requested level when the live Copilot catalog
-                    # lists it as supported — gpt-5.5/gpt-5.4 DO support
+                    # lists it as supported: gpt-5.5/gpt-5.4 DO support
                     # ``xhigh``. Only downgrade levels the catalog does NOT
                     # list (e.g. ``xhigh``/``max`` on models capped lower, or
                     # ``minimal`` where unsupported), choosing the nearest

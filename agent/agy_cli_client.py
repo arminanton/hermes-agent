@@ -15,12 +15,12 @@ Behavior summary
   CSRF token.
 * Talks Connect-RPC v1 (``connect-protocol-version: 1`` +
   ``x-codeium-csrf-token``) over the self-signed HTTPS port (verify=False is
-  safe — 127.0.0.1 only).
+  safe, 127.0.0.1 only).
 * Translates Hermes' chat-completion requests into the LS's
   ``StartCascade`` + ``SendUserCascadeMessage`` + ``GetCascadeTrajectorySteps``
   poll loop. ``StreamCascadeReactiveUpdates`` is documented in the proto
   catalog but the server returns ``reactive state is deprecated`` for the
-  ``language_server_pb`` endpoint — so we use polled trajectory steps and
+  ``language_server_pb`` endpoint, so we use polled trajectory steps and
   yield deltas as new assistant tokens appear.
 * Exposes an OpenAI-shaped ``client.chat.completions.create(...)`` surface
   so the rest of Hermes (conversation_loop, tool_executor, display) sees
@@ -30,20 +30,20 @@ Auth note
 =========
 The daemon proxies all model traffic to ``cloudcode-pa.googleapis.com``
 using an OAuth token it manages itself under ``$gemini_dir/<app_data_dir>``.
-We never touch tokens — the binary is responsible. If the user hasn't
+We never touch tokens; the binary is responsible. If the user hasn't
 authenticated yet, ``GetCascadeModelConfigData`` and the cascade calls
 will surface ``UNAUTHENTICATED`` errors which we propagate.
 
 Environment overrides
 =====================
-* ``HERMES_AGY_LANGUAGE_SERVER`` — full path to the LS binary. Default
+* ``HERMES_AGY_LANGUAGE_SERVER``: full path to the LS binary. Default
   ``/tmp/ag-ide/Antigravity IDE/resources/app/extensions/antigravity/bin/language_server_linux_arm``.
-* ``HERMES_AGY_GEMINI_DIR`` — gemini config dir. Default ``~/.gemini``.
-* ``HERMES_AGY_APP_DATA_DIR`` — subfolder for state/discovery. Default
+* ``HERMES_AGY_GEMINI_DIR``: gemini config dir. Default ``~/.gemini``.
+* ``HERMES_AGY_APP_DATA_DIR``: subfolder for state/discovery. Default
   ``hermes-agy``.
-* ``HERMES_AGY_TIMEOUT_SECONDS`` — total per-call wall clock for the
+* ``HERMES_AGY_TIMEOUT_SECONDS``: total per-call wall clock for the
   ``chat.completions.create`` cascade (default 120s).
-* ``HERMES_AGY_REQUEST_TIMEOUT_SECONDS`` — per-RPC HTTP timeout
+* ``HERMES_AGY_REQUEST_TIMEOUT_SECONDS``: per-RPC HTTP timeout
   (default 30s).
 """
 
@@ -81,7 +81,7 @@ except (TypeError, ValueError):
 _DEFAULT_TIMEOUT_SECONDS = 120.0
 _DEFAULT_REQUEST_TIMEOUT = 30.0
 # (Discovery timeout defined above with env override; do NOT add a second
-# unconditional assignment here — it overrode the env-honoring value.)
+# unconditional assignment here; it overrode the env-honoring value.)
 _DISCOVERY_POLL_INTERVAL = 0.15
 
 # Connect RPC service prefix
@@ -339,7 +339,7 @@ class LanguageServerDaemon:
 def _render_messages_to_text(messages: list[dict]) -> str:
     """Flatten Hermes' chat messages into a single user-turn string.
 
-    The cascade RPC only takes a single ``message.text`` per turn — there's
+    The cascade RPC only takes a single ``message.text`` per turn; there's
     no per-message role channel like OpenAI's chat API. We render history
     in a [ROLE] block format which most LLMs handle gracefully.
     """
@@ -437,7 +437,7 @@ class AgyCliClient:
     Exposes ``client.chat.completions.create(model=..., messages=[...], stream=False)``
     so existing Hermes plumbing works unchanged.
 
-    ``base_url``, ``api_key`` and friends are accepted but ignored — auth is
+    ``base_url``, ``api_key`` and friends are accepted but ignored; auth is
     fully handled by the daemon.
     """
 
@@ -468,7 +468,7 @@ class AgyCliClient:
 
     def _httpx(self):
         if self._http is None:
-            import httpx  # local import — keep cold path cheap
+            import httpx  # local import: keep cold path cheap
             self._http = httpx.Client(
                 verify=False,           # self-signed CN=localhost on 127.0.0.1
                 http2=False,
@@ -575,11 +575,11 @@ class AgyCliClient:
         # 2) Send the user turn. Per probe runs against the live daemon
         # (see ``probes/``), the top-level ``requestedModelId`` field on
         # SendUserCascadeMessageRequest is the path the JSON codec
-        # actually accepts as an enum string — the nested
+        # actually accepts as an enum string; the nested
         # ``cascadeConfig.plannerConfig.{plan,requested}Model`` shape
         # 400s with ``unexpected token "MODEL_..."``. The server still
         # complains "neither PlanModel nor RequestedModel specified"
-        # until ``LoadCodeAssist`` (which requires OAuth) succeeds — at
+        # until ``LoadCodeAssist`` (which requires OAuth) succeeds, at
         # which point the daemon resolves the model itself.
         send_body = {
             "cascadeId": cid,
@@ -704,5 +704,5 @@ class _AgyStreamingResult:
             choices=[choice], usage=None, system_fingerprint=None,
         )
 
-    def close(self):  # pragma: no cover — called by Hermes on early exit
+    def close(self):  # pragma: no cover, called by Hermes on early exit
         pass

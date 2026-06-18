@@ -339,12 +339,12 @@ def init_agent(
     #     misleading ``prompt token count … exceeds the limit of 168000``
     #     (real clamp ~300k, error text says 168k).  This is the regular tier.
     #   * POST /v1/messages       → the genuine **1,000,000** input window for
-    #     opus/sonnet 4.6–4.8, unlocked by the anthropic-beta triplet
+    #     opus/sonnet 4.6 to 4.8, unlocked by the anthropic-beta triplet
     #     (cli-internal + context-1m + task-budgets) that the Anthropic
     #     adapter already attaches for the Copilot base_url.
     # Hermes' default decision tree above has no Copilot+Claude branch, so a
     # Claude model on provider=copilot falls through to ``chat_completions``
-    # and hits the 168k clamp — the exact "1M → snap to 168k → cannot compress
+    # and hits the 168k clamp: the exact "1M → snap to 168k → cannot compress
     # further" failure.  Force the Anthropic Messages transport so Claude rides
     # the 1M path.  This intentionally overrides an explicit
     # ``api_mode: chat_completions`` from config because that default is simply
@@ -1533,14 +1533,14 @@ def init_agent(
         )
     agent.compression_enabled = compression_enabled
 
-    # P2: configurable compression-retry ceiling (default 3 — preserves
+    # P2: configurable compression-retry ceiling (default 3, preserves
     # historical behavior). LCM users who persist content to files and
     # reference them by a single line can afford many more passes; raise
     # via compression.max_attempts. Floor at 1.
     agent.max_compression_attempts = max(
         1, int(_compression_cfg.get("max_attempts", 3))
     )
-    # P3: oversized-single-message handling (default off — zero behavior
+    # P3: oversized-single-message handling (default off, zero behavior
     # change unless opted in). chunk_oversized_input enables the file-ref
     # primary path at the 413/context_overflow dead-ends. never_413 is the
     # master override that forces it on so a 413 is never surfaced.

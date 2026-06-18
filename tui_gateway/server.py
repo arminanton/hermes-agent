@@ -7283,7 +7283,7 @@ def _kick_autopilot_turn(sid: str, session: dict) -> bool:
     goal = (session.get("autopilot_goal") or "").strip()
     history = session.get("history") or []
     # Fresh session with no history: only start if an autopilot goal was set
-    # (e.g. `/autopilot goal <text>`) — start ON the goal. With neither history
+    # (e.g. `/autopilot goal <text>`): start ON the goal. With neither history
     # nor a goal there is nothing to resume.
     if not history and not goal:
         return False
@@ -7300,7 +7300,7 @@ def _kick_autopilot_turn(sid: str, session: dict) -> bool:
         target = f" toward this goal: {goal}" if goal else ""
         kick = (
             f"[Autopilot] Resume and keep working{target} until it is verifiably "
-            "complete. Take the next concrete action now — do not stop, "
+            "complete. Take the next concrete action now. Do not stop, "
             "summarize-and-wait, or ask the user; make the most defensible decision "
             "from context and act on it."
         )
@@ -7381,7 +7381,7 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
             # Autopilot is engine-enforced goal-chasing read live from
             # ``agent.autopilot_mode`` by agent/autopilot. The /autopilot slash
             # runs in the persistent _SlashWorker subprocess, so its os.environ /
-            # self.agent mutations never reach this live gateway agent — we must
+            # self.agent mutations never reach this live gateway agent, we must
             # mirror the toggle here (same reason /fast is mirrored). State is
             # held on the session dict so it survives agent rebuilds (model
             # switch) via _apply_autopilot_to_agent.
@@ -7395,7 +7395,7 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
             rest = toks[2].strip() if len(toks) > 2 else ""
             was_on = bool(session.get("autopilot", False))
             if sub in {"status", "?"}:
-                pass  # query only — no state change
+                pass  # query only, no state change
             elif sub == "clear":
                 session["autopilot_goal"] = ""
             elif sub == "goal":
@@ -7412,7 +7412,7 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
             elif sub == "":
                 session["autopilot"] = not was_on
             else:
-                pass  # unknown argument — leave state unchanged
+                pass  # unknown argument: leave state unchanged
             _apply_autopilot_to_agent(session, agent)
             _emit("session.info", sid, _session_info(agent, session))
             # Enable-kick: if autopilot just turned ON and the session is idle

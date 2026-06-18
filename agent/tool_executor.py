@@ -955,7 +955,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     _clarify_cb = _autopilot_mod.make_clarify_autoanswer(
                         agent, fallback=agent.clarify_callback
                     )
-            except Exception:  # noqa: BLE001 — never block a clarify on autopilot wiring
+            except Exception:  # noqa: BLE001 never block a clarify on autopilot wiring
                 pass
             function_result = _clarify_tool(
                 question=function_args.get("question", ""),

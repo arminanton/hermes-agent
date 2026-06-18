@@ -10202,7 +10202,7 @@ class HermesCLI:
             )
 
     def _toggle_autopilot(self, cmd_original: str = ""):
-        """Toggle autopilot — engine-enforced goal-chasing.
+        """Toggle autopilot (engine-enforced goal-chasing).
 
         When ON, the agent keeps working until an independent Hermes Council pass
         confirms the goal is verifiably complete, and clarify questions are
@@ -10217,7 +10217,7 @@ class HermesCLI:
             /autopilot goal            show the current autopilot goal
             /autopilot clear           clear the autopilot goal
 
-        The goal is set ONLY via the explicit ``goal`` subcommand — a bare
+        The goal is set ONLY via the explicit ``goal`` subcommand. A bare
         positional argument is no longer treated as a goal (that overload made
         ``/autopilot off now`` silently ENABLE with goal "off now"). When no
         autopilot goal is set, the engine falls back to the active standing
@@ -10267,7 +10267,7 @@ class HermesCLI:
         elif sub == "":
             new_state = not self._autopilot_on
         else:
-            # Unknown argument — do NOT silently enable with a goal (the old
+            # Unknown argument: do NOT silently enable with a goal (the old
             # footgun). Show usage and leave state unchanged.
             _cprint(
                 f"  {_Colors.DIM}Usage: /autopilot [on|off|status|goal <text>|clear]"
@@ -10282,7 +10282,7 @@ class HermesCLI:
         if new_state:
             _cprint(
                 f"  🤖 Autopilot {_Colors.BOLD}{_Colors.GREEN}ON{_Colors.RESET}"
-                " — working until the goal is verified complete (Council-checked)."
+                " working until the goal is verified complete (Council-checked)."
                 " /autopilot to stop."
             )
             # Autopilot is otherwise reactive (it engages at the END of a running
@@ -10293,7 +10293,7 @@ class HermesCLI:
         else:
             _cprint(
                 f"  🤖 Autopilot {_Colors.BOLD}{_Colors.RED}OFF{_Colors.RESET}"
-                " — I'll deliver and stop normally."
+                " I'll deliver and stop normally."
             )
 
     def _maybe_kick_autopilot(self) -> None:
@@ -10315,7 +10315,7 @@ class HermesCLI:
             if not (self.conversation_history or []):
                 # Fresh session with no history yet. If an autopilot goal was set
                 # (e.g. `/autopilot goal <text>`), START it now by enqueuing the
-                # goal as the opening task — parity with how `/goal <text>` kicks
+                # goal as the opening task: parity with how `/goal <text>` kicks
                 # a turn. Without this, `/autopilot goal <text>` on a cold session
                 # set the goal + enabled autopilot but nothing ran until the user
                 # manually sent a message (the "autopilot didn't work" report).
@@ -10331,13 +10331,13 @@ class HermesCLI:
             target = f" toward this goal: {goal}" if goal else ""
             kick = (
                 f"[Autopilot] Resume and keep working{target} until it is verifiably "
-                "complete. Take the next concrete action now — do not stop, "
+                "complete. Take the next concrete action now; do not stop, "
                 "summarize-and-wait, or ask the user; make the most defensible "
                 "decision from context and act on it."
             )
             self._pending_input.put(kick)
             _cprint("  ↻ Autopilot: resuming work…")
-        except Exception as exc:  # noqa: BLE001 — never break the toggle
+        except Exception as exc:  # noqa: BLE001 never break the toggle
             logging.debug("autopilot kick failed: %s", exc)
 
     def _handle_reasoning_command(self, cmd: str):

@@ -233,7 +233,7 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         id="agy-cli",
         name="Antigravity CLI (agy)",
         auth_type="external_process",
-        # Internal marker URL — never sent over HTTP. The agy binary at
+        # Internal marker URL, never sent over HTTP. The agy binary at
         # ~/.local/bin/agy handles its own OAuth + cloudcode-pa transport.
         # See agent/agy_cli_client.py + plugins/model-providers/agy-cli/.
         inference_base_url="agy://antigravity",
