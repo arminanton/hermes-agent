@@ -122,21 +122,24 @@ def test_copilot_anthropic_uses_bearer_not_apikey():
 
 def test_copilot_anthropic_identity_headers_present():
     low = _built_copilot_headers()
-    assert low.get("editor-version", "").startswith("vscode/")
-    # Integration-id is now copilot-cli (the official @github/copilot CLI's id),
-    # which exposes the full catalog incl gemini-3.x and the account's true
-    # per-model limits. The legacy vscode-chat value hid gemini-3.x.
-    assert low.get("copilot-integration-id") == "copilot-cli"
+    # The Copilot /v1/messages path delegates to the single identity builder
+    # (copilot_request_headers), so it presents the same Copilot CLI identity as
+    # the inference path: copilot-developer-cli integration-id (exposes the full
+    # 33-model catalog incl gemini-3.x + true per-model limits), the CLI
+    # User-Agent (copilot/<ver>), and NO Editor-* VS Code headers.
+    assert low.get("copilot-integration-id") == "copilot-developer-cli"
     assert low.get("x-github-api-version")          # date-versioned, e.g. 2026-06-01
-    assert low.get("user-agent") == "rest-book"
+    assert low.get("user-agent", "").startswith("copilot/")
     assert low.get("x-initiator") == "agent"
+    assert "editor-version" not in low
+    assert "editor-plugin-version" not in low
 
 
 def test_copilot_anthropic_no_inert_1m_slug():
     low = _built_copilot_headers()
     # The old `X-Copilot-Agent-Slug: copilot-1m-context` was proven INERT
     # (live probe 2026-06-07): it changed neither catalog visibility nor
-    # per-model limits. The real lever is Copilot-Integration-Id (copilot-cli),
+    # per-model limits. The real lever is Copilot-Integration-Id (copilot-developer-cli),
     # so the no-op slug must not be resent.
     assert "x-copilot-agent-slug" not in low
 

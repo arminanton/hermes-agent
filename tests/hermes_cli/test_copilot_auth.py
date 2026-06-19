@@ -196,18 +196,47 @@ class TestRequestHeaders:
     def test_default_headers_include_openai_intent(self, monkeypatch):
         from hermes_cli.copilot_auth import copilot_request_headers
         monkeypatch.setattr(
-            "hermes_cli.copilot_auth._latest_copilot_chat_version",
-            lambda: "1.2.3",
-        )
-        monkeypatch.setattr(
-            "hermes_cli.copilot_auth._latest_vscode_version",
-            lambda: "1.104.1",
+            "hermes_cli.copilot_auth._latest_copilot_cli_version",
+            lambda: "1.0.63",
         )
         headers = copilot_request_headers()
         assert headers["Openai-Intent"] == "conversation-panel"
-        assert headers["User-Agent"] == "rest-book"
-        assert headers["Editor-Version"] == "vscode/1.104.1"
-        assert headers["Editor-Plugin-Version"] == "copilot-chat/1.2.3"
+        # Presents as the @github/copilot CLI: UA is copilot/<ver> (short form
+        # or full "copilot/<ver> (<platform> <node>) term/<term>" when node is
+        # resolvable). The Editor-* VS Code Chat headers are NOT sent; the CLI
+        # sends Runtime-Client-Version instead.
+        assert headers["User-Agent"].startswith("copilot/1.0.63")
+        assert "Editor-Version" not in headers
+        assert "Editor-Plugin-Version" not in headers
+        assert headers["Runtime-Client-Version"] == "1.0.63"
+
+    def test_user_agent_full_cli_form_when_node_present(self, monkeypatch):
+        """When a Node runtime + TERM_PROGRAM are resolvable, the UA matches the
+        real CLI ``FG()`` builder: copilot/<ver> (<platform> <node>) term/<term>.
+        """
+        from hermes_cli import copilot_auth
+        monkeypatch.setattr(copilot_auth, "_latest_copilot_cli_version", lambda: "1.0.63")
+        monkeypatch.setattr(copilot_auth, "_copilot_node_version", lambda: "v22.22.3")
+        monkeypatch.setattr(copilot_auth.sys, "platform", "linux")
+        monkeypatch.setenv("HERMES_COPILOT_TERM_PROGRAM", "vscode")
+        ua = copilot_auth._copilot_user_agent()
+        assert ua == "copilot/1.0.63 (linux v22.22.3) term/vscode"
+
+    def test_user_agent_short_form_when_no_node(self, monkeypatch):
+        """No resolvable Node runtime → honest short core, no fabricated runtime."""
+        from hermes_cli import copilot_auth
+        monkeypatch.setattr(copilot_auth, "_latest_copilot_cli_version", lambda: "1.0.63")
+        monkeypatch.setattr(copilot_auth, "_copilot_node_version", lambda: "")
+        ua = copilot_auth._copilot_user_agent()
+        assert ua == "copilot/1.0.63"
+
+    def test_term_program_defaults_to_vscode_not_unknown(self, monkeypatch):
+        """Unset TERM_PROGRAM resolves to a valid default (vscode), never the
+        bot-signalling literal ``unknown`` the raw CLI builder would emit."""
+        from hermes_cli import copilot_auth
+        monkeypatch.delenv("HERMES_COPILOT_TERM_PROGRAM", raising=False)
+        monkeypatch.delenv("TERM_PROGRAM", raising=False)
+        assert copilot_auth._copilot_term_program() == "vscode"
 
     def test_agent_turn_sets_initiator(self):
         from hermes_cli.copilot_auth import copilot_request_headers
@@ -236,17 +265,13 @@ class TestCopilotDefaultHeaders:
     def test_includes_openai_intent(self, monkeypatch):
         from hermes_cli.models import copilot_default_headers
         monkeypatch.setattr(
-            "hermes_cli.copilot_auth._latest_copilot_chat_version",
-            lambda: "1.2.3",
-        )
-        monkeypatch.setattr(
-            "hermes_cli.copilot_auth._latest_vscode_version",
-            lambda: "1.104.1",
+            "hermes_cli.copilot_auth._latest_copilot_cli_version",
+            lambda: "1.0.63",
         )
         headers = copilot_default_headers()
         assert "Openai-Intent" in headers
         assert headers["Openai-Intent"] == "conversation-panel"
-        assert headers["User-Agent"] == "rest-book"
+        assert headers["User-Agent"].startswith("copilot/1.0.63")
 
     def test_includes_x_initiator(self):
         from hermes_cli.models import copilot_default_headers

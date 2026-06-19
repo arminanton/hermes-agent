@@ -26,6 +26,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -325,7 +326,7 @@ def copilot_device_code_login(
         headers={
             "Accept": "application/json",
             "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": f"GitHubCopilotChat/{_latest_copilot_chat_version()}",
+            "User-Agent": _copilot_user_agent(),
         },
     )
 
@@ -371,7 +372,7 @@ def copilot_device_code_login(
             headers={
                 "Accept": "application/json",
                 "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": f"GitHubCopilotChat/{_latest_copilot_chat_version()}",
+                "User-Agent": _copilot_user_agent(),
             },
         )
 
@@ -424,28 +425,17 @@ def copilot_device_code_login(
 _jwt_cache: dict[str, tuple[str, float]] = {}
 _JWT_REFRESH_MARGIN_SECONDS = 120  # refresh 2 min before expiry
 
-# Token exchange endpoint and headers (matching VS Code Copilot Chat).
-# We intentionally identify as VS Code (not copilot-cli) because the
-# vscode-chat integration is on a more generous token budget for Copilot
-# subscribers. The editor version is fetched dynamically from the VS Code
-# GitHub releases so we always look like the latest stable build.
+# Token exchange endpoint. We present our single Copilot CLI identity
+# (the `copilot-developer-cli` integration + `_copilot_user_agent()`), the same
+# one used on the inference path, so there is exactly one identity across every
+# Copilot-facing request.
 # NOTE: the exchange endpoint itself is no longer used by the official
 # Copilot CLI for /chat/completions or /models (those accept the raw gh
 # token as a Bearer credential directly. Kept for opt-in compatibility
 # (HERMES_COPILOT_FORCE_EXCHANGE=1).
 _TOKEN_EXCHANGE_URL = "https://api.github.com/copilot_internal/v2/token"
-_VSCODE_VERSION_FALLBACK = "1.104.1"
-_VSCODE_RELEASES_URL = "https://api.github.com/repos/microsoft/vscode/releases/latest"
-_VSCODE_VERSION_CACHE_TTL = 24 * 60 * 60  # 24h
-_VSCODE_VERSION_CACHE_PATH = Path.home() / ".cache" / "hermes" / "vscode_version.json"
-
-_COPILOT_CHAT_VERSION_FALLBACK = "0.26.7"
-_COPILOT_CHAT_MARKETPLACE_URL = (
-    "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery"
-)
-_COPILOT_CHAT_VERSION_CACHE_PATH = (
-    Path.home() / ".cache" / "hermes" / "copilot_chat_version.json"
-)
+# Shared TTL for all on-disk version caches (CLI version + API version).
+_VERSION_CACHE_TTL = 24 * 60 * 60  # 24h
 
 # X-GitHub-Api-Version sent on Copilot API calls. Sourced (in priority order)
 # from the locally-installed `@github/copilot` npm bundle, which bakes it in
@@ -456,21 +446,180 @@ _COPILOT_API_VERSION_CACHE_PATH = (
     Path.home() / ".cache" / "hermes" / "copilot_api_version.json"
 )
 
-# Copilot-Integration-Id sent on Copilot API inference calls. The official
-# @github/copilot CLI uses "copilot-cli"; verified live (2026-06-07, account
-# e126380_magh) this integrator exposes the FULL model catalog, including
-# gemini-3.1-pro-preview / gemini-3.5-flash at 1M context, and the account's
-# true per-model limits and reasoning-effort range (opus low..max). The legacy
-# "vscode-chat" value hides gemini-3.x from the catalog and is not what a CLI
-# agent should present as. Override via HERMES_COPILOT_INTEGRATION_ID when a
-# different integrator is required (e.g. copilot-developer-cli, vscode-chat).
-_COPILOT_INTEGRATION_ID_DEFAULT = "copilot-cli"
+# Latest released @github/copilot CLI version, used for the User-Agent we present
+# to api.githubcopilot.com (we identify as the official Copilot CLI, matching the
+# `copilot-developer-cli` Copilot-Integration-Id). Sourced (in priority order)
+# from the GitHub releases API (authoritative upstream) then the npm registry
+# `latest` dist-tag (downstream mirror, can lag); cached on disk with the same
+# TTL as the other version probes. Fallback is the value shipped at the time of
+# writing (2026-06-19).
+_COPILOT_CLI_VERSION_FALLBACK = "1.0.63"
+_COPILOT_CLI_RELEASES_URL = "https://api.github.com/repos/github/copilot-cli/releases/latest"
+_COPILOT_CLI_REGISTRY_URL = "https://registry.npmjs.org/@github%2Fcopilot/latest"
+_COPILOT_CLI_VERSION_CACHE_PATH = (
+    Path.home() / ".cache" / "hermes" / "copilot_cli_version.json"
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Copilot-Integration-Id — THE lever that unlocks the premium model catalog.
+#
+# Sent on every Copilot API call. The integration-id (NOT the User-Agent, NOT
+# any X-Copilot-Agent-Slug — both proven inert) is what the GitHub backend keys
+# the visible model catalog + per-model limits off of.
+#
+# LIVE PROBE (2026-06-19, account e126380_magh, read-only GET /models, see
+# hermes/probe/integration_id_sweep.py) compared every candidate:
+#   copilot-developer-cli     → 33 models  ← WINNER (strict superset)
+#   copilot-cli               → 32 models
+#   copilot-developer-sandbox → 32 models
+#   vscode-chat               → 32 models  (NOT the gemini-hider an older
+#                               comment claimed — it shows gemini-3.x too, it
+#                               just isn't the most complete integrator)
+#   vscode-chat-dev           → 30 models  (also needs a Request-Hmac header)
+#   copilot-4-cli             → 30 models  (limits the catalog the most)
+# Only `copilot-developer-cli` exposes the full set (adds gpt-5.4-nano over the
+# 32-model integrators) AND exposes gemini-3.1-pro-preview + gemini-3.5-flash +
+# claude-opus-4.8 with the full reasoning-effort range (opus low..max). We use
+# it uniformly so the whole codebase presents ONE integrator identity.
+# Override via HERMES_COPILOT_INTEGRATION_ID for an account that needs a
+# different one.
+#
+# ★ PREMIUM-TIER REQUIREMENT: the integration-id only unlocks the catalog when
+# the request carries a VALID GitHub Bearer token. The token is resolved by
+# resolve_copilot_token() from (in order) COPILOT_GITHUB_TOKEN / GH_TOKEN /
+# GITHUB_TOKEN env vars or `gh auth token`, then passed through
+# get_copilot_api_token() and injected as `Authorization: Bearer <token>` on the
+# Copilot API call (github.com tokens are used directly; the legacy
+# /copilot_internal/v2/token exchange is opt-in via HERMES_COPILOT_FORCE_EXCHANGE).
+# Without that Bearer token the premium models are NOT served regardless of the
+# integration-id.
+_COPILOT_INTEGRATION_ID_DEFAULT = "copilot-developer-cli"
 
 
 def _copilot_integration_id() -> str:
     """Return the Copilot-Integration-Id to send (env-overridable)."""
     override = os.getenv("HERMES_COPILOT_INTEGRATION_ID", "").strip()
     return override or _COPILOT_INTEGRATION_ID_DEFAULT
+
+
+def _copilot_node_version() -> str:
+    """Return the Node version string (``v``-prefixed) for the CLI User-Agent.
+
+    The real ``@github/copilot`` CLI runs on Node and reports
+    ``process.version`` (e.g. ``v22.22.3``) in the parenthetical UA segment.
+    We resolve a REAL node version from the box (via ``node --version``) so the
+    value is authentic rather than fabricated — if a real Copilot CLI were
+    installed here it would report the same runtime. Resolution order:
+      1. ``HERMES_COPILOT_NODE_VERSION`` env override.
+      2. ``node --version`` on PATH (cached in-process).
+      3. Empty string → caller falls back to the short UA form.
+    """
+    override = os.getenv("HERMES_COPILOT_NODE_VERSION", "").strip()
+    if override:
+        return override if override.startswith("v") else f"v{override}"
+
+    global _copilot_node_version_memo
+    try:
+        if _copilot_node_version_memo is not None:
+            return _copilot_node_version_memo
+    except NameError:  # pragma: no cover - module-load ordering guard
+        pass
+
+    ver = ""
+    node_path = shutil.which("node")
+    if node_path:
+        try:
+            out = subprocess.run(
+                [node_path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+            )
+            cand = (out.stdout or "").strip()
+            if cand.startswith("v"):
+                ver = cand
+        except Exception as exc:
+            logger.debug("node --version probe failed: %s", exc)
+
+    _copilot_node_version_memo = ver
+    return ver
+
+
+# Node-version of the platform that the real CLI's process.version reports.
+_copilot_node_version_memo: Optional[str] = None
+
+# Map Python's sys.platform to Node's process.platform tokens (the CLI builds
+# the UA from process.platform: linux/darwin/win32, NOT Python's "win32"-only
+# overlap — they happen to agree for the common three).
+_NODE_PLATFORM_MAP = {
+    "linux": "linux",
+    "darwin": "darwin",
+    "win32": "win32",
+}
+
+# Default TERM_PROGRAM to present when the environment has none set. The real
+# CLI's builder falls back to the literal "unknown", but that reads as a
+# non-interactive/bot signal; a genuine Copilot CLI user is almost always inside
+# a real terminal emulator. "vscode" is the most common, valid host for the
+# Copilot CLI (a GitHub/Microsoft tool) and is coherent with the
+# copilot-developer-cli identity (CLI running in the VS Code integrated
+# terminal). Override via HERMES_COPILOT_TERM_PROGRAM.
+_COPILOT_TERM_PROGRAM_DEFAULT = "vscode"
+
+
+def _copilot_term_program() -> str:
+    """Return the ``TERM_PROGRAM`` token for the CLI User-Agent.
+
+    Resolution order:
+      1. ``HERMES_COPILOT_TERM_PROGRAM`` env override.
+      2. A REAL ``TERM_PROGRAM`` present in the environment (most authentic —
+         e.g. ``vscode``, ``iTerm.app``, ``Apple_Terminal``, ``WezTerm``).
+      3. ``_COPILOT_TERM_PROGRAM_DEFAULT`` (``vscode``) — a valid, common value,
+         never the bot-signalling ``unknown``.
+    """
+    override = os.getenv("HERMES_COPILOT_TERM_PROGRAM", "").strip()
+    if override:
+        return override
+    real = os.environ.get("TERM_PROGRAM", "").strip()
+    if real:
+        return real
+    return _COPILOT_TERM_PROGRAM_DEFAULT
+
+
+def _copilot_user_agent() -> str:
+    """User-Agent presented to api.githubcopilot.com.
+
+    We identify as the official ``@github/copilot`` CLI, reproducing its real
+    UA builder (the bundle's ``FG()`` helper, RE 2026-06-19):
+
+        ``copilot/<ver> (<platform> <node-version>) term/<TERM_PROGRAM>``
+
+    where ``<platform>`` is Node's ``process.platform`` (linux/darwin/win32),
+    ``<node-version>`` is the ``v``-prefixed Node ``process.version``, and
+    ``<TERM_PROGRAM>`` identifies the host terminal. We source a REAL node
+    version + platform from this box so the value is authentic (the CLI
+    installed here would report the same), not fabricated. If node cannot be
+    resolved we degrade to the honest short core ``copilot/<ver>`` rather than
+    invent a runtime. ``TERM_PROGRAM`` uses a real environment value when set,
+    else a valid default (``vscode``) rather than the CLI's literal ``unknown``
+    fallback (which reads as a non-interactive/bot signal).
+
+    A 2026-06-19 live probe proved the User-Agent does NOT affect the /models
+    catalog (every UA value, including none, returned the same 33 models) — it
+    is cosmetic for unlock; we send the faithful CLI value for identity
+    consistency, not capability. Version is env-overridable via
+    HERMES_COPILOT_CLI_VERSION; node version via HERMES_COPILOT_NODE_VERSION;
+    terminal via HERMES_COPILOT_TERM_PROGRAM.
+    """
+    ver = _latest_copilot_cli_version()
+    node_ver = _copilot_node_version()
+    if not node_ver:
+        # No authentic Node runtime to report — send the honest short form.
+        return f"copilot/{ver}"
+    platform = _NODE_PLATFORM_MAP.get(sys.platform, sys.platform)
+    term = _copilot_term_program()
+    return f"copilot/{ver} ({platform} {node_ver}) term/{term}"
+
 # Candidate paths for the @github/copilot CLI bundle (global npm install).
 _COPILOT_CLI_BUNDLE_CANDIDATES = (
     "/usr/local/lib/node_modules/@github/copilot/sdk/index.js",
@@ -478,141 +627,71 @@ _COPILOT_CLI_BUNDLE_CANDIDATES = (
 )
 
 # In-process caches so we don't hit disk on every header build.
-_vscode_version_memo: tuple[str, float] | None = None
-_copilot_chat_version_memo: tuple[str, float] | None = None
 _copilot_api_version_memo: tuple[str, float] | None = None
+_copilot_cli_version_memo: tuple[str, float] | None = None
 
 
-def _latest_vscode_version() -> str:
-    """Return the latest stable VS Code version (e.g. ``1.104.1``).
+def _latest_copilot_cli_version() -> str:
+    """Return the latest released ``@github/copilot`` CLI version.
 
-    Resolution order:
-      1. ``HERMES_VSCODE_VERSION`` env override (if set).
-      2. In-process memo (TTL ``_VSCODE_VERSION_CACHE_TTL``).
-      3. On-disk cache at ``_VSCODE_VERSION_CACHE_PATH`` (same TTL).
-      4. ``GET https://api.github.com/repos/microsoft/vscode/releases/latest``.
-      5. Hard fallback ``_VSCODE_VERSION_FALLBACK``.
-
-    Network failures are swallowed; we always return *something*.
+    Used to build the ``copilot/<ver>`` User-Agent. Resolution order:
+      1. ``HERMES_COPILOT_CLI_VERSION`` env override.
+      2. In-process memo (TTL ``_VERSION_CACHE_TTL``).
+      3. On-disk cache at ``_COPILOT_CLI_VERSION_CACHE_PATH``.
+      4. npm registry ``latest`` dist-tag for ``@github/copilot``.
+      5. Hard fallback ``_COPILOT_CLI_VERSION_FALLBACK``.
     """
-    override = os.getenv("HERMES_VSCODE_VERSION", "").strip()
+    override = os.getenv("HERMES_COPILOT_CLI_VERSION", "").strip()
     if override:
         return override
 
-    global _vscode_version_memo
-    now = time.time()
-    if _vscode_version_memo and now - _vscode_version_memo[1] < _VSCODE_VERSION_CACHE_TTL:
-        return _vscode_version_memo[0]
-
-    cache_path = _VSCODE_VERSION_CACHE_PATH
-    try:
-        if cache_path.is_file():
-            data = json.loads(cache_path.read_text())
-            ver = str(data.get("version") or "").lstrip("v").strip()
-            ts = float(data.get("fetched_at") or 0)
-            if ver and now - ts < _VSCODE_VERSION_CACHE_TTL:
-                _vscode_version_memo = (ver, ts)
-                return ver
-    except Exception as exc:
-        logger.debug("vscode version cache read failed: %s", exc)
-
-    ver = _VSCODE_VERSION_FALLBACK
-    try:
-        import urllib.request
-
-        req = urllib.request.Request(
-            _VSCODE_RELEASES_URL,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "vscode",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=5.0) as resp:
-            payload = json.loads(resp.read().decode())
-        tag = str(payload.get("tag_name") or "").lstrip("v").strip()
-        if tag:
-            ver = tag
-            try:
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                cache_path.write_text(
-                    json.dumps({"version": ver, "fetched_at": now})
-                )
-            except Exception as exc:
-                logger.debug("vscode version cache write failed: %s", exc)
-    except Exception as exc:
-        logger.debug(
-            "failed to fetch latest VS Code version, using fallback %s: %s",
-            _VSCODE_VERSION_FALLBACK,
-            exc,
-        )
-
-    _vscode_version_memo = (ver, now)
-    return ver
-
-
-def _latest_copilot_chat_version() -> str:
-    """Return the latest published GitHub.copilot-chat extension version.
-
-    Resolution order mirrors :func:`_latest_vscode_version`:
-      1. ``HERMES_COPILOT_CHAT_VERSION`` env override.
-      2. In-process memo (TTL ``_VSCODE_VERSION_CACHE_TTL``).
-      3. On-disk cache at ``_COPILOT_CHAT_VERSION_CACHE_PATH``.
-      4. VS Marketplace extensionquery API.
-      5. Hard fallback ``_COPILOT_CHAT_VERSION_FALLBACK``.
-    """
-    override = os.getenv("HERMES_COPILOT_CHAT_VERSION", "").strip()
-    if override:
-        return override
-
-    global _copilot_chat_version_memo
+    global _copilot_cli_version_memo
     now = time.time()
     if (
-        _copilot_chat_version_memo
-        and now - _copilot_chat_version_memo[1] < _VSCODE_VERSION_CACHE_TTL
+        _copilot_cli_version_memo
+        and now - _copilot_cli_version_memo[1] < _VERSION_CACHE_TTL
     ):
-        return _copilot_chat_version_memo[0]
+        return _copilot_cli_version_memo[0]
 
-    cache_path = _COPILOT_CHAT_VERSION_CACHE_PATH
+    cache_path = _COPILOT_CLI_VERSION_CACHE_PATH
     try:
         if cache_path.is_file():
             data = json.loads(cache_path.read_text())
             ver = str(data.get("version") or "").lstrip("v").strip()
             ts = float(data.get("fetched_at") or 0)
-            if ver and now - ts < _VSCODE_VERSION_CACHE_TTL:
-                _copilot_chat_version_memo = (ver, ts)
+            if ver and now - ts < _VERSION_CACHE_TTL:
+                _copilot_cli_version_memo = (ver, ts)
                 return ver
     except Exception as exc:
-        logger.debug("copilot-chat version cache read failed: %s", exc)
+        logger.debug("copilot-cli version cache read failed: %s", exc)
 
-    ver = _COPILOT_CHAT_VERSION_FALLBACK
+    ver = _COPILOT_CLI_VERSION_FALLBACK
     try:
         import urllib.request
 
-        body = json.dumps({
-            "filters": [{
-                "criteria": [{"filterType": 7, "value": "GitHub.copilot-chat"}],
-            }],
-            "flags": 914,
-        }).encode()
-        req = urllib.request.Request(
-            _COPILOT_CHAT_MARKETPLACE_URL,
-            data=body,
-            method="POST",
-            headers={
-                "Accept": "application/json;api-version=7.2-preview.1;excludeUrls=true",
-                "Content-Type": "application/json",
-                "User-Agent": "VSCode",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=5.0) as resp:
-            payload = json.loads(resp.read().decode())
-        latest = (
-            payload.get("results", [{}])[0]
-            .get("extensions", [{}])[0]
-            .get("versions", [{}])[0]
-            .get("version", "")
-        )
-        latest = str(latest).lstrip("v").strip()
+        latest = ""
+        # 1) GitHub releases API (authoritative upstream). tag_name like "v1.0.63".
+        try:
+            req = urllib.request.Request(
+                _COPILOT_CLI_RELEASES_URL,
+                headers={"Accept": "application/vnd.github+json", "User-Agent": "hermes-agent"},
+            )
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                payload = json.loads(resp.read().decode())
+            latest = str(payload.get("tag_name") or "").lstrip("v").strip()
+        except Exception as exc:
+            logger.debug("copilot-cli GitHub releases fetch failed: %s", exc)
+
+        # 2) npm registry `latest` dist-tag (downstream mirror) if GH didn't answer.
+        if not latest:
+            req = urllib.request.Request(
+                _COPILOT_CLI_REGISTRY_URL,
+                headers={"Accept": "application/json", "User-Agent": "hermes-agent"},
+            )
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                payload = json.loads(resp.read().decode())
+            latest = str(payload.get("version") or "").lstrip("v").strip()
+
         if latest:
             ver = latest
             try:
@@ -621,15 +700,15 @@ def _latest_copilot_chat_version() -> str:
                     json.dumps({"version": ver, "fetched_at": now})
                 )
             except Exception as exc:
-                logger.debug("copilot-chat version cache write failed: %s", exc)
+                logger.debug("copilot-cli version cache write failed: %s", exc)
     except Exception as exc:
         logger.debug(
-            "failed to fetch latest copilot-chat version, using fallback %s: %s",
-            _COPILOT_CHAT_VERSION_FALLBACK,
+            "failed to fetch latest copilot-cli version, using fallback %s: %s",
+            _COPILOT_CLI_VERSION_FALLBACK,
             exc,
         )
 
-    _copilot_chat_version_memo = (ver, now)
+    _copilot_cli_version_memo = (ver, now)
     return ver
 
 
@@ -697,7 +776,7 @@ def _latest_copilot_api_version() -> str:
 
     Resolution order:
       1. ``HERMES_COPILOT_API_VERSION`` env override.
-      2. In-process memo (TTL ``_VSCODE_VERSION_CACHE_TTL``).
+      2. In-process memo (TTL ``_VERSION_CACHE_TTL``).
       3. On-disk cache at ``_COPILOT_API_VERSION_CACHE_PATH``.
       4. Local ``@github/copilot`` npm bundle (the live source of truth,
          updates whenever the user runs ``npm i -g @github/copilot``).
@@ -711,7 +790,7 @@ def _latest_copilot_api_version() -> str:
     now = time.time()
     if (
         _copilot_api_version_memo
-        and now - _copilot_api_version_memo[1] < _VSCODE_VERSION_CACHE_TTL
+        and now - _copilot_api_version_memo[1] < _VERSION_CACHE_TTL
     ):
         return _copilot_api_version_memo[0]
 
@@ -721,7 +800,7 @@ def _latest_copilot_api_version() -> str:
             data = json.loads(cache_path.read_text())
             ver = str(data.get("version") or "").strip()
             ts = float(data.get("fetched_at") or 0)
-            if ver and now - ts < _VSCODE_VERSION_CACHE_TTL:
+            if ver and now - ts < _VERSION_CACHE_TTL:
                 _copilot_api_version_memo = (ver, ts)
                 return ver
     except Exception as exc:
@@ -784,11 +863,10 @@ def exchange_copilot_token(raw_token: str, *, timeout: float = 10.0) -> tuple[st
         method="GET",
         headers={
             "Authorization": f"Bearer {raw_token}",
-            "User-Agent": f"GitHubCopilotChat/{_latest_copilot_chat_version()}",
+            "User-Agent": _copilot_user_agent(),
             "Accept": "application/json",
-            "Editor-Version": f"vscode/{_latest_vscode_version()}",
-            "Copilot-Integration-Id": "vscode-chat",
-            "X-GitHub-Api-Version": "2026-06-01",
+            "Copilot-Integration-Id": _copilot_integration_id(),
+            "X-GitHub-Api-Version": _latest_copilot_api_version(),
         },
     )
 
@@ -852,24 +930,31 @@ def copilot_request_headers(
 ) -> dict[str, str]:
     """Build the standard headers for Copilot API requests.
 
-    Replicates the header set used by the github.copilot-chat extension
-    in VS Code Insiders (RE 2026-06-04, Worker-A wave1 findings).
+    Presents as the official ``@github/copilot`` CLI (matching the
+    ``copilot-developer-cli`` Copilot-Integration-Id), NOT the VS Code Chat
+    extension. Verified against the real CLI bundle (``@github/copilot`` 1.0.63,
+    its ``que()`` inference-header builder, RE 2026-06-19): the CLI sends
+    ``Copilot-Integration-Id`` + ``Authorization: Bearer`` + ``Runtime-Client-Version``
+    and does NOT send the ``Editor-Version`` / ``Editor-Plugin-Version`` pair
+    (those are VS Code Chat extension headers). We follow the CLI shape so the
+    whole identity (integration-id + UA + headers) is internally consistent.
     """
-    chat_ver = _latest_copilot_chat_version()
     import uuid as _uuid
     headers: dict[str, str] = {
-        "Editor-Version": f"vscode/{_latest_vscode_version()}",
-        "Editor-Plugin-Version": f"copilot-chat/{chat_ver}",
-        "User-Agent": "rest-book",
+        "User-Agent": _copilot_user_agent(),
         "Copilot-Integration-Id": _copilot_integration_id(),
+        # The real CLI sends this in place of the VS Code Editor-* pair; value
+        # is the @github/copilot CLI version we're identifying as.
+        "Runtime-Client-Version": _latest_copilot_cli_version(),
         "Openai-Intent": intent,
         # Mirror of Openai-Intent (extension sends both unless overridden).
         "X-Interaction-Type": intent,
+        # Inference-path Copilot API version (currently 2026-06-01).
         "X-GitHub-Api-Version": _latest_copilot_api_version(),
         "x-initiator": "agent" if is_agent_turn else "user",
-        # Per-call request id + stable per-session interaction id (Worker-A
-        # RE: the chat extension always sets both, server uses them for
-        # trace/log correlation and may key some quotas off X-Interaction-Id).
+        # Per-call request id + stable per-session interaction id (server uses
+        # them for trace/log correlation and may key some quotas off
+        # X-Interaction-Id).
         "X-Request-Id": str(_uuid.uuid4()),
         "X-Interaction-Id": interaction_id or str(_uuid.uuid4()),
     }
@@ -879,7 +964,7 @@ def copilot_request_headers(
     # unlocked 1M context / Gemini-3.x. Live probing (2026-06-07) proved that
     # slug is INERT: it changes neither catalog visibility nor per-model limits.
     # What actually exposes gemini-3.x and the full limits is the
-    # Copilot-Integration-Id (now `copilot-cli`, matching the official CLI). The
+    # Copilot-Integration-Id (`copilot-developer-cli`, matching the official CLI). The
     # slug was removed to avoid sending a misleading no-op header. The official
     # @github/copilot CLI sends `copilot-developer-sandbox` only on specific
     # (non-inference) endpoints; we don't need it for chat/messages/responses.

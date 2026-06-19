@@ -80,7 +80,7 @@ _version_memo: Optional[tuple[str, float]] = None
 def _gemini_cli_version() -> str:
     """Return the latest ``@google/gemini-cli`` version on npm.
 
-    Resolution order mirrors :func:`hermes_cli.copilot_auth._latest_vscode_version`:
+    Resolution order mirrors :func:`hermes_cli.copilot_auth._latest_copilot_cli_version`:
       1. ``HERMES_GEMINI_CLI_VERSION`` env override.
       2. In-process memo (TTL ``_VERSION_CACHE_TTL``).
       3. On-disk cache at ``_VERSION_CACHE_PATH``.

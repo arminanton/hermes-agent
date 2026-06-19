@@ -729,8 +729,9 @@ _COMMON_BETAS = [
     "interleaved-thinking-2025-05-14",
     "fine-grained-tool-streaming-2025-05-14",
     # Added 2026-06-04 from Worker-A RE of github.copilot-chat 0.52.2026060402.
-    # The official VS Code Copilot Chat extension sends these on every
-    # /v1/messages call alongside `Copilot-Integration-Id: vscode-chat`.
+    # The VS Code Copilot Chat extension historically sent these on every
+    # /v1/messages call. Hermes sends them under its single Copilot CLI identity
+    # (`Copilot-Integration-Id: copilot-developer-cli`).
     # `advanced-tool-use-2025-11-20` enables the newer tool-call envelopes
     # that Claude 4.7+ emits; `context-management-2025-06-27` enables the
     # `context_management: [{type: "clear_tool_results_20250919", ...}]`
@@ -1051,8 +1052,9 @@ def _common_betas_for_base_url(
         # non-existent betas was identified by Worker G as a likely
         # contributor to historical "Context length exceeded → snap-back to
         # 168k" loops on accounts not pre-advertising context-1m. 1M context
-        # is unlocked PURELY by the `Copilot-Integration-Id: vscode-chat`
-        # header + the server-side account entitlement, never by any beta.
+        # is unlocked by the `Copilot-Integration-Id` we send
+        # (`copilot-developer-cli`, the official CLI's id) + the server-side
+        # account entitlement, never by any beta.
         #
         # All three real betas already live in _COMMON_BETAS, so this block
         # is intentionally a no-op now \u2014 kept as a docstring marker so
@@ -1253,10 +1255,9 @@ def build_anthropic_client(
         _copilot_headers: dict[str, str] = {}
         try:
             from hermes_cli.copilot_auth import copilot_request_headers
-            # This deployment serves Claude; pass a claude sentinel so
-            # copilot_request_headers injects X-Copilot-Agent-Slug
-            # (withheld only for gemini/catalog lookups). The slug is
-            # account-level, identical for every claude-* per the probe.
+            # Single Copilot CLI identity (copilot-developer-cli + CLI User-Agent),
+            # the same builder used on the inference path, so /v1/messages and
+            # /chat/completions present one consistent identity.
             _copilot_headers = copilot_request_headers(
                 is_agent_turn=True, model="claude"
             )

@@ -540,11 +540,13 @@ class AutoRouter:
             api_token = get_copilot_api_token(bearer_token)
         except Exception as exc:  # pragma: no cover
             logger.debug("auto-mode: hermes_cli.copilot_auth unavailable: %s", exc)
+            # copilot_auth is the single source of truth; this fallback only
+            # fires if it is unavailable. Mirror its Copilot CLI identity shape
+            # (no Editor-* VS Code headers) so the identity stays consistent.
             base = {
-                "Editor-Version": "vscode/1.104.1",
-                "Editor-Plugin-Version": "copilot-chat/0.26.7",
-                "User-Agent": "GitHubCopilotChat/0.26.7",
-                "Copilot-Integration-Id": "vscode-chat",
+                "User-Agent": "copilot/1.0.63",
+                "Copilot-Integration-Id": "copilot-developer-cli",
+                "Runtime-Client-Version": "1.0.63",
                 "Openai-Intent": "conversation-edits",
                 "X-GitHub-Api-Version": "2026-06-01",
                 "x-initiator": "agent",
