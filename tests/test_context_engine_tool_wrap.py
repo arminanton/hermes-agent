@@ -103,8 +103,8 @@ def test_no_empty_names_emitted():
 def test_cmx_hermes_engine_schemas_are_bare():
     """The cmx engine itself must now expose BARE schemas (source-level guard)."""
     import importlib.util, os
-    cmx_path = "/mnt/devvm/custom/hermes/hermes-cmx/src/cmx/hermes_engine.py"
-    if not os.path.exists(cmx_path):
+    cmx_path = os.environ.get("CMX_ENGINE_PATH", "")
+    if not cmx_path or not os.path.exists(cmx_path):
         import pytest
         pytest.skip("cmx source not present in this layout")
     # Parse TOOL_SCHEMAS without importing the heavy engine deps.

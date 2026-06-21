@@ -700,9 +700,8 @@ def get_provider_info(provider_id: str) -> Optional[ProviderInfo]:
 #
 # This override table is the single source of truth for per-(provider, model)
 # context_window / max_output / supported reasoning_effort whenever the data
-# is provably wrong upstream. Source of truth document:
-#
-#   /mnt/devvm/custom/hermes/review-copilot-opus-context/AUTHORITATIVE_LIMITS.md
+# is provably wrong upstream. Source of truth: empirically probed per-model
+# context/output limits (documented in the PR description).
 #
 # Matching rules:
 #   1. provider_id is normalized lowercase + first segment (e.g. "github-copilot",

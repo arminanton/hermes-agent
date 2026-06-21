@@ -1396,7 +1396,7 @@ _CODEX_OAUTH_CONTEXT_FALLBACK: Dict[str, int] = {
 # UNDER-reports. The codex /models `context_window` is the DEFAULT
 # input-budget-after-output-reservation, NOT the hard cap. Verified live
 # 2026-06-08 against chatgpt.com/backend-api/codex with a fresh ChatGPT Pro
-# token (account 94125662): gpt-5.4 actually accepts ~900K input (891,509 →
+# token (a paid ChatGPT Pro account): gpt-5.4 actually accepts ~900K input (891,509 →
 # OK, ~957K → context_length_exceeded) even though /models advertises 272K.
 # gpt-5.4-mini and gpt-5.5 ARE genuinely ~272K input (gpt-5.5's documented
 # 400K total minus a fixed 128K output reservation; no API lever (model

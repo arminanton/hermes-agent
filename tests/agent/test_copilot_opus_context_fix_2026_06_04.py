@@ -1,7 +1,7 @@
 """Regression tests for the copilot-opus-context fix series (Phase A1/A2/A6/D).
 
-These pin the policy decisions made on 2026-06-04 in the isolated workspace
-review at /mnt/devvm/custom/hermes/review-copilot-opus-context/.
+These pin the policy decisions made on 2026-06-04 in an isolated review
+workspace.
 
 Backed by empirical probes captured in the same workspace
 (probes/effort-thinking-results.json):

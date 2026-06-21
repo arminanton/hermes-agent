@@ -8,8 +8,8 @@ import os
 import sys
 
 # Front-load the worktree (mirror the dev wrapper) so our patched modules win.
-WT = "/mnt/devvm/custom/hermes/review-sysprompt-prelude"
-if WT not in sys.path:
+WT = os.environ.get("HERMES_PRELUDE_WORKTREE", "")
+if WT and WT not in sys.path:
     sys.path.insert(0, WT)
 
 # Use the REAL standalone map the operator will use.
