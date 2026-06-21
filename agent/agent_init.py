@@ -1095,6 +1095,11 @@ def init_agent(
     agent._parent_session_id = parent_session_id
     agent._last_flushed_db_idx = 0  # tracks DB-write cursor to prevent duplicate writes
     agent._session_db_created = False  # DB row deferred to run_conversation()
+    # When True, this agent NEVER persists to the canonical session store
+    # (state.db) or the JSON snapshot, regardless of session_id. Set on the
+    # background skill/memory review fork so its harness turn can't leak into
+    # the user's real session and hijack the next live turn. Default False.
+    agent._persist_disabled = False
     agent._session_init_model_config = {
         "max_iterations": agent.max_iterations,
         "reasoning_config": reasoning_config,
