@@ -5000,13 +5000,71 @@ def _(rid, params: dict) -> dict:
     )
 
 
+def _materialize_data_url_image(session: dict, data_url: str, original_path: str = "") -> "Path | None":
+    """Persist a base64 ``data:`` image URL into the server's ``images/`` dir.
+
+    Used by ``image.attach`` when the client-supplied path does not resolve to a
+    real file on THIS host -- the remote-backend case where the desktop app runs
+    on one machine (e.g. a Mac) and the gateway/agent runs on another (e.g. EC2),
+    so the Mac-local ``composer-images/`` path the app sends cannot be opened
+    server-side. The desktop already computes the image bytes as a data URL for
+    its thumbnail preview, so it can ship them inline; here we decode and save
+    them so the rest of the attach pipeline (vision pre-analysis, model attach)
+    works exactly as it does for a locally-resolved path. Mirrors the
+    ``clipboard.paste`` handler's save-into-images/ behavior.
+
+    Returns the saved ``Path``, or ``None`` if the data URL is malformed/empty.
+    """
+    import base64
+    import re as _re
+
+    m = _re.match(r"^data:image/([\w.+-]+);base64,(.*)$", data_url, _re.DOTALL)
+    if not m:
+        return None
+    subtype = (m.group(1) or "png").lower()
+    try:
+        blob = base64.b64decode(m.group(2) or "", validate=False)
+    except Exception:
+        return None
+    if not blob:
+        return None
+
+    # Resolve a sane file extension: prefer the original filename's extension,
+    # then a small subtype->ext map, then the subtype itself, else .png.
+    ext_map = {"jpeg": ".jpg", "svg+xml": ".svg", "x-icon": ".ico"}
+    orig_ext = Path(original_path).suffix.lower() if original_path else ""
+    if orig_ext and _re.match(r"^\.[a-z0-9]{1,5}$", orig_ext):
+        ext = orig_ext
+    elif subtype in ext_map:
+        ext = ext_map[subtype]
+    elif _re.match(r"^[a-z0-9]{1,5}$", subtype):
+        ext = "." + subtype
+    else:
+        ext = ".png"
+
+    session["image_counter"] = session.get("image_counter", 0) + 1
+    img_dir = _hermes_home / "images"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    img_path = (
+        img_dir
+        / f"upload_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{session['image_counter']}{ext}"
+    )
+    try:
+        img_path.write_bytes(blob)
+    except Exception:
+        session["image_counter"] = max(0, session["image_counter"] - 1)
+        return None
+    return img_path
+
+
 @method("image.attach")
 def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
     raw = str(params.get("path", "") or "").strip()
-    if not raw:
+    data_url = str(params.get("data_url", "") or "").strip()
+    if not raw and not data_url:
         return _err(rid, 4015, "path required")
     try:
         from cli import (
@@ -5016,15 +5074,30 @@ def _(rid, params: dict) -> dict:
             _split_path_input,
         )
 
-        dropped = _detect_file_drop(raw)
-        if dropped:
-            image_path = dropped["path"]
-            remainder = dropped["remainder"]
-        else:
-            path_token, remainder = _split_path_input(raw)
-            image_path = _resolve_attachment_path(path_token)
-            if image_path is None:
-                return _err(rid, 4016, f"image not found: {path_token}")
+        image_path = None
+        remainder = ""
+        if raw:
+            dropped = _detect_file_drop(raw)
+            if dropped:
+                candidate = dropped["path"]
+                remainder = dropped["remainder"]
+            else:
+                path_token, remainder = _split_path_input(raw)
+                candidate = _resolve_attachment_path(path_token)
+            # ``candidate`` may be None (unresolved) or name a path that does not
+            # exist on THIS host -- the classic remote-backend case where the
+            # desktop sent a client-local path the gateway can't see. Only treat
+            # it as the image when it resolves to a real local file.
+            if candidate is not None and Path(candidate).exists():
+                image_path = Path(candidate)
+
+        # Remote-mode fallback: the path didn't resolve to a real file here, but
+        # the client shipped the bytes inline as a data: URL. Persist them.
+        if image_path is None and data_url:
+            image_path = _materialize_data_url_image(session, data_url, raw)
+
+        if image_path is None:
+            return _err(rid, 4016, f"image not found: {raw or 'image'}")
         if image_path.suffix.lower() not in _IMAGE_EXTENSIONS:
             return _err(rid, 4016, f"unsupported image: {image_path.name}")
         session.setdefault("attached_images", []).append(str(image_path))
