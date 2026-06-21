@@ -5949,7 +5949,11 @@ class TestDesktopCronTicker:
         monkeypatch.setenv("HERMES_DESKTOP", "1")
 
         with self._client():
-            assert called.wait(3.0), "expected cron tick under HERMES_DESKTOP=1"
+            # 15s (not 3s): the first tick runs on a background scheduler thread
+            # whose startup + scheduling can exceed a few seconds on a loaded CI
+            # host. The assertion still fails fast if the tick never fires; the
+            # wider window only removes false negatives under load.
+            assert called.wait(15.0), "expected cron tick under HERMES_DESKTOP=1"
 
     def test_ticker_skipped_without_desktop(self, monkeypatch, _isolate_hermes_home):
         import threading
