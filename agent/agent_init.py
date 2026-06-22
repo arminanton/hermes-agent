@@ -59,6 +59,34 @@ from utils import base_url_host_matches
 logger = logging.getLogger("run_agent")
 
 
+def _normalize_context_engine_schema(schema: Any) -> Any:
+    """Defensively unwrap an already-enveloped context-engine tool schema.
+
+    ``ContextEngine.get_tool_schemas()`` is contracted to return BARE schemas
+    (``{name, description, parameters}``); the host wraps each one in the
+    OpenAI envelope (``{"type": "function", "function": {...}}``) before adding
+    it to ``agent.tools``. Some engines/plugins mistakenly pre-wrap their
+    schemas in that envelope. Wrapping an already-wrapped schema again yields
+    ``{"function": {"function": {...}}}`` whose OUTER ``function.name`` is empty,
+    and the provider rejects the whole request (HTTP 400
+    ``tools[N].function.name: empty string``), breaking every turn.
+
+    Detect the envelope (a ``type == "function"`` dict carrying a ``function``
+    dict but no top-level ``name``) and return the inner bare schema so both
+    already-wrapped and bare inputs register with a correct name. Non-dict or
+    bare inputs are returned unchanged.
+    """
+    if (
+        isinstance(schema, dict)
+        and schema.get("type") == "function"
+        and isinstance(schema.get("function"), dict)
+        and "name" not in schema
+    ):
+        return schema["function"]
+    return schema
+
+
+
 def _ra():
     """Lazy reference to ``run_agent`` so callers can patch
     ``run_agent.OpenAI`` / ``run_agent.cleanup_vm`` / ... and have those
@@ -345,6 +373,40 @@ def init_agent(
         agent.api_mode = "bedrock_converse"
     else:
         agent.api_mode = "chat_completions"
+
+    # ── Copilot + Claude → Anthropic Messages (/v1/messages) override ──────
+    # The GitHub Copilot proxy serves Claude on TWO endpoints with very
+    # different limits:
+    #   * POST /chat/completions  → proxy CLAMPS Claude prompts and returns a
+    #     misleading ``prompt token count … exceeds the limit of 168000``
+    #     (real clamp ~300k, error text says 168k).  This is the regular tier.
+    #   * POST /v1/messages       → the genuine 1,000,000-token input window for
+    #     opus/sonnet 4.6 to 4.8, unlocked by the anthropic-beta triplet
+    #     (cli-internal + context-1m + task-budgets) that the Anthropic
+    #     adapter already attaches for the Copilot base_url.
+    # The default decision tree above has no Copilot+Claude branch, so a Claude
+    # model on provider=copilot falls through to ``chat_completions`` and hits
+    # the 168k clamp (the "1M → snap to 168k → cannot compress further"
+    # failure).  Force the Anthropic Messages transport so Claude rides the 1M
+    # path.  This intentionally overrides an explicit ``api_mode:
+    # chat_completions`` from config because that default is simply wrong for
+    # Claude-on-Copilot.  Excludes ``copilot-acp`` (the ACP CLI subprocess does
+    # its own endpoint routing and does not use this adapter).
+    _model_lower = (agent.model or "").lower()
+    _is_copilot_native = (
+        agent.provider in {"copilot", "github-copilot"}
+        or (
+            agent.provider not in {"copilot-acp"}
+            and base_url_host_matches(agent._base_url_lower, "api.githubcopilot.com")
+        )
+    )
+    if (
+        agent.provider != "copilot-acp"
+        and _is_copilot_native
+        and "claude" in _model_lower
+        and agent.api_mode != "anthropic_messages"
+    ):
+        agent.api_mode = "anthropic_messages"
 
     # Eagerly warm the transport cache so import errors surface at init,
     # not mid-conversation.  Also validates the api_mode is registered.
@@ -1601,7 +1663,8 @@ def init_agent(
             if isinstance(t, dict)
         }
         for _schema in agent.context_compressor.get_tool_schemas():
-            _tname = _schema.get("name", "")
+            _schema = _normalize_context_engine_schema(_schema)
+            _tname = _schema.get("name", "") if isinstance(_schema, dict) else ""
             if _tname and _tname in _existing_tool_names:
                 continue  # already registered via plugin/cache path
             _wrapped = {"type": "function", "function": _schema}

@@ -377,7 +377,9 @@ class TestCodexOAuthContextLength:
                 api_key="fake-token",
                 provider="openai-codex",
             )
+        # gpt-5.5: no empirical override → live probe value wins.
         assert ctx_55 == 300_000
+        # gpt-5.4: no public empirical override → live probe value wins.
         assert ctx_54 == 400_000
 
     def test_probe_failure_falls_back_to_hardcoded(self):

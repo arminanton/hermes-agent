@@ -482,6 +482,34 @@ class TestWebServerEndpoints:
         assert config["dashboard"]["theme"] == "ember"
         assert config["dashboard"]["font"] == "jetbrains-mono"
 
+    def test_get_sessions_total_matches_visible_default_rows(self):
+        """Pagination total must count rows the endpoint can actually return.
+
+        Child delegate sessions are intentionally hidden from the default
+        list_sessions_rich view. If /api/sessions reports the raw session table
+        count instead, the frontend enables phantom pages whose offsets return
+        no rows.
+        """
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session("root", "cli")
+            db.append_message("root", "user", "root request")
+            for i in range(25):
+                sid = f"delegate-{i}"
+                db.create_session(sid, "cli", parent_session_id="root")
+                db.append_message(sid, "user", f"delegate request {i}")
+        finally:
+            db.close()
+
+        resp = self.client.get("/api/sessions?limit=20&offset=0")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [s["id"] for s in data["sessions"]] == ["root"]
+        assert data["total"] == 1
+
     def test_get_sessions_uses_only_persisted_cwd(self, monkeypatch):
         """Session rows without persisted cwd must not inherit TERMINAL_CWD.
 
@@ -639,6 +667,45 @@ class TestWebServerEndpoints:
         assert row["profile"] == "default"
         assert row["is_default_profile"] is True
         assert isinstance(data.get("errors"), list)
+
+    def test_profiles_sessions_dedupes_symlinked_state_db(self):
+        """A profile whose state.db is a symlink to the canonical DB must not
+        cause its rows to be scanned/counted twice. Main-linked profiles (e.g.
+        the gsd-* worker fleet) symlink state.db back to the workspace DB; the
+        aggregator dedupes by physical inode so profile=all stays O(distinct DBs)
+        and ``total`` is not inflated N times for N aliases."""
+        from hermes_state import SessionDB
+        from hermes_cli import profiles as profiles_mod
+
+        # One real row in the default (canonical) DB.
+        default_db = SessionDB()
+        try:
+            default_db.create_session(session_id="shared-row", source="cli")
+            default_db.append_message(session_id="shared-row", role="user", content="hi")
+        finally:
+            default_db.close()
+
+        # A second profile whose state.db is a SYMLINK to the canonical DB.
+        canonical = profiles_mod.get_profile_dir("default") / "state.db"
+        alias_home = profiles_mod.get_profile_dir("worker-alias")
+        alias_home.mkdir(parents=True, exist_ok=True)
+        alias_db = alias_home / "state.db"
+        if alias_db.exists() or alias_db.is_symlink():
+            alias_db.unlink()
+        alias_db.symlink_to(canonical)
+
+        resp = self.client.get("/api/profiles/sessions?profile=all&limit=20&min_messages=0")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        # The shared session appears exactly ONCE, not once per aliasing profile.
+        shared = [s for s in data["sessions"] if s["id"] == "shared-row"]
+        assert len(shared) == 1, f"shared row double-counted: {len(shared)} copies"
+        # And it is tagged to the REAL owner (default), not the symlink alias,
+        # because real-DB owners are scanned before symlink aliases.
+        assert shared[0]["profile"] == "default"
+        # Total must not be inflated by the duplicate physical DB.
+        assert data["total"] == 1
 
     def test_profiles_sessions_rejects_unknown_archived_value(self):
         resp = self.client.get("/api/profiles/sessions?archived=bogus")
