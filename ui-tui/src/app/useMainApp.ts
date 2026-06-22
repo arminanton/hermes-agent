@@ -198,6 +198,9 @@ export function useMainApp(gw: GatewayClient) {
   const colsRef = useRef(cols)
   const scrollRef = useRef<null | ScrollBoxHandle>(null)
   const onEventRef = useRef<(ev: GatewayEvent) => void>(() => {})
+  // Timestamp of the last backend event, for the busy-state wedge watchdog
+  // installed in the gw.on('event') effect below. Initialised to mount time.
+  const lastActivityRef = useRef<number>(Date.now())
   const clipboardPasteRef = useRef<(quiet?: boolean) => Promise<void> | void>(() => {})
   const submitRef = useRef<(value: string) => void>(() => {})
   const terminalHintsShownRef = useRef(new Set<string>())
@@ -778,7 +781,42 @@ export function useMainApp(gw: GatewayClient) {
   onEventRef.current = onEvent
 
   useEffect(() => {
-    const handler = (ev: GatewayEvent) => onEventRef.current(ev)
+    // Busy-state watchdog. The status indicator (FaceTicker) repaints the Ink
+    // tree at SPINNER_TICK_MS (100ms = 10Hz) while `busy` is true. That's
+    // correct during a live turn, but if the gateway *wedges* — stream stalls
+    // with no clean `exit` event — `busy` never resets and the 10Hz repaint
+    // runs for hours, pegging a CPU core (the "idle TUI burning 70% CPU" bug).
+    // `exitHandler` only covers a clean child death; this covers the silent
+    // stall. Every backend event bumps `lastActivityRef`; if `busy` is true but
+    // nothing has arrived for WEDGE_TIMEOUT_MS, the turn is dead, so drop
+    // `busy` and surface it. This makes the runaway repaint structurally
+    // impossible regardless of how the backend fails.
+    const WEDGE_TIMEOUT_MS = 180_000
+    const handler = (ev: GatewayEvent) => {
+      lastActivityRef.current = Date.now()
+      onEventRef.current(ev)
+    }
+
+    const wedgeWatchdog = setInterval(() => {
+      if (!getUiState().busy) {
+        return
+      }
+
+      if (Date.now() - lastActivityRef.current < WEDGE_TIMEOUT_MS) {
+        return
+      }
+
+      // No backend activity for WEDGE_TIMEOUT_MS while busy: the turn is wedged.
+      // Reset so the 10Hz indicator stops and the session is usable again.
+      turnController.reset()
+      patchUiState({ busy: false, status: 'stream stalled · /logs to inspect' })
+      turnController.pushActivity(
+        'no backend activity for 3m — turn marked stalled (any in-flight reply may be lost)',
+        'warn'
+      )
+      lastActivityRef.current = Date.now()
+    }, 15_000)
+    wedgeWatchdog.unref?.()
 
     const exitHandler = () => {
       turnController.reset()
@@ -820,6 +858,7 @@ export function useMainApp(gw: GatewayClient) {
 
     // entry.tsx's setupGracefulExit handles process cleanup on real exit.
     return () => {
+      clearInterval(wedgeWatchdog)
       gw.off('event', handler)
       gw.off('exit', exitHandler)
     }
