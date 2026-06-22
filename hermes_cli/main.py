@@ -1650,8 +1650,63 @@ def _find_bundled_tui(hermes_cli_dir: Path | None = None) -> Path | None:
     return bundled if bundled.is_file() else None
 
 
+def _resolve_tui_runtime() -> tuple[str, str]:
+    """Resolve the JS runtime for the prebuilt TUI bundle.
+
+    Returns ``(kind, path)`` where ``kind`` is ``"bun"`` or ``"node"``.
+
+    Bun runs the esbuild-produced ``dist/entry.js`` unchanged (proven: full
+    Ink render + gateway IPC work under Bun on this box) and its JSC engine +
+    faster IPC make the interactive loop noticeably snappier than Node. We
+    prefer it when available and fall back to Node otherwise.
+
+    Override with ``HERMES_TUI_RUNTIME=node`` (force Node) or
+    ``HERMES_TUI_RUNTIME=bun`` (force Bun, error if missing) or
+    ``HERMES_TUI_RUNTIME=auto`` / unset (Bun if present, else Node).
+    ``HERMES_BUN`` may point at a specific bun binary.
+    """
+    pref = (os.environ.get("HERMES_TUI_RUNTIME") or "auto").strip().lower()
+
+    def _bun() -> Optional[str]:
+        env_bun = os.environ.get("HERMES_BUN")
+        if env_bun and os.path.isfile(env_bun) and os.access(env_bun, os.X_OK):
+            return env_bun
+        return shutil.which("bun")
+
+    if pref == "node":
+        return ("node", "node")
+    if pref == "bun":
+        b = _bun()
+        if not b:
+            print(
+                "HERMES_TUI_RUNTIME=bun but no bun binary found "
+                "(set HERMES_BUN or install bun). Falling back to node.",
+                file=sys.stderr,
+            )
+            return ("node", "node")
+        return ("bun", b)
+    # auto: bun if present, else node
+    b = _bun()
+    return ("bun", b) if b else ("node", "node")
+
+
+def _tui_runtime_argv(entry: Path, node_bin) -> list[str]:
+    """Build the argv that launches the prebuilt TUI bundle.
+
+    Bun ignores ``--expose-gc``/``--max-old-space-size`` (and the bundle never
+    calls ``global.gc()``), so under Bun we pass only the entry file. Under
+    Node we keep ``--expose-gc`` for parity with prior behaviour.
+
+    ``node_bin`` is a callable ``(name) -> path`` (the local ``_node_bin``).
+    """
+    kind, runtime = _resolve_tui_runtime()
+    if kind == "bun":
+        return [runtime, str(entry)]
+    return [node_bin("node"), "--expose-gc", str(entry)]
+
+
 def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
-    """TUI: --dev → tsx src; else node dist (HERMES_TUI_DIR prebuilt or esbuild)."""
+    """TUI: --dev → tsx src; else bun/node dist (HERMES_TUI_DIR prebuilt or esbuild)."""
     _ensure_tui_node()
 
     def _node_bin(bin: str) -> str:
@@ -1688,14 +1743,12 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
         if ext_dir:
             p = Path(ext_dir)
             if (p / "dist" / "entry.js").is_file():
-                node = _node_bin("node")
-                return [node, "--expose-gc", str(p / "dist" / "entry.js")], p
+                return _tui_runtime_argv(p / "dist" / "entry.js", _node_bin), p
 
         # 1b. Bundled in wheel (pip install)
         bundled = _find_bundled_tui()
         if bundled is not None:
-            node = _node_bin("node")
-            return [node, "--expose-gc", str(bundled)], bundled.parent
+            return _tui_runtime_argv(bundled, _node_bin), bundled.parent
 
     # 2. Normal flow: npm install if needed, always esbuild, then node dist/entry.js.
     #    --dev flow: npm install if needed, then tsx src/entry.tsx.
@@ -1812,8 +1865,7 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
                 print(preview)
             sys.exit(1)
 
-    node = _node_bin("node")
-    return [node, "--expose-gc", str(tui_dir / "dist" / "entry.js")], tui_dir
+    return _tui_runtime_argv(tui_dir / "dist" / "entry.js", _node_bin), tui_dir
 
 
 def _normalize_tui_toolsets(toolsets: object) -> list[str]:
