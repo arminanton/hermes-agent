@@ -16,6 +16,14 @@ from plugins.teams_pipeline.store import TeamsPipelineStore
 from plugins.teams_pipeline.models import MeetingArtifact
 
 
+@pytest.fixture
+def anyio_backend():
+    # The async tests here use asyncio primitives, so pin anyio to the asyncio
+    # backend. Without this, an installed trio package makes anyio auto-add a
+    # [trio] parametrization that cannot run asyncio primitives.
+    return "asyncio"
+
+
 class FakeGraphClient:
     def __init__(self) -> None:
         self.downloaded = False

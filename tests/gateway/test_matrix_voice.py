@@ -108,13 +108,19 @@ class TestMatrixVoiceMessageDetection:
         self.adapter = _make_adapter()
         self.adapter._user_id = "@bot:example.org"
         self.adapter._startup_ts = 0.0
-        self.adapter._dm_rooms = {}
+        # Mark the test room as a DM via the m.direct account data path (the
+        # member-count heuristic was dropped upstream; DM classification now
+        # comes from _dm_rooms populated from m.direct).
+        self.adapter._dm_rooms = {"!test:example.org": True}
         self.adapter._message_handler = AsyncMock()
         # Mock _mxc_to_http to return a fake HTTP URL
         self.adapter._mxc_to_http = lambda url: f"https://matrix.example.org/_matrix/media/v3/download/{url[6:]}"
         # Mock client for authenticated download — download_media returns bytes directly
         self.adapter._client = MagicMock()
         self.adapter._client.download_media = AsyncMock(return_value=b"fake audio data")
+        # No explicit room name/alias/topic so the room stays a DM (an explicit
+        # name would flip chat_type away from "dm").
+        self.adapter._client.get_state_event = AsyncMock(return_value=None)
         # State store for DM detection
         self.adapter._client.state_store = _make_state_store()
 
@@ -219,10 +225,15 @@ class TestMatrixVoiceCacheFallback:
         self.adapter = _make_adapter()
         self.adapter._user_id = "@bot:example.org"
         self.adapter._startup_ts = 0.0
-        self.adapter._dm_rooms = {}
+        # Mark the test room as a DM via the m.direct account data path (the
+        # member-count heuristic was dropped upstream; DM classification now
+        # comes from _dm_rooms populated from m.direct).
+        self.adapter._dm_rooms = {"!test:example.org": True}
         self.adapter._message_handler = AsyncMock()
         self.adapter._mxc_to_http = lambda url: f"https://matrix.example.org/_matrix/media/v3/download/{url[6:]}"
         self.adapter._client = MagicMock()
+        # No explicit room name/alias/topic so the room stays a DM.
+        self.adapter._client.get_state_event = AsyncMock(return_value=None)
         self.adapter._client.state_store = _make_state_store()
 
     @pytest.mark.asyncio

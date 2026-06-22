@@ -206,14 +206,80 @@ class TestProviderModelIds:
             assert provider_model_ids("stepfun") == ["step-3.5-flash", "step-3-agent-lite"]
 
     def test_copilot_prefers_live_catalog(self):
+        # The live /models catalog is preferred and appears in order at the front.
+        # provider_model_ids then appends account-usable models the live endpoint
+        # omits (hidden/preview slugs that work for inference), deduped with live
+        # entries winning. See hermes_cli.models._COPILOT_HIDDEN_USABLE.
+        from hermes_cli.models import _COPILOT_HIDDEN_USABLE
+
+        live = ["gpt-5.4", "claude-sonnet-4.6"]
         with patch("hermes_cli.auth.resolve_api_key_provider_credentials", return_value={"api_key": "gh-token"}), \
-             patch("hermes_cli.models._fetch_github_models", return_value=["gpt-5.4", "claude-sonnet-4.6"]):
-            assert provider_model_ids("copilot") == ["gpt-5.4", "claude-sonnet-4.6"]
+             patch("hermes_cli.models._fetch_github_models", return_value=list(live)):
+            result = provider_model_ids("copilot")
+        assert result[: len(live)] == live
+        assert all(m in _COPILOT_HIDDEN_USABLE for m in result[len(live) :])
 
     def test_copilot_acp_reuses_copilot_catalog(self):
+        from hermes_cli.models import _COPILOT_HIDDEN_USABLE
+
+        live = ["gpt-5.4", "claude-sonnet-4.6"]
         with patch("hermes_cli.auth.resolve_api_key_provider_credentials", return_value={"api_key": "gh-token"}), \
-             patch("hermes_cli.models._fetch_github_models", return_value=["gpt-5.4", "claude-sonnet-4.6"]):
-            assert provider_model_ids("copilot-acp") == ["gpt-5.4", "claude-sonnet-4.6"]
+             patch("hermes_cli.models._fetch_github_models", return_value=list(live)):
+            result = provider_model_ids("copilot-acp")
+        assert result[: len(live)] == live
+        assert all(m in _COPILOT_HIDDEN_USABLE for m in result[len(live) :])
+
+    def test_anthropic_provider_uses_configured_base_url_for_live_catalog(self):
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"data": [{"id": "enterprise-claude"}]}'
+
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={
+                "model": {
+                    "provider": "anthropic",
+                    "base_url": "http://localhost:6655/anthropic/v1",
+                    "api_key": "proxy-key",
+                }
+            },
+        ), patch(
+            "hermes_cli.models.urllib.request.urlopen",
+            return_value=_Resp(),
+        ) as mock_urlopen:
+            assert provider_model_ids("anthropic") == ["enterprise-claude"]
+
+        req = mock_urlopen.call_args[0][0]
+        assert req.full_url == "http://localhost:6655/anthropic/v1/models"
+        assert req.get_header("X-api-key") == "proxy-key"
+
+    def test_custom_provider_passes_anthropic_mode_for_versioned_proxy_catalog(self):
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={
+                "model": {
+                    "provider": "custom",
+                    "base_url": "http://localhost:6655/anthropic/v1",
+                    "api_key": "proxy-key",
+                }
+            },
+        ), patch(
+            "hermes_cli.models.fetch_api_models",
+            return_value=["enterprise-claude"],
+        ) as mock_fetch:
+            assert provider_model_ids("custom") == ["enterprise-claude"]
+
+        mock_fetch.assert_called_once_with(
+            "proxy-key",
+            "http://localhost:6655/anthropic/v1",
+            api_mode="anthropic_messages",
+        )
 
 
 # -- fetch_api_models --------------------------------------------------------

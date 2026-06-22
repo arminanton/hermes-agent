@@ -70,16 +70,6 @@ def _resolve_args() -> list[str]:
 
 def _resolve_home_dir() -> str:
     """Return a stable HOME for child ACP processes."""
-
-    try:
-        from hermes_constants import get_subprocess_home
-
-        profile_home = get_subprocess_home()
-        if profile_home:
-            return profile_home
-    except Exception:
-        pass
-
     home = os.environ.get("HOME", "").strip()
     if home:
         return home
@@ -132,6 +122,10 @@ def _build_subprocess_env(client: "CopilotACPClient" | None = None) -> dict[str,
         args = list(getattr(client, "_acp_args", []) or [])
         if args:
             env["HERMES_COPILOT_ACP_ARGS"] = " ".join(args)
+    # Apply upstream's subprocess HOME contract on top (sets HERMES_REAL_HOME
+    # and normalizes HOME); does not touch our HERMES_COPILOT_ACP_* vars.
+    from hermes_constants import apply_subprocess_home_env
+    apply_subprocess_home_env(env)
     return env
 
 

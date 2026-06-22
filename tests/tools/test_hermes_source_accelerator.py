@@ -30,6 +30,53 @@ if str(ACCEL_ROOT) not in sys.path:
     sys.path.insert(0, str(ACCEL_ROOT))
 
 
+import pytest
+
+
+def _list_accel_hash_schemas(conn) -> set[str]:
+    """Return source_accel_<hash> schema names (never the bare production one).
+    Tolerates psycopg dict_row (default in this package) or plain-tuple rows."""
+    rows = conn.execute(
+        "SELECT schema_name FROM information_schema.schemata "
+        "WHERE schema_name LIKE 'source_accel\\_%'"
+    ).fetchall()
+    out: set[str] = set()
+    for r in rows:
+        name = r["schema_name"] if isinstance(r, dict) else r[0]
+        out.add(name)
+    return out
+
+
+@pytest.fixture(autouse=True)
+def _drop_leaked_test_schemas():
+    """Drop any per-tmp source_accel_<hash> schema this test creates so the
+    shared cmx_dev Postgres never accumulates orphaned test schemas. Hard guard:
+    NEVER touches the production "source_accel" schema (no hash suffix) or any
+    non source_accel_* schema. Best-effort; failures here never fail the test.
+    """
+    before: set[str] = set()
+    try:
+        from source_accelerator import db as _sadb
+
+        with _sadb._raw_connect(autocommit=True) as _c:
+            before = _list_accel_hash_schemas(_c)
+    except Exception:
+        before = set()
+    yield
+    try:
+        from source_accelerator import db as _sadb
+
+        with _sadb._raw_connect(autocommit=True) as _c:
+            after = _list_accel_hash_schemas(_c)
+            for sch in after - before:
+                # Only drop hash-suffixed schemas; never the bare production one.
+                if sch != "source_accel" and sch.startswith("source_accel_"):
+                    _c.execute(f'DROP SCHEMA IF EXISTS "{sch}" CASCADE')
+    except Exception:
+        pass
+
+
+
 def _fixture(tmp_path: Path, monkeypatch):
     source = tmp_path / "src"
     workspace = tmp_path / "workspace"
@@ -57,6 +104,22 @@ def _fixture(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("HERMES_SOURCE_ROOT", str(source))
     monkeypatch.setenv("HERMES_WORKSPACE_ROOT", str(workspace))
     monkeypatch.setenv("HERMES_SOURCE_INDEX_DB", str(db))
+    # The Postgres backend freezes its "default index path" at import time
+    # (db._DEFAULT_INDEX_DB). When that freeze captures THIS test's tmp path
+    # (import order varies in a full-suite run), _schema_for() would collapse
+    # the tmp path onto the shared production "source_accel" schema and the
+    # test would read/write live production rows. Realign the frozen default to
+    # db.py's own no-env-override default so this unique tmp db is always
+    # treated as non-default and gets its own isolated source_accel_<hash>
+    # schema. Touches only the test; never mutates the live backend or cmx_dev.
+    from source_accelerator import db as _sadb
+
+    monkeypatch.setattr(
+        _sadb,
+        "_DEFAULT_INDEX_DB",
+        Path("/mnt/devvm/custom/hermes/workspace/indexes/hermes-source-index.sqlite"),
+        raising=False,
+    )
     return source, workspace, db
 
 

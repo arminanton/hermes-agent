@@ -17,6 +17,14 @@ from tools.microsoft_graph_auth import (
 )
 
 
+@pytest.fixture
+def anyio_backend():
+    # These tests call asyncio.gather/sleep directly, so pin anyio to the
+    # asyncio backend. Without this, an installed trio package makes anyio
+    # auto-add a [trio] parametrization that cannot run asyncio primitives.
+    return "asyncio"
+
+
 class TestGraphCredentials:
     def test_from_env_raises_for_missing_required_values(self):
         with pytest.raises(MicrosoftGraphConfigError) as exc:

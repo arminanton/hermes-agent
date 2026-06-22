@@ -441,6 +441,10 @@ class TestResolveApiKeyProviderCredentials:
         assert creds["base_url"] == "http://127.0.0.1:1234/v1"
 
     def test_try_gh_cli_token_uses_homebrew_path_when_not_on_path(self, monkeypatch):
+        # Keep this hermetic: COPILOT_GH_HOST / COPILOT_GH_USER in the ambient
+        # environment would append --hostname/--user to the gh invocation.
+        monkeypatch.delenv("COPILOT_GH_HOST", raising=False)
+        monkeypatch.delenv("COPILOT_GH_USER", raising=False)
         monkeypatch.setattr("hermes_cli.copilot_auth.shutil.which", lambda command: None)
         monkeypatch.setattr(
             "hermes_cli.copilot_auth.os.path.isfile",

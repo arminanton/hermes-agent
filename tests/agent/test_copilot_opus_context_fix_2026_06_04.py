@@ -697,7 +697,7 @@ def test_fable_shares_opus48_adapter_contract():
     m = "claude-fable-5"
     assert aa._supports_adaptive_thinking(m) is True
     assert aa._supports_xhigh_effort(m) is True
-    assert any(v in m for v in aa._NO_SAMPLING_PARAMS_SUBSTRINGS)
+    assert aa._forbids_sampling_params(m) is True
 
 
 @_needs_overlay
