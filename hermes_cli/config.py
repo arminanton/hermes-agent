@@ -2000,6 +2000,13 @@ DEFAULT_CONFIG = {
         # what the reviewer returned, and which path was taken. Off by default.
         "adr": False,
         "adr_path": "",            # "" = <workspace>/.hermes/autopilot/adr/AUTOPILOT-<session>-<date>.md
+        # ADR project copy: also drop a copy of the decision log next to the code
+        # being worked on (the goal's declared path, else the git repo root, else
+        # cwd). The canonical .hermes copy is ALWAYS kept regardless. Default on.
+        "adr_project_copy": True,
+        # Subdir under the project root for the project copy. "" = auto: "docs/adr"
+        # for a git repo (conventional), else ".autopilot/adr".
+        "adr_project_subdir": "",
         # Anti-deception reinforcement: re-assert the behavioral contract every N
         # continuations so it stays salient over a long run (a one-time system
         # prompt fades by recency, which is when models derail). 0 disables the

@@ -18,11 +18,14 @@ from agent.autopilot import adr
 class _Agent:
     """Minimal stand-in carrying the attributes the ADR reads."""
 
-    def __init__(self, enabled=None, path=None, session_id="sess123"):
+    def __init__(self, enabled=None, path=None, session_id="sess123", project_copy=False):
         if enabled is not None:
             self._autopilot_adr = enabled
         if path is not None:
             self._autopilot_adr_path = str(path)
+        # Default project-copy OFF in unit tests so they assert on the canonical
+        # path in isolation; the dual-write tests opt in explicitly.
+        self._autopilot_adr_project_copy = project_copy
         self.session_id = session_id
 
 
@@ -30,6 +33,10 @@ def _clear_env(monkeypatch):
     monkeypatch.delenv("HERMES_AUTOPILOT_ADR", raising=False)
     monkeypatch.delenv("AUTOPILOT_ADR_PATH", raising=False)
     monkeypatch.delenv("HERMES_WORKSPACE", raising=False)
+    monkeypatch.delenv("AUTOPILOT_ADR_PROJECT_SUBDIR", raising=False)
+    # Default project-copy OFF for env/agent=None tests so they never write a
+    # stray docs/adr into the test's cwd. The dual-write tests opt in explicitly.
+    monkeypatch.setenv("AUTOPILOT_ADR_PROJECT_COPY", "0")
 
 
 def test_disabled_by_default(monkeypatch):
@@ -139,6 +146,7 @@ def test_record_logs_gap_and_required_checks(monkeypatch, tmp_path):
 def test_record_fails_soft_on_bad_path(monkeypatch):
     _clear_env(monkeypatch)
     # Point the ADR at a path whose parent cannot be created (a file as a dir).
+    # project_copy defaults off in _Agent, so this exercises the canonical-only path.
     agent = _Agent(enabled=True, path="/dev/null/cannot/exist/adr.md")
     # Must not raise; returns None on failure.
     out = adr.record_decision(agent, kind="completion", goal="x")
@@ -163,3 +171,66 @@ def test_default_path_shape(monkeypatch, tmp_path):
     assert p.parent == tmp_path / ".hermes" / "autopilot" / "adr"
     assert p.name.startswith("AUTOPILOT-abc-")
     assert p.suffix == ".md"
+
+
+# --------------------------------------------------------------------------- #
+# Goal in header + dual-write (canonical + project copy)                        #
+# --------------------------------------------------------------------------- #
+def test_goal_stamped_in_header(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    target = tmp_path / "adr.md"
+    agent = _Agent(enabled=True, path=target)  # project_copy off
+    adr.record_decision(agent, kind="completion", goal="Fix all lint errors in foo/",
+                        verdict="allow", source="council")
+    body = target.read_text()
+    assert "**Goal:** Fix all lint errors in foo/" in body
+
+
+def test_dual_write_canonical_plus_project_copy(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    canonical = tmp_path / "canon" / "adr.md"
+    project = tmp_path / "proj"
+    project.mkdir()
+    # Goal declares the project dir; project_copy on; subdir explicit for determinism.
+    agent = _Agent(enabled=True, path=canonical, project_copy=True)
+    agent._autopilot_adr_project_subdir = ".autopilot/adr"
+    monkeypatch.setenv("HERMES_WORKSPACE", str(tmp_path))  # cwd fallback
+    adr.record_decision(agent, kind="continue", goal=f"work in path: {project}",
+                        verdict="deny", source="council")
+    # Canonical copy written.
+    assert canonical.exists()
+    assert "— continue" in canonical.read_text()
+    # Project copy written under the declared project dir.
+    proj_files = list((project / ".autopilot" / "adr").glob("AUTOPILOT-*.md"))
+    assert proj_files, "project copy not written"
+    assert "— continue" in proj_files[0].read_text()
+
+
+def test_project_copy_off_writes_only_canonical(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    canonical = tmp_path / "adr.md"
+    agent = _Agent(enabled=True, path=canonical, project_copy=False)
+    targets = adr.adr_targets(agent, goal=f"work in {tmp_path}")
+    assert targets == [canonical]
+
+
+def test_goal_declared_root_detected(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    d = tmp_path / "myrepo"
+    d.mkdir()
+    root = adr._goal_declared_root(f"build the thing in {d} fully")
+    assert root == d.resolve()
+    # A non-existent path is ignored.
+    assert adr._goal_declared_root("do work in /nonexistent/xyz123") is None
+
+
+def test_git_root_subdir_defaults_to_docs_adr(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    # A git repo root → conventional docs/adr.
+    assert adr._project_subdir(None, repo) == "docs/adr"
+    # A non-git dir → .autopilot/adr.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert adr._project_subdir(None, plain) == ".autopilot/adr"

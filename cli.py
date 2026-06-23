@@ -3552,6 +3552,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             os.environ.setdefault("HERMES_AUTOPILOT_ADR", "1")
         if _ap_cfg.get("adr_path"):
             os.environ.setdefault("AUTOPILOT_ADR_PATH", str(_ap_cfg.get("adr_path")))
+        if _ap_cfg.get("adr_project_copy") is False:
+            os.environ.setdefault("AUTOPILOT_ADR_PROJECT_COPY", "0")
+        if _ap_cfg.get("adr_project_subdir"):
+            os.environ.setdefault("AUTOPILOT_ADR_PROJECT_SUBDIR", str(_ap_cfg.get("adr_project_subdir")))
         if _ap_cfg.get("reinforce_every_n") not in (None, ""):
             os.environ.setdefault("AUTOPILOT_REINFORCE_EVERY_N", str(_ap_cfg.get("reinforce_every_n")))
         self._tool_callbacks_installed = False

@@ -24,6 +24,10 @@ def make_agent(**overrides):
     a._api_call_count = 5
     a._status = []
     a._emit_status = lambda msg: a._status.append(msg)
+    # Default the ADR project-copy OFF in driver unit tests so an enabled-ADR run
+    # never writes a stray docs/adr into the test's cwd (only the explicit
+    # _autopilot_adr_path target is used).
+    a._autopilot_adr_project_copy = False
     for k, v in overrides.items():
         setattr(a, k, v)
     driver.reset_turn_state(a)
