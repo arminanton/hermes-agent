@@ -3327,16 +3327,79 @@ def run_conversation(
                     agent._buffer_status(f"🗜️ Context too large (~{approx_tokens:,} tokens) — compressing ({compression_attempts}/{max_compression_attempts})...")
 
                     original_len = len(messages)
+                    # Item 5 (2026-07-04): loop-guard token snapshot. Track the
+                    # pre-compression token estimate so we can detect
+                    # no-progress compressions (post >= pre). CMX-style engines
+                    # return a fixed message count (messages=N->14) even when
+                    # the token total GREW; the len-based check below would
+                    # then loop compression indefinitely. See the compressor's
+                    # post-run last_compression_rough_tokens attribute set in
+                    # conversation_compression.py.
+                    _pre_compression_tokens = int(approx_tokens or 0)
                     messages, active_system_prompt = agent._compress_context(
                         messages, system_message, approx_tokens=approx_tokens,
                         task_id=effective_task_id,
                     )
-                    # Compression created a new session — clear history
+                    # Compression created a new session, clear history
                     # so _flush_messages_to_session_db writes compressed
                     # messages to the new session, not skipping them.
                     conversation_history = None
 
-                    if len(messages) < original_len or new_ctx and new_ctx < old_ctx:
+                    # Item 5 (2026-07-04): read the post-compression token
+                    # estimate the compressor just recorded. If the engine is
+                    # a CMX-style retrieval engine that returns the same count
+                    # but a bigger token payload (accretion), refuse to retry.
+                    _cc = getattr(agent, "context_compressor", None)
+                    _post_compression_tokens = int(
+                        getattr(_cc, "last_compression_rough_tokens", 0) or 0
+                    )
+                    _token_progress = (
+                        _pre_compression_tokens > 0
+                        and _post_compression_tokens > 0
+                        and _post_compression_tokens < _pre_compression_tokens
+                    )
+                    _token_regressed = (
+                        _pre_compression_tokens > 0
+                        and _post_compression_tokens > 0
+                        and _post_compression_tokens >= _pre_compression_tokens
+                    )
+
+                    if _token_regressed:
+                        agent._flush_status_buffer()
+                        agent._vprint(
+                            f"{agent.log_prefix}[loop-guard] Compression did not reduce token count "
+                            f"({_pre_compression_tokens:,} -> {_post_compression_tokens:,}). "
+                            f"Refusing to retry to avoid a compression loop.",
+                            force=True,
+                        )
+                        agent._vprint(
+                            f"{agent.log_prefix}   Tip: run /new for a fresh session. "
+                            f"The current context engine cannot shrink this further.",
+                            force=True,
+                        )
+                        logger.error(
+                            "%sCompression loop-guard tripped: pre=%d post=%d "
+                            "(context engine returned same-or-larger payload). Not retrying.",
+                            agent.log_prefix,
+                            _pre_compression_tokens,
+                            _post_compression_tokens,
+                        )
+                        agent._persist_session(messages, conversation_history)
+                        return {
+                            "messages": messages,
+                            "completed": False,
+                            "api_calls": api_call_count,
+                            "error": (
+                                f"Context length exceeded: compression did not shrink "
+                                f"({_pre_compression_tokens:,} -> {_post_compression_tokens:,} tokens). "
+                                f"Loop-guard tripped."
+                            ),
+                            "partial": True,
+                            "failed": True,
+                            "compression_exhausted": True,
+                        }
+
+                    if len(messages) < original_len or _token_progress or (new_ctx and new_ctx < old_ctx):
                         if len(messages) < original_len:
                             agent._buffer_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
                         time.sleep(2)  # Brief pause between compression retries
