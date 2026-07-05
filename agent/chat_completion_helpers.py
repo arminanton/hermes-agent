@@ -946,6 +946,19 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
 
 
 
+# Tools whose arguments carry source code / file content the user intends to
+# persist verbatim. For these, credential redaction of the tool-call arguments
+# must use code_file=True so the destructive ENV-assignment / JSON-field regex
+# passes (which swallow the closing quote + trailing newline + next-line indent)
+# do NOT run and corrupt indentation or mangle config/AUTH lines. Real secret
+# shapes (sk-, ghp_, JWT, private key, DB conn-string) are still redacted.
+_CONTENT_WRITE_TOOLS = frozenset({
+    "write_file",
+    "patch",
+    "skill_manage",
+})
+
+
 def build_assistant_message(agent, assistant_message, finish_reason: str) -> dict:
     """Build a normalized assistant message dict from an API response message.
 
@@ -1156,10 +1169,26 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
             # case where a model accidentally inlines a secret into a tool
             # call (e.g. `terminal(command="curl -H 'Authorization: Bearer
             # sk-...'")`). (#19798)
+            #
+            # (#47xxx) code_file guard: for tools whose arguments carry SOURCE
+            # CODE / file content the user intends to persist verbatim
+            # (write_file, patch, skill_manage, etc.), the ENV-assignment and
+            # JSON-field regexes are DESTRUCTIVE — `_ENV_ASSIGN_RE`'s `\\S+`
+            # value capture greedily eats the closing quote AND the trailing
+            # newline + next line's indentation, so `PASSWORD="x"\\n    if:`
+            # becomes `PASSWORD=***    if:` — corrupting indentation and
+            # mangling the line. That is exactly the "write_file collapsed my
+            # 4-space indent / mangled the AUTH line" report. Passing
+            # code_file=True skips those two patterns for content-writing tools
+            # while STILL redacting real credential shapes (sk-, ghp_, JWTs,
+            # private keys, DB conn-strings) via the prefix/JWT/key patterns.
             if isinstance(tc_dict["function"]["arguments"], str):
                 from agent.redact import redact_sensitive_text
+                _tc_name = tc_dict["function"].get("name") or ""
+                _is_content_write_tool = _tc_name in _CONTENT_WRITE_TOOLS
                 tc_dict["function"]["arguments"] = redact_sensitive_text(
-                    tc_dict["function"]["arguments"]
+                    tc_dict["function"]["arguments"],
+                    code_file=_is_content_write_tool,
                 )
             # Preserve extra_content (e.g. Gemini thought_signature) so it
             # is sent back on subsequent API calls.  Without this, Gemini 3

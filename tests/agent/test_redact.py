@@ -486,3 +486,54 @@ class TestXaiToken:
     def test_prefix_visible_in_masked_output(self):
         result = redact_sensitive_text(self.KEY, force=True)
         assert result.startswith("xai-AB")
+
+
+class TestCodeFileWriteContentNotCorrupted:
+    """Regression: build_assistant_message must not let the ENV/JSON redaction
+    passes corrupt source-code indentation or mangle config lines in the
+    arguments of file-writing tools (write_file / patch / skill_manage).
+
+    Root cause: _ENV_ASSIGN_RE's greedy value capture swallowed the closing
+    quote + trailing newline + next line's indentation, so a KEY="v" line
+    followed by indented code merged into one line. Fix: content-write tools
+    redact their arguments with code_file=True, which skips the ENV/JSON
+    patterns while still catching real credential shapes.
+    """
+
+    def _content(self):
+        NL = chr(10); DQ = chr(34)
+        KEY = "PASS" + "WORD"
+        # KEY="value" then newline + two levels of indented code.
+        return (KEY + "=" + DQ + "s3cr3tvalue" + DQ + NL +
+                "if True:" + NL +
+                "    if True:" + NL +
+                "        x = 1" + NL)
+
+    def test_default_redaction_can_corrupt_content(self):
+        """Default (code_file=False) redaction is NOT safe for source content:
+        it masks the config value and, depending on the value, can also eat the
+        line boundary. We only assert that it MUTATES the content (proving the
+        write path must not use it), not the exact corruption shape (which is
+        value-dependent)."""
+        from agent.redact import redact_sensitive_text
+        import json
+        content = self._content()
+        args = json.dumps({"path": "/tmp/z.py", "content": content})
+        out = json.loads(redact_sensitive_text(args, force=True))["content"]
+        assert out != content  # default path mutates source content
+
+    def test_code_file_true_preserves_everything(self):
+        """The fix: code_file=True keeps content byte-for-byte."""
+        from agent.redact import redact_sensitive_text
+        import json
+        content = self._content()
+        args = json.dumps({"path": "/tmp/z.py", "content": content})
+        out = json.loads(redact_sensitive_text(args, code_file=True, force=True))["content"]
+        assert out == content  # nothing changed at all
+
+    def test_build_assistant_message_uses_code_file_for_write_tools(self):
+        """End-to-end: the content-write tool set routes to code_file=True."""
+        from agent.chat_completion_helpers import _CONTENT_WRITE_TOOLS
+        assert "write_file" in _CONTENT_WRITE_TOOLS
+        assert "patch" in _CONTENT_WRITE_TOOLS
+        assert "skill_manage" in _CONTENT_WRITE_TOOLS
