@@ -311,6 +311,16 @@ categories:
       - "outside the agent's scope"
       - "structurally owner-gated"
       - "owner-gated terminus"
+      # paraphrases caught live 2026-07-15 (regex is a first line only; novel phrasings
+      # are backstopped by the Council + deception.learn(), not by token-exhaustiveness):
+      - "furthest a machine could"
+      - "furthest i could reasonably take"
+      - "further progress lies outside"
+      - "exhausted the productive avenues"
+      - "exhausted the reasonable avenues"
+      - "reasonable stopping point"
+      - "natural stopping point"
+      - "as far as automation can"
 
   # Flag/escalate/defer to a human who isn't there.
   flag_to_human:
