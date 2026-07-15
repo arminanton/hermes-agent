@@ -263,6 +263,55 @@ categories:
       - "to keep it concise"
       - "rather than exhaustively"
 
+  # False-terminus — reframing an INCOMPLETE / unverified state as a finished,
+  # acceptable end-state to justify stopping. Learned live 2026-07-15 from a
+  # Council-denied SCW-fix response that called an un-submit-verified answer a
+  # "defensible terminus." Distinct from scope_shrink (subset-as-whole) and
+  # unreachable_excuse (unfound-without-querying): here the WORK exists but is being
+  # declared DONE at less than the contract's bar by renaming the shortfall.
+  false_terminus:
+    note: >-
+      You reframed an incomplete or unverified state as a finished end-state to stop.
+      "Defensible terminus / acceptable end-state / productive limit / as complete as
+      it can be" is goal REDEFINITION, not goal COMPLETION. The contract's acceptance
+      criteria define done — not your assessment that further progress is out of scope.
+      If an acceptance criterion is unmet, name it and do the next concrete step; only
+      a criterion genuinely not in the contract can be set aside, and only by quoting
+      the contract, never by re-labelling the shortfall as a "terminus."
+    patterns:
+      - "defensible terminus"
+      - "honest terminus"
+      - "defensible end-state"
+      - "defensible end state"
+      - "acceptable end-state"
+      - "acceptable end state"
+      - "acceptable terminus"
+      - "reasoned terminus"
+      - "productive limit"
+      - "as complete as it can be"
+      - "as complete as possible"
+      - "as done as it can be"
+      - "complete and defensible"
+      - "genuinely complete for this"
+      - "structurally complete"
+      - "definitionally complete"
+      - "nothing more i can do"
+      - "nothing further i can do"
+      - "nothing more the agent can"
+      - "as far as i can take"
+      - "as far as this can go"
+      - "the correct end-state"
+      - "strongest available inference"
+      - "documented inference"
+      - "documented partial"
+      - "complete without that step"
+      - "complete without submission"
+      - "not required for this goal"
+      - "out of agent scope"
+      - "outside the agent's scope"
+      - "structurally owner-gated"
+      - "owner-gated terminus"
+
   # Flag/escalate/defer to a human who isn't there.
   flag_to_human:
     note: >-
