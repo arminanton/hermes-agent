@@ -12,6 +12,17 @@ from unittest.mock import Mock
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _no_real_checks(monkeypatch):
+    """These are loop-wiring tests, not verification tests. Disable the harness +
+    auto-draft so contract freeze doesn't detect the hermes repo's own pytest and
+    run it recursively (which would make this suite take minutes and re-enter)."""
+    monkeypatch.setenv("AUTOPILOT_VERIFICATION_EXEC", "0")
+    monkeypatch.setenv("AUTOPILOT_AUTODRAFT_CHECKS", "0")
+    monkeypatch.setenv("AUTOPILOT_STRUCTURED_CRITERIA", "0")
+    yield
+
+
 def _completion(content, finish="stop"):
     """An OpenAI ChatCompletion-shaped object the chat_completions transport accepts."""
     msg = types.SimpleNamespace(

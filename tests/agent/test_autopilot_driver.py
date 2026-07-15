@@ -24,6 +24,19 @@ def make_agent(**overrides):
     a._api_call_count = 5
     a._status = []
     a._emit_status = lambda msg: a._status.append(msg)
+    # Default the ADR project-copy OFF in driver unit tests so an enabled-ADR run
+    # never writes a stray docs/adr into the test's cwd (only the explicit
+    # _autopilot_adr_path target is used).
+    a._autopilot_adr_project_copy = False
+    # Default the structured per-criterion judge OFF in generic driver tests so the
+    # gap-closure path stays offline + deterministic (uses the textual heuristic).
+    # The dedicated structured/verification tests opt back IN and stub the judge.
+    a._autopilot_structured_criteria = False
+    # Default auto-draft + harness execution OFF in generic tests so contract freeze
+    # does not detect the hermes repo's own pytest/ruff and run them recursively.
+    # Dedicated autocheck/verification tests opt back IN explicitly.
+    a._autopilot_autodraft_checks = False
+    a._autopilot_verification_exec = False
     for k, v in overrides.items():
         setattr(a, k, v)
     driver.reset_turn_state(a)
@@ -178,14 +191,38 @@ def test_no_progress_stall_stops(monkeypatch):
 
 
 def test_progress_resets_stall(monkeypatch):
+    # Isolate the artifact no-progress stall: opt out of the synthesized contract
+    # floor so the semantic-stall path (which needs a contract) doesn't also fire.
+    a = make_agent(_autopilot_no_progress_k=2, _autopilot_synthesize_floor=False)
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: CompletionVerdict(complete=False, directive="x", verdict="deny"))
+    # REAL progress = genuine tool activity each turn (a new tool call + result),
+    # which changes the artifact fingerprint and resets the no-progress counter.
+    for i in range(5):
+        msgs = []
+        for j in range(i + 1):
+            msgs.append({"role": "assistant", "tool_calls": [{"function": {"name": f"edit_{j}"}}]})
+            msgs.append({"role": "tool", "content": "x" * 300 * (j + 1)})
+        assert driver.maybe_continue(a, msgs, f"final-{i}", "g") is not None
+    assert a._autopilot_continuations == 5
+
+
+def test_fake_work_stalls(monkeypatch):
+    # The 5-minute fake-work loop: the model narrates different prose each turn
+    # but does NO real tool work. Under the artifact-state signal this is caught
+    # as no progress and the run stops after no_progress_k attempts.
     a = make_agent(_autopilot_no_progress_k=2)
     monkeypatch.setattr(driver, "judge_completion",
                         lambda *args, **kw: CompletionVerdict(complete=False, directive="x", verdict="deny"))
-    # growing transcript + changing final response => never stalls
-    for i in range(5):
-        msgs = [{"role": "user"}] * (i + 2)
-        assert driver.maybe_continue(a, msgs, f"final-{i}", "g") is not None
-    assert a._autopilot_continuations == 5
+    # Same (empty of tool activity) message shape every turn, only prose changes.
+    msgs = [{"role": "user", "content": "go"}, {"role": "assistant", "content": "still working on it"}]
+    # Turn 1: baseline fingerprint (stall=0). Turns 2-3: identical fingerprint, so
+    # stall increments to 1 then 2, tripping the k=2 no-progress stop on turn 3.
+    driver.maybe_continue(a, msgs, "let me continue, almost there", "g")
+    driver.maybe_continue(a, msgs, "still making progress, wrapping up", "g")
+    r3 = driver.maybe_continue(a, msgs, "nearly done now, finalizing", "g")
+    assert r3 is None
+    assert a._autopilot_stall >= 2
 
 
 def test_judge_exception_delivers(monkeypatch):
@@ -204,7 +241,8 @@ def test_judge_exception_delivers(monkeypatch):
 def test_clarify_autoanswer_uses_council(monkeypatch):
     from agent.autopilot import council_gate
     a = make_agent()
-    monkeypatch.setattr(council_gate, "choose_answer", lambda q, c=None, **k: "Option B")
+    monkeypatch.setattr(council_gate, "choose_answer_detailed",
+                        lambda q, c=None, **k: council_gate.ClarifyDecision(answer="Option B", options=list(c or []), source="council"))
     cb = driver.make_clarify_autoanswer(a)
     assert cb("Which option?", ["Option A", "Option B"]) == "Option B"
 
@@ -216,7 +254,7 @@ def test_clarify_autoanswer_falls_back_on_error(monkeypatch):
     def boom(*args, **kw):
         raise RuntimeError("council down")
 
-    monkeypatch.setattr(council_gate, "choose_answer", boom)
+    monkeypatch.setattr(council_gate, "choose_answer_detailed", boom)
     seen = {}
 
     def fb(q, c):
@@ -231,7 +269,8 @@ def test_clarify_autoanswer_falls_back_on_error(monkeypatch):
 def test_clarify_autoanswer_default_when_empty(monkeypatch):
     from agent.autopilot import council_gate
     a = make_agent()
-    monkeypatch.setattr(council_gate, "choose_answer", lambda q, c=None, **k: "")
+    monkeypatch.setattr(council_gate, "choose_answer_detailed",
+                        lambda q, c=None, **k: council_gate.ClarifyDecision(answer="", options=list(c or []), source="aux"))
     cb = driver.make_clarify_autoanswer(a)  # no fallback
     assert "default" in cb("q", None).lower()
 
@@ -429,6 +468,43 @@ def test_giveup_fails_closed_on_judge_error(monkeypatch):
     assert out is not None
     assert "do NOT stop" in out or "DIRECTIVE" in out
     assert a._autopilot_continuations == 1  # counted + budget extended
+    assert a._autopilot_judge_down_continuations == 1  # judge-down counter advanced
+
+
+def test_judge_down_cap_stops_the_giveup_loop(monkeypatch):
+    # Reviewer fix: with the judge unavailable, the give-up SUBSTRING gate is the only
+    # thing deciding loop-vs-stop. A bound (default 8) must eventually stop it instead of
+    # spinning forever. Here we set the cap low and prove it delivers (None) at the cap.
+    a = make_agent(_api_call_count=10)
+    a._autopilot_judge_down_cap = 2  # cfg override read by _cfg_int
+
+    def boom(*args, **kw):
+        raise RuntimeError("council down")
+
+    monkeypatch.setattr(driver, "judge_completion", boom)
+    giveup_text = "This session has reached its productive limit — handoff written for next session."
+
+    # continuation #1 and #2 keep going (fail closed)
+    assert driver.maybe_continue(a, [{"role": "user", "content": "g"}], giveup_text, "ship the gate") is not None
+    assert driver.maybe_continue(a, [{"role": "user", "content": "g"}], giveup_text, "ship the gate") is not None
+    assert a._autopilot_judge_down_continuations == 2
+    # at the cap → STOP (deliver), rather than an unbounded substring-gated loop
+    assert driver.maybe_continue(a, [{"role": "user", "content": "g"}], giveup_text, "ship the gate") is None
+
+
+def test_judge_down_cap_zero_is_unbounded(monkeypatch):
+    # cap=0 preserves the old unbounded fail-closed behavior (opt-out).
+    a = make_agent(_api_call_count=10)
+    a._autopilot_judge_down_cap = 0
+
+    def boom(*args, **kw):
+        raise RuntimeError("council down")
+
+    monkeypatch.setattr(driver, "judge_completion", boom)
+    giveup_text = "Reached productive limit; handing off."
+    for _ in range(15):
+        assert driver.maybe_continue(a, [{"role": "user", "content": "g"}], giveup_text, "g") is not None
+    assert a._autopilot_judge_down_continuations == 15  # never capped
 
 
 def test_normal_response_still_fails_open_on_judge_error(monkeypatch):
@@ -460,3 +536,550 @@ def test_giveup_strengthens_directive_when_incomplete(monkeypatch):
 def test_build_directive_is_non_dismissible():
     d = driver._build_directive(CompletionVerdict(complete=False, directive="do X", verdict="deny"))
     assert "NOT a notification" in d and "do X" in d
+
+
+# --------------------------------------------------------------------------- #
+# ADR decision-log wiring (maybe_continue + clarify)                            #
+# --------------------------------------------------------------------------- #
+def test_adr_written_at_completion(monkeypatch, tmp_path):
+    from agent.autopilot import council_gate
+    target = tmp_path / "adr.md"
+    a = make_agent(_autopilot_adr=True, _autopilot_adr_path=str(target), _autopilot_goal="fix lint")
+    # Council says complete.
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: council_gate.CompletionVerdict(
+                            complete=True, verdict="allow", confidence=0.9, source="council",
+                            summary="council verdict=allow", raw={"arbiter": {}}))
+    out = driver.maybe_continue(a, [{"role": "user", "content": "go"}], "done", "fix lint")
+    assert out is None                       # complete -> stop
+    assert target.exists()
+    body = target.read_text()
+    assert "— completion" in body
+    assert "stop — goal verified complete" in body
+
+
+def test_adr_written_at_continue_with_gap(monkeypatch, tmp_path):
+    from agent.autopilot import council_gate
+    target = tmp_path / "adr.md"
+    a = make_agent(_autopilot_adr=True, _autopilot_adr_path=str(target), _autopilot_goal="ship it")
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: council_gate.CompletionVerdict(
+                            complete=False, verdict="deny", confidence=0.6, directive="run the tests",
+                            source="council", summary="council verdict=deny",
+                            raw={"arbiter": {"most_likely_wrong_point": "no tests run",
+                                             "required_checks": ["run pytest"]}}))
+    out = driver.maybe_continue(a, [{"role": "user", "content": "go"}], "I think it's done", "ship it")
+    assert out is not None                   # not complete -> continue directive
+    body = target.read_text()
+    assert "— continue" in body
+    assert "no tests run" in body
+    assert "run pytest" in body
+
+
+def test_adr_not_written_when_disabled(monkeypatch, tmp_path):
+    from agent.autopilot import council_gate
+    target = tmp_path / "adr.md"
+    a = make_agent(_autopilot_adr=False, _autopilot_adr_path=str(target), _autopilot_goal="x")
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: council_gate.CompletionVerdict(
+                            complete=True, verdict="allow", source="council", summary="ok", raw={}))
+    driver.maybe_continue(a, [{"role": "user", "content": "go"}], "done", "x")
+    assert not target.exists()               # ADR off -> no file
+
+
+def test_adr_written_at_clarify(monkeypatch, tmp_path):
+    from agent.autopilot import council_gate
+    target = tmp_path / "adr.md"
+    a = make_agent(_autopilot_adr=True, _autopilot_adr_path=str(target))
+    monkeypatch.setattr(council_gate, "choose_answer_detailed",
+                        lambda q, c=None, **k: council_gate.ClarifyDecision(
+                            answer="SQLite", options=list(c or []), rationale="stdlib", source="council"))
+    cb = driver.make_clarify_autoanswer(a)
+    assert cb("Which DB?", ["Postgres", "SQLite"]) == "SQLite"
+    body = target.read_text()
+    assert "— clarify" in body
+    assert "chosen path: SQLite" in body
+    assert "Postgres" in body                # full option set recorded
+
+
+# --------------------------------------------------------------------------- #
+# Anti-deception wiring (detector + reinforcement cadence)                      #
+# --------------------------------------------------------------------------- #
+def test_deception_in_response_sharpens_directive(monkeypatch):
+    a = make_agent()
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: CompletionVerdict(complete=False, directive="finish it", verdict="deny"))
+    # A response that awaits the user + claims done with no evidence.
+    directive = driver.maybe_continue(
+        a, [{"role": "user", "content": "go"}],
+        "The work is complete and all done; ready for your review.",
+        "g",
+    )
+    assert directive is not None
+    assert "CAUGHT:" in directive            # the caught behavior is named back to the model
+
+
+def test_deception_logged_to_adr(monkeypatch, tmp_path):
+    target = tmp_path / "adr.md"
+    a = make_agent(_autopilot_adr=True, _autopilot_adr_path=str(target))
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: CompletionVerdict(complete=False, directive="x", verdict="deny"))
+    driver.maybe_continue(
+        a, [{"role": "user", "content": "go"}],
+        "It's complete, awaiting your review. The council can't see the tables anyway.",
+        "g",
+    )
+    body = target.read_text()
+    assert "— deception" in body
+    assert "caught deception" in body
+
+
+def test_reinforcement_fires_on_cadence(monkeypatch):
+    a = make_agent(_autopilot_reinforce_every_n=3)
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: CompletionVerdict(complete=False, directive="keep going", verdict="deny"))
+    seen_contract = []
+    # Real tool activity each turn so the stall counter never trips.
+    for i in range(4):
+        msgs = []
+        for j in range(i + 1):
+            msgs.append({"role": "assistant", "tool_calls": [{"function": {"name": f"e{j}"}}]})
+            msgs.append({"role": "tool", "content": "y" * 300 * (j + 1)})
+        d = driver.maybe_continue(a, msgs, f"final-{i}", "g")
+        seen_contract.append("CONTRACT REMINDER" in (d or ""))
+    # The 3rd continuation (index 2) should carry the reinforced contract.
+    assert any(seen_contract)
+
+
+def test_reinforcement_disabled_when_zero(monkeypatch):
+    a = make_agent(_autopilot_reinforce_every_n=0)
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: CompletionVerdict(complete=False, directive="keep going", verdict="deny"))
+    msgs = [{"role": "assistant", "tool_calls": [{"function": {"name": "e"}}]},
+            {"role": "tool", "content": "z" * 500}]
+    d = driver.maybe_continue(a, msgs, "clean response with real work", "g")
+    # No deception, cadence disabled -> no contract reminder.
+    assert "CONTRACT REMINDER" not in (d or "")
+
+
+# --------------------------------------------------------------------------- #
+# Live learning wiring (Council denied + detector silent -> learn novel evasion) #
+# --------------------------------------------------------------------------- #
+def test_live_learning_captures_novel_evasion(monkeypatch, tmp_path):
+    from agent.autopilot import deception
+    overlay = tmp_path / "deception-patterns.local.yaml"
+    monkeypatch.setattr(deception, "_overlay_yaml_path", lambda: overlay)
+    deception._LEARNED.clear()
+    deception.load_dictionary(force=True)
+
+    a = make_agent(_autopilot_goal="ship it")
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: CompletionVerdict(complete=False, directive="keep going", verdict="deny"))
+    # A novel evasion the dictionary doesn't know (no known tell present).
+    novel = "Honestly, I shall entrust the verification to the esteemed operator henceforth."
+    driver.maybe_continue(a, [{"role": "user", "content": "go"}], novel, "ship it")
+    # The phrasing was learned and is now enforced on the next scan.
+    assert "learned_evasion" in deception.scan(novel).flags
+
+    deception._LEARNED.clear()
+    monkeypatch.undo()
+    deception.load_dictionary(force=True)
+
+
+def test_live_learning_gated_on_real_adjudication(monkeypatch):
+    # Reviewer fix #2b: live-learning must only fire when a REAL reviewer judged this
+    # turn (verdict.source in {council, aux}). On the fail-open floor (source=fallback)
+    # "not complete" means "not done yet", NOT "a judge called this a dodge" — so we must
+    # NOT manufacture global patterns from an unjudged turn (worse with no Council).
+    from agent.autopilot import deception
+    calls = {"n": 0}
+    monkeypatch.setattr(deception, "learn",
+                        lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1), [])[1])
+    monkeypatch.setattr(deception, "scan", lambda *a, **k: deception.DeceptionSignal())
+
+    # (1) source == fallback → NO learn
+    a = make_agent(_api_call_count=5)
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: CompletionVerdict(complete=False, directive="x", verdict="deny", source="fallback"))
+    driver.maybe_continue(a, [{"role": "user", "content": "g"}], "a non-giveup progress note", "g")
+    assert calls["n"] == 0  # unjudged turn → did not learn
+
+    # (2) source == council → learn IS attempted
+    a2 = make_agent(_api_call_count=5)
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: CompletionVerdict(complete=False, directive="x", verdict="deny", source="council"))
+    driver.maybe_continue(a2, [{"role": "user", "content": "g"}], "a non-giveup progress note", "g")
+    assert calls["n"] == 1  # real adjudication → learning fired
+
+
+# --------------------------------------------------------------------------- #
+# Fix 1 — frozen-contract achievable-bar terminus (wired into maybe_continue)  #
+# --------------------------------------------------------------------------- #
+def _deny(reason="needs more work"):
+    return CompletionVerdict(complete=False, directive=reason, verdict="deny",
+                             raw={"arbiter": {"most_likely_wrong_point": reason}})
+
+
+def test_achievable_bar_halts_with_named_residual(monkeypatch):
+    # A goal whose ONLY open item is owner-gated: once the agent-achievable work is
+    # marked satisfied, the run must HALT (not loop forever on the owner gate).
+    goal = (
+        "- Implement the migration script and make all tests pass\n"
+        "- Obtain owner sign-off before the live cutover\n"
+    )
+    a = make_agent(_autopilot_goal=goal)
+    monkeypatch.setattr(driver, "judge_completion", lambda *args, **kw: _deny("waiting on owner sign-off"))
+    # Pre-mark the agent-achievable criterion satisfied (simulating closed work).
+    ct = driver._contract.get_or_parse(a, goal)
+    agent_ids = {x.id for x in ct.agent_criteria()}
+    a._autopilot_satisfied_ids = set(agent_ids)
+    out = driver.maybe_continue(a, [{"role": "user", "content": "go"}], "done with the script", goal)
+    assert out is None  # HALT, not a continuation directive
+    assert getattr(a, "_autopilot_terminus_residual", "")
+    assert "owner sign-off required" in a._autopilot_terminus_residual
+
+
+def test_achievable_bar_does_not_halt_when_agent_work_open(monkeypatch):
+    goal = (
+        "- Implement the migration script and make all tests pass\n"
+        "- Obtain owner sign-off before the live cutover\n"
+    )
+    a = make_agent(_autopilot_goal=goal)
+    monkeypatch.setattr(driver, "judge_completion", lambda *args, **kw: _deny("script not done"))
+    # agent-achievable criterion NOT satisfied -> real work remains -> continue
+    out = driver.maybe_continue(a, [{"role": "user", "content": "go"}], "still working", goal)
+    assert out is not None  # continuation directive, no premature terminus
+
+
+def test_contract_terminus_disabled_by_flag(monkeypatch):
+    goal = (
+        "- Implement the migration script and make all tests pass\n"
+        "- Obtain owner sign-off before the live cutover\n"
+    )
+    a = make_agent(_autopilot_goal=goal, _autopilot_contract_terminus=False)
+    monkeypatch.setattr(driver, "judge_completion", lambda *args, **kw: _deny("waiting on owner"))
+    a._autopilot_satisfied_ids = set()  # irrelevant; contract disabled
+    out = driver.maybe_continue(a, [{"role": "user", "content": "go"}], "done", goal)
+    # with the terminus disabled, the run falls through to ordinary continuation
+    assert out is not None
+
+
+# --------------------------------------------------------------------------- #
+# Fix 4 — refinement-churn terminus (wired into maybe_continue)                #
+# --------------------------------------------------------------------------- #
+_CHURN_GOAL = (
+    "- Produce the benchmark report proving the new port is faster\n"
+    "- Write the GO-NO-GO summary with the measured numbers\n"
+)
+
+
+def _conditional(reason, conf=0.4):
+    # A real Council `conditional` at low confidence — the NuData shape.
+    return CompletionVerdict(complete=False, directive=reason, verdict="conditional",
+                             source="council", confidence=conf,
+                             raw={"arbiter": {"most_likely_wrong_point": reason}})
+
+
+def _churn_msgs(i):
+    # Each round produces DISTINCT real tool activity (files churned) — exactly the
+    # NuData case where the artifact fingerprint changes every turn, so the
+    # artifact-stall breaker never fires and only the churn terminus can stop it.
+    return [
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": f"t{i}", "function": {"name": "patch"}}]},
+        {"role": "tool", "content": f"edited presentation table revision {i} with {i*7} new lines"},
+    ]
+
+
+def test_refinement_churn_concludes_on_presentation_loop(monkeypatch):
+    # The NuData failure: deliverable is done, but the Council keeps returning a
+    # freshly-worded, ever-smaller PRESENTATION ask. No deny, no criterion closes,
+    # low confidence. After K rounds the run must SELF-CONCLUDE (return None),
+    # WITHOUT any max-continuations cap and WITHOUT the wording ever repeating.
+    a = make_agent(_autopilot_goal=_CHURN_GOAL, _autopilot_refinement_churn_k=4)
+    # rotate the denial wording every round so the semantic-stall breaker (which
+    # keys on identical wording) can NOT be what stops it.
+    asks = iter([
+        "show a gate-by-gate table",
+        "show faster/cheaper deltas not absolute numbers",
+        "cite the cost levers on a line like the latency gates",
+        "enumerate the primary bench files not the attestation",
+        "re-run the verifier and attach the exit code too",
+    ])
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: _conditional(next(asks)))
+    out = None
+    for i in range(4):
+        out = driver.maybe_continue(a, _churn_msgs(i),
+                                    f"iteration {i}: refined the presentation again", _CHURN_GOAL)
+        if out is None:
+            break
+    assert out is None  # CONCLUDED on churn, not looping forever
+    assert "presentation" in (getattr(a, "_autopilot_terminus_residual", "") or "").lower()
+
+
+def test_refinement_churn_does_not_fire_when_a_deny_appears(monkeypatch):
+    # If ANY round is a real `deny` (substantive work missing), the window resets —
+    # the run must keep going, never conclude on churn. (Other stall breakers are
+    # turned up so this isolates the churn behavior under test.)
+    a = make_agent(_autopilot_goal=_CHURN_GOAL, _autopilot_refinement_churn_k=4,
+                   _autopilot_no_progress_k=999, _autopilot_semantic_k=999)
+    verdicts = iter([
+        _conditional("polish ask 1"),
+        _conditional("polish ask 2"),
+        CompletionVerdict(complete=False, directive="the bench never actually ran",
+                          verdict="deny", source="council", confidence=0.2),
+        _conditional("polish ask 3"),
+        _conditional("polish ask 4"),
+    ])
+    monkeypatch.setattr(driver, "judge_completion", lambda *args, **kw: next(verdicts))
+    outs = []
+    for i in range(5):
+        outs.append(driver.maybe_continue(a, _churn_msgs(i), f"iter {i}", _CHURN_GOAL))
+    # the deny at round 3 reset the window, so 5 rounds is NOT 4-consecutive-clean
+    assert all(o is not None for o in outs)  # never concluded on churn
+
+
+def test_refinement_churn_disabled_by_zero(monkeypatch):
+    a = make_agent(_autopilot_goal=_CHURN_GOAL, _autopilot_refinement_churn_k=0,
+                   _autopilot_no_progress_k=999, _autopilot_semantic_k=999)
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: _conditional("another tiny presentation ask"))
+    outs = [driver.maybe_continue(a, _churn_msgs(i), f"iter {i}", _CHURN_GOAL)
+            for i in range(6)]
+    # with the terminus disabled it keeps continuing (never concludes on churn);
+    # other stall breakers are turned up so they don't mask this assertion
+    assert all(o is not None for o in outs)
+
+
+# --------------------------------------------------------------------------- #
+# Double-fire fix — a concluded goal must not re-enter the loop on a new turn  #
+# --------------------------------------------------------------------------- #
+def test_concluded_goal_does_not_refire_after_reset(monkeypatch):
+    # Reproduces the REBORN-D double-fire: a terminus concludes the run, then a
+    # later turn calls reset_turn_state (standing-goal resume / autodispatch) and
+    # would restart the spiral. The run-level concluded guard must short-circuit.
+    a = make_agent(_autopilot_goal=_CHURN_GOAL, _autopilot_refinement_churn_k=4)
+    asks = iter(["ask one", "ask two", "ask three", "ask four", "ask five",
+                 "ask six", "ask seven", "ask eight"])
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: _conditional(next(asks)))
+    # drive to the churn terminus
+    out = None
+    for i in range(4):
+        out = driver.maybe_continue(a, _churn_msgs(i), f"iter {i}", _CHURN_GOAL)
+        if out is None:
+            break
+    assert out is None  # concluded
+    assert getattr(a, "_autopilot_concluded_goal", None) is not None
+
+    # NOW simulate a fresh turn arriving for the SAME goal (reset wipes per-turn
+    # state, exactly like a standing-goal resume). The guard must return None
+    # immediately WITHOUT running the churn loop again (no second terminus).
+    driver.reset_turn_state(a)
+    assert a._autopilot_churn.rounds == 0  # per-turn tracker was reset...
+    out2 = driver.maybe_continue(a, _churn_msgs(99), "resumed turn", _CHURN_GOAL)
+    assert out2 is None  # ...but the run does NOT re-enter / re-fire
+    # the churn tracker never accumulated because we short-circuited before recording
+    assert a._autopilot_churn.rounds == 0
+
+
+def test_concluded_guard_clears_for_a_new_goal(monkeypatch):
+    # A genuinely DIFFERENT goal must clear the stale conclusion and run normally.
+    a = make_agent(_autopilot_goal=_CHURN_GOAL, _autopilot_refinement_churn_k=4)
+    # mark the old goal concluded directly
+    driver._mark_goal_concluded(a, _CHURN_GOAL)
+    assert a._autopilot_concluded_goal is not None
+
+    # a new goal arrives — guard should NOT block it
+    new_goal = "- Build a completely different feature X\n- Ship it\n"
+    a._autopilot_goal = new_goal
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: _conditional("keep going on the new goal"))
+    driver.reset_turn_state(a)
+    out = driver.maybe_continue(a, _churn_msgs(0), "new goal turn", new_goal)
+    assert out is not None  # the new goal runs (continuation directive), not blocked
+
+
+def test_completion_also_marks_concluded(monkeypatch):
+    # A genuine Council `allow` completion must ALSO set the concluded guard so a
+    # resumed turn doesn't re-run a finished goal.
+    a = make_agent(_autopilot_goal="ship the thing")
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: CompletionVerdict(complete=True, summary="done", verdict="allow"))
+    out = driver.maybe_continue(a, [{"role": "user", "content": "g"}], "all done", "ship the thing")
+    assert out is None
+    assert getattr(a, "_autopilot_concluded_goal", None) is not None
+    # a resumed turn for the same goal stays concluded
+    driver.reset_turn_state(a)
+    assert driver.maybe_continue(a, [{"role": "user", "content": "g"}], "all done", "ship the thing") is None
+
+
+# --------------------------------------------------------------------------- #
+# Naive-user floor end-to-end — a BARE one-sentence goal self-concludes on churn
+# --------------------------------------------------------------------------- #
+def test_bare_goal_self_concludes_on_churn(monkeypatch):
+    # The whole point of the naive-user floor: a plain one-sentence goal with NO
+    # authored criteria and NO project checks now gets a synthesized contract, so
+    # the refinement-churn terminus can conclude a polish spiral — same protection
+    # the hand-authored REBORN contracts get. Without the floor this run would
+    # spin forever (empty contract → churn terminus disabled).
+    bare = "make the homepage load faster"
+    a = make_agent(_autopilot_goal=bare, _autopilot_refinement_churn_k=4,
+                   _autopilot_autodraft_checks=False)  # no project checks → floor path
+    asks = iter(["reformat the summary", "cite the numbers differently",
+                 "rephrase the conclusion", "tidy the headings", "one more polish"])
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: _conditional(next(asks)))
+    out = None
+    for i in range(4):
+        out = driver.maybe_continue(a, _churn_msgs(i), f"iter {i}", bare)
+        if out is None:
+            break
+    assert out is None  # CONCLUDED on churn — the naive goal is protected
+    assert "presentation" in (getattr(a, "_autopilot_terminus_residual", "") or "").lower()
+
+
+# --------------------------------------------------------------------------- #
+# Fix 2 — reject self-spawned verifiers as independence evidence               #
+# --------------------------------------------------------------------------- #
+def test_self_spawned_independence_redirects(monkeypatch):
+    a = make_agent(_autopilot_goal="ship it")
+    monkeypatch.setattr(driver, "judge_completion", lambda *args, **kw: _deny("not verified"))
+    resp = ("This is independently verified: a subagent I spawned via delegate_task "
+            "confirmed the reproduction, so the work is independent and complete.")
+    out = driver.maybe_continue(a, [{"role": "user", "content": "go"}], resp, "ship it")
+    assert out is not None  # continues
+    # the directive must explicitly reject the self-spawned independence theater
+    assert "prove your own independence" in out.lower() or "not independence" in out.lower()
+
+
+def test_external_verifier_not_flagged(monkeypatch):
+    a = make_agent(_autopilot_goal="ship it")
+    monkeypatch.setattr(driver, "judge_completion", lambda *args, **kw: _deny("not verified"))
+    resp = "The Hermes Council independently verified the result; a separate run cross-confirmed it."
+    out = driver.maybe_continue(a, [{"role": "user", "content": "go"}], resp, "ship it")
+    assert out is not None
+    assert "prove your own independence" not in out.lower()
+
+
+# --------------------------------------------------------------------------- #
+# Fix 3 — semantic-progress circuit-breaker                                    #
+# --------------------------------------------------------------------------- #
+def test_semantic_stall_stops_on_repeated_denial(monkeypatch):
+    # Contract present, real file churn each turn (fingerprint changes so the
+    # artifact-stall never trips), but the SAME denial reason and NO criterion
+    # closes -> the semantic circuit-breaker must stop the spin.
+    goal = "- Implement the alpha feature and make all tests pass\n- Add beta metrics emission\n"
+    a = make_agent(_autopilot_goal=goal, _autopilot_semantic_k=3)
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: _deny("the independence proof is still circular"))
+    results = []
+    for i in range(5):
+        # distinct tool activity each turn -> artifact fingerprint changes
+        msgs = []
+        for j in range(i + 1):
+            msgs.append({"role": "assistant", "tool_calls": [{"function": {"name": f"edit_{i}_{j}"}}]})
+            msgs.append({"role": "tool", "content": "y" * 200 * (j + 1)})
+        results.append(driver.maybe_continue(a, msgs, f"churning turn {i}", goal))
+    # at k=3 the run must have stopped (a None appears once semantic stall hits k)
+    assert None in results
+    assert a._autopilot_semantic_stall >= 3
+
+
+def test_semantic_stall_resets_when_denial_changes(monkeypatch):
+    goal = "- Implement the alpha feature and make all tests pass\n"
+    a = make_agent(_autopilot_goal=goal, _autopilot_semantic_k=3)
+    reasons = iter(["reason one", "reason one", "reason two", "reason three", "reason four"])
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: _deny(next(reasons)))
+    outs = []
+    for i in range(5):
+        msgs = [{"role": "assistant", "tool_calls": [{"function": {"name": f"e{i}"}}]},
+                {"role": "tool", "content": "z" * 100}]
+        outs.append(driver.maybe_continue(a, msgs, f"turn {i}", goal))
+    # denial reason keeps changing -> semantic stall never reaches k -> never stops
+    assert all(o is not None for o in outs)
+    assert a._autopilot_semantic_stall < 3
+
+
+def test_live_learning_skips_when_detector_already_fired(monkeypatch, tmp_path):
+    from agent.autopilot import deception
+    overlay = tmp_path / "deception-patterns.local.yaml"
+    monkeypatch.setattr(deception, "_overlay_yaml_path", lambda: overlay)
+    deception._LEARNED.clear()
+    deception.load_dictionary(force=True)
+
+    a = make_agent(_autopilot_goal="ship it")
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: CompletionVerdict(complete=False, directive="x", verdict="deny"))
+    # A KNOWN tell — the detector fires, so live-learning must NOT also run.
+    driver.maybe_continue(a, [{"role": "user", "content": "go"}],
+                          "It's complete and ready for your review.", "ship it")
+    # Nothing novel learned (the await/claim tells were already known).
+    assert deception._LEARNED.get("learned_evasion", set()) == set() or \
+        not any("ready for your review" in p for p in deception.learned_patterns())
+
+    deception._LEARNED.clear()
+    monkeypatch.undo()
+    deception.load_dictionary(force=True)
+
+
+# --------------------------------------------------------------------------- #
+# Grounded gap-closure: verification receipts -> achievable-bar terminus        #
+# --------------------------------------------------------------------------- #
+def test_real_receipts_drive_terminus_end_to_end(monkeypatch):
+    # A goal whose agent-achievable criterion carries a REAL passing check, plus an
+    # owner-gated residual. With exec enabled, the engine runs `true` (exit 0),
+    # marks the criterion satisfied as FACT, and the achievable-bar terminus halts
+    # with the owner item as a named residual — no council text needed for C01.
+    goal = (
+        "- The build passes {verify: true}\n"
+        "- Obtain owner sign-off before the live cutover\n"
+    )
+    a = make_agent(_autopilot_goal=goal, _autopilot_verification_exec=True)
+    # council says "not done" overall; the terminus logic is what halts the run.
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: CompletionVerdict(complete=False, directive="owner pending", verdict="deny",
+                                                              raw={"arbiter": {"most_likely_wrong_point": "owner pending"}}))
+    out = driver.maybe_continue(a, [{"role": "user", "content": "go"}], "build is green", goal)
+    assert out is None  # achievable-bar HALT
+    assert "owner sign-off required" in getattr(a, "_autopilot_terminus_residual", "")
+    # the receipt actually ran and grounded C01
+    report = a._autopilot_verification_report
+    assert report.enabled is True
+    assert "C01" in report.satisfied_ids
+
+
+def test_failing_receipt_does_not_satisfy(monkeypatch):
+    # The check FAILS (`false`, exit 1) -> the criterion is NOT satisfied -> the
+    # run continues (no false terminus).
+    goal = (
+        "- The build passes {verify: false}\n"
+        "- Obtain owner sign-off before the live cutover\n"
+    )
+    a = make_agent(_autopilot_goal=goal, _autopilot_verification_exec=True)
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: CompletionVerdict(complete=False, directive="build broken", verdict="deny",
+                                                              raw={"arbiter": {"most_likely_wrong_point": "build broken"}}))
+    out = driver.maybe_continue(a, [{"role": "user", "content": "go"}], "claims green but isn't", goal)
+    assert out is not None  # continues — failing check cannot satisfy the criterion
+    assert "C01" not in a._autopilot_verification_report.satisfied_ids
+
+
+def test_verification_off_by_default_no_exec(monkeypatch):
+    # Without opt-in, the {verify:} command is NOT executed (report disabled), and
+    # the structured judge governs (here stubbed to satisfy nothing).
+    goal = "- The build passes {verify: true}\n"
+    a = make_agent(_autopilot_goal=goal)  # exec NOT enabled
+    monkeypatch.setattr(driver, "judge_completion",
+                        lambda *args, **kw: CompletionVerdict(complete=False, directive="x", verdict="deny",
+                                                              raw={"arbiter": {"most_likely_wrong_point": "x"}}))
+    # structured judge stubbed to return nothing satisfied
+    from agent.autopilot import council_gate as cg
+    monkeypatch.setattr(cg, "judge_criteria",
+                        lambda *a, **k: cg.StructuredCompletion(criteria={}, source="aux"))
+    out = driver.maybe_continue(a, [{"role": "user", "content": "go"}], "build green", goal)
+    assert out is not None
+    assert a._autopilot_verification_report.enabled is False
+

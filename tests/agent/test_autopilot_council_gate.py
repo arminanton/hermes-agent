@@ -139,7 +139,7 @@ def test_judge_completion_total_failure_fails_open(monkeypatch):
 # Integration: real Hermes Council offline lane (deterministic, no network)    #
 # --------------------------------------------------------------------------- #
 def _council_src():
-    for c in (os.environ.get("COUNCIL_SRC", ""), "/mnt/devvm/custom/hermes/council/src"):
+    for c in (os.environ.get("COUNCIL_SRC", ""), "/path/to/council/src"):
         if c and (Path(c) / "libs" / "hermes_council" / "deliberation.py").exists():
             return c
     return None
@@ -197,3 +197,107 @@ def test_choose_answer_aux_fallback_no_council(monkeypatch):
     monkeypatch.setattr(cg, "_aux_call",
                         lambda msgs, *, model, max_tokens, timeout: '{"choice": "Postgres"}')
     assert cg.choose_answer("Which DB?", ["Postgres", "SQLite"]) == "Postgres"
+
+
+# --------------------------------------------------------------------------- #
+# choose_answer_detailed — options-surfacing for the ADR                       #
+# --------------------------------------------------------------------------- #
+
+
+def test_choose_answer_detailed_council_surfaces_options(monkeypatch):
+    monkeypatch.setattr(cg, "ensure_council_importable", lambda *a, **k: True)
+    monkeypatch.setattr(cg, "_council_decision",
+                        lambda options, ctx: {"arbiter": {"safest_reversible_path": "Choose Postgres for durability."}})
+    d = cg.choose_answer_detailed("Which DB?", ["Postgres", "SQLite"])
+    assert d.answer == "Postgres"
+    assert d.options == ["Postgres", "SQLite"]   # full option set captured for the ADR
+    assert d.source == "council"
+    assert "Postgres" in d.rationale
+
+
+def test_choose_answer_detailed_aux_fallback_reports_source(monkeypatch):
+    monkeypatch.setattr(cg, "ensure_council_importable", lambda *a, **k: False)
+    monkeypatch.setattr(cg, "_aux_call",
+                        lambda msgs, *, model, max_tokens, timeout: '{"choice": "SQLite", "rationale": "simpler"}')
+    d = cg.choose_answer_detailed("Which DB?", ["Postgres", "SQLite"])
+    assert d.answer == "SQLite"
+    assert d.options == ["Postgres", "SQLite"]
+    assert d.source == "aux"                     # fallback lane is labeled for the ADR
+
+
+def test_choose_answer_string_wrapper_matches_detailed(monkeypatch):
+    monkeypatch.setattr(cg, "ensure_council_importable", lambda *a, **k: False)
+    monkeypatch.setattr(cg, "_aux_call",
+                        lambda msgs, *, model, max_tokens, timeout: '{"choice": "Postgres"}')
+    # The legacy string API returns exactly the detailed answer.
+    assert cg.choose_answer("Which DB?", ["Postgres", "SQLite"]) == \
+        cg.choose_answer_detailed("Which DB?", ["Postgres", "SQLite"]).answer
+
+
+# --------------------------------------------------------------------------- #
+# Structured per-criterion judge (judge_criteria) — "Ask 1"                     #
+# --------------------------------------------------------------------------- #
+from agent.autopilot import contract as _ct
+
+
+def _crits(*pairs):
+    return [_ct.Criterion(id=i, text=t, satisfiability=_ct.AGENT_ACHIEVABLE) for i, t in pairs]
+
+
+def test_judge_criteria_receipts_are_ground_truth(monkeypatch):
+    # A receipt-satisfied id is marked satisfied + grounded WITHOUT calling the council.
+    called = {"council": False}
+
+    def _boom(*a, **k):
+        called["council"] = True
+        raise AssertionError("council must not run when all ids are receipt-grounded")
+
+    monkeypatch.setattr(cg, "_council_run", _boom)
+    crits = _crits(("C01", "tests pass"))
+    sc = cg.judge_criteria("goal", "result", crits, receipt_satisfied_ids={"C01"})
+    assert sc.satisfied_ids() == {"C01"}
+    assert sc.criteria["C01"].grounded_in_receipt is True
+    assert sc.source == "receipts"
+    assert called["council"] is False
+
+
+def test_judge_criteria_council_for_unreceipted(monkeypatch):
+    monkeypatch.setattr(cg, "ensure_council_importable", lambda *a, **k: True)
+    # council returns a structured payload in the arbiter answer
+    monkeypatch.setattr(cg, "_council_run", lambda q, *, mode, max_tokens, evidence_receipts=None: {
+        "arbiter": {"answer": '{"criteria": [{"id": "C02", "satisfied": true, "confidence": 0.8, "evidence": "diff shows it"}]}'},
+    })
+    crits = _crits(("C01", "tests pass"), ("C02", "metrics emitted"))
+    sc = cg.judge_criteria("goal", "result", crits, receipt_satisfied_ids={"C01"})
+    # C01 from receipt, C02 from council
+    assert sc.satisfied_ids() == {"C01", "C02"}
+    assert sc.criteria["C01"].grounded_in_receipt is True
+    assert sc.criteria["C02"].grounded_in_receipt is False
+
+
+def test_judge_criteria_unsatisfied_stays_out(monkeypatch):
+    monkeypatch.setattr(cg, "ensure_council_importable", lambda *a, **k: True)
+    monkeypatch.setattr(cg, "_council_run", lambda q, *, mode, max_tokens, evidence_receipts=None: {
+        "arbiter": {"answer": '{"criteria": [{"id": "C01", "satisfied": false, "confidence": 0.3, "evidence": "no proof"}]}'},
+    })
+    sc = cg.judge_criteria("goal", "result", _crits(("C01", "tests pass")))
+    assert sc.satisfied_ids() == set()
+
+
+def test_judge_criteria_aux_fallback(monkeypatch):
+    monkeypatch.setattr(cg, "ensure_council_importable", lambda *a, **k: False)
+    monkeypatch.setattr(cg, "_aux_call",
+                        lambda msgs, *, model, max_tokens, timeout: '{"criteria": [{"id": "C01", "satisfied": true, "confidence": 0.7}]}')
+    sc = cg.judge_criteria("goal", "result", _crits(("C01", "tests pass")))
+    assert sc.satisfied_ids() == {"C01"}
+    assert sc.source == "aux"
+
+
+def test_judge_criteria_failsafe_on_judge_error(monkeypatch):
+    # council raises -> only receipt-grounded ids survive (fail-closed)
+    monkeypatch.setattr(cg, "ensure_council_importable", lambda *a, **k: True)
+    monkeypatch.setattr(cg, "_council_run", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    crits = _crits(("C01", "tests pass"), ("C02", "metrics"))
+    sc = cg.judge_criteria("goal", "result", crits, receipt_satisfied_ids={"C01"})
+    assert sc.satisfied_ids() == {"C01"}  # C02 unproven -> not satisfied
+

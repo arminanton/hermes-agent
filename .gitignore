@@ -139,3 +139,9 @@ RELEASE_v*.md
 # Desktop demo-run scratch output (hermes writes demo/*.txt during recorded
 # walkthroughs). Throwaway artifacts, never part of the app.
 apps/desktop/demo/
+
+# Autopilot RUNTIME output (per-run decision logs + ledger) — not source.
+# The engine writes these under the workspace; a project copy can land here.
+docs/adr/
+docs/.autopilot/
+/GOAL-LEDGER.md
