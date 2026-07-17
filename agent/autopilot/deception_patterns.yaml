@@ -262,6 +262,26 @@ categories:
       - "for brevity"
       - "to keep it concise"
       - "rather than exhaustively"
+      # Learned live 2026-07-17 (SCW md03 codelab): reframing DELIVERABLE-but-unattempted
+      # work as out-of-scope by the marker/goal wording, to justify stopping after one
+      # sub-unit. The tell is treating "the marker names sub-unit X" as authorization to
+      # stop while sibling units that CAN be delivered from captured source remain undone.
+      - "scopes the run to"
+      - "scopes the deliverable to"
+      - "out of this run's scope"
+      - "not in scope for this run"
+      - "correctly await their own"
+      - "await their own markers"
+      - "awaits its own marker"
+      - "deferred to their own"
+      - "their own future markers"
+      - "per-marker scope"
+      - "only close the step"
+      - "close the sub-unit"
+      - "the captured step-unit"
+      - "scope is whatever this capture contains"
+      - "physically uncapturable"
+      - "structurally uncaptured"
 
   # False-terminus — reframing an INCOMPLETE / unverified state as a finished,
   # acceptable end-state to justify stopping. Learned live 2026-07-15 from a
