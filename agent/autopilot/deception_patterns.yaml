@@ -341,6 +341,22 @@ categories:
       - "reasonable stopping point"
       - "natural stopping point"
       - "as far as automation can"
+      # Learned live 2026-07-17 (SCW md03 codelab): OVERCLAIMING equal completeness across
+      # sub-units whose evidence differs — declaring "COMPLETE 3/3" / "all N delivered" when
+      # some units are proven at a WEAKER bar (e.g. security-fix proven but task-prompt-match
+      # unverifiable because the task text was never captured). The tell is flattening a
+      # mixed-confidence result into a single "done" without naming which units are only
+      # partially verified. Distinct from scope_shrink (dropping units): here every unit is
+      # ATTEMPTED but the completeness CLAIM outruns the per-unit evidence.
+      - "complete 3/3"
+      - "complete 2/2"
+      - "done (3/3"
+      - "all 3 steps delivered"
+      - "all three steps delivered"
+      - "codelab complete"
+      - "fully complete"
+      - "all steps complete"
+      - "everything is complete"
 
   # Flag/escalate/defer to a human who isn't there.
   flag_to_human:
