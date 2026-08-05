@@ -453,3 +453,40 @@ class TestRaftConfig:
             "on_session_end": _on_session_end,
             "on_session_finalize": _on_session_finalize,
         }
+
+
+class TestRaftRequirementsWarnOnce:
+    """check_raft_requirements is registered as the platform check_fn and is
+    probed on every hook event / tool-definition rebuild. It must keep
+    returning the correct readiness bool on every call, but only log the
+    "not found" warning once per process to avoid flooding the gateway log."""
+
+    def test_returns_false_every_call_but_warns_once(self, caplog):
+        import plugins.platforms.raft.adapter as raft_adapter
+
+        # Reset the per-process guard so this test is deterministic regardless
+        # of whether earlier code already tripped the warning.
+        with raft_adapter._WARN_ONCE_LOCK:
+            raft_adapter._WARNED_KEYS.discard("cli-missing")
+
+        with patch.object(raft_adapter.shutil, "which", return_value=None):
+            with caplog.at_level("WARNING", logger=raft_adapter.__name__):
+                results = [check_raft_requirements() for _ in range(25)]
+
+        # Readiness signal must be correct on EVERY probe, not just the first.
+        assert results == [False] * 25
+
+        cli_warnings = [
+            r for r in caplog.records
+            if "raft CLI not found" in r.getMessage()
+        ]
+        assert len(cli_warnings) == 1, (
+            f"expected exactly 1 CLI-missing warning across 25 probes, "
+            f"got {len(cli_warnings)}"
+        )
+
+    def test_returns_true_when_cli_present(self):
+        import plugins.platforms.raft.adapter as raft_adapter
+
+        with patch.object(raft_adapter.shutil, "which", return_value="/usr/bin/raft"):
+            assert check_raft_requirements() is True

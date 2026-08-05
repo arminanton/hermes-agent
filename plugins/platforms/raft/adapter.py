@@ -96,14 +96,38 @@ _RAFT_SESSION_IDS: set[str] = set()
 _RAFT_TURN_IDS: set[str] = set()
 _RAFT_PROMPT_TURN_IDS: set[str] = set()
 
+# check_raft_requirements() is registered as the platform check_fn, which the
+# framework probes on every hook event / tool-definition rebuild across all
+# sessions. Emitting the same warning on every probe floods the gateway log
+# with identical "[raft] ... not found" lines (dozens/min across TUI tabs).
+# Gate the LOG (never the return value) so readiness stays live while the
+# warning fires at most once per process, per distinct condition.
+_WARN_ONCE_LOCK = threading.Lock()
+_WARNED_KEYS: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    """Log ``message`` at WARNING level only the first time per process for ``key``."""
+    with _WARN_ONCE_LOCK:
+        if key in _WARNED_KEYS:
+            return
+        _WARNED_KEYS.add(key)
+    logger.warning(message)
+
 
 def check_raft_requirements() -> bool:
     """Check if Raft channel dependencies are available."""
     if not AIOHTTP_AVAILABLE:
-        logger.warning("[raft] aiohttp is not installed — install with: pip install aiohttp")
+        _warn_once(
+            "aiohttp-missing",
+            "[raft] aiohttp is not installed — install with: pip install aiohttp",
+        )
         return False
     if not shutil.which("raft"):
-        logger.warning("[raft] raft CLI not found in PATH — install from https://raft.build")
+        _warn_once(
+            "cli-missing",
+            "[raft] raft CLI not found in PATH — install from https://raft.build",
+        )
         return False
     return True
 

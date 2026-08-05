@@ -153,3 +153,60 @@ def test_general_plugin_manager_skips_model_provider_kind(tmp_path, monkeypatch)
     # No import means the module must NOT be in the plugins list as a loaded one.
     # We check that the general loader didn't crash and didn't raise from the
     # broken __init__.py.
+
+
+def test_bundled_platform_plugin_gets_path_derived_key(monkeypatch, tmp_path):
+    """Bundled platform plugins must key on ``platforms/<name>`` — the SAME
+    path-form ``hermes plugins enable/disable`` writes — not the bare manifest
+    name.
+
+    Regression (2026-07): the loader scanned ``<repo>/plugins/platforms`` as
+    its own root with no prefix, so a plugin whose ``plugin.yaml`` declared
+    ``name: raft-platform`` got key ``raft-platform`` while the CLI wrote
+    ``platforms/raft`` to ``plugins.disabled``. The two never matched, so a
+    'disabled' platform plugin kept loading and spamming its check_fn warning.
+    """
+    from hermes_cli import plugins as plugin_mod
+
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    manager = plugin_mod.PluginManager()
+    manager.discover_and_load(force=True)
+
+    # Every bundled platform adapter must be keyed under ``platforms/*``.
+    platform_keys = [
+        k for k, lp in manager._plugins.items()
+        if lp.manifest.kind == "platform"
+    ]
+    assert platform_keys, "no platform plugins discovered"
+    for key in platform_keys:
+        assert key.startswith("platforms/"), (
+            f"platform plugin keyed as {key!r}, expected a 'platforms/<name>' "
+            "path-derived key so plugins.disabled matches what the CLI writes"
+        )
+
+
+def test_disabled_platform_plugin_by_path_key_is_skipped(monkeypatch, tmp_path):
+    """A platform plugin listed in ``plugins.disabled`` by its path-key
+    (``platforms/raft``) must NOT load — the deny-list has to actually bite.
+    """
+    from hermes_cli import plugins as plugin_mod
+
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    # Deny-list a real bundled platform plugin by its canonical path-key.
+    monkeypatch.setattr(
+        plugin_mod, "_get_disabled_plugins", lambda: {"platforms/raft"}
+    )
+
+    manager = plugin_mod.PluginManager()
+    manager.discover_and_load(force=True)
+
+    raft = manager._plugins.get("platforms/raft")
+    assert raft is not None, "raft platform plugin was not discovered at all"
+    assert raft.enabled is False, "disabled platform plugin still loaded"
+    assert raft.error == "disabled via config"

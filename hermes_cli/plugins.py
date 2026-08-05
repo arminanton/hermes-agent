@@ -1197,7 +1197,7 @@ class PluginManager:
         logger.debug("  bundled (top-level): %d manifest(s)", len(bundled))
         manifests.extend(bundled)
         bundled_platforms = self._scan_directory(
-            repo_plugins / "platforms", source="bundled"
+            repo_plugins / "platforms", source="bundled", prefix="platforms"
         )
         logger.debug("  bundled/platforms: %d manifest(s)", len(bundled_platforms))
         manifests.extend(bundled_platforms)
@@ -1329,6 +1329,7 @@ class PluginManager:
         path: Path,
         source: str,
         skip_names: Optional[Set[str]] = None,
+        prefix: str = "",
     ) -> List[PluginManifest]:
         """Read ``plugin.yaml`` manifests from subdirectories of *path*.
 
@@ -1344,9 +1345,17 @@ class PluginManager:
         *skip_names* is an optional allow-list of names to ignore at the
         top level (kept for back-compat; the current call sites no longer
         pass it now that categories are first-class).
+
+        *prefix* seeds the category path so a caller that scans a category
+        directory DIRECTLY as the root (e.g. ``<root>/platforms``) still
+        derives the same path-form key (``platforms/raft``) the top-level
+        scan and ``hermes plugins enable/disable`` use — without it the key
+        collapses to the bare manifest name (``raft-platform``) and the two
+        enumerators disagree, so a disabled platform plugin never matches
+        and keeps loading.
         """
         return self._scan_directory_level(
-            path, source, skip_names=skip_names, prefix="", depth=0
+            path, source, skip_names=skip_names, prefix=prefix, depth=0
         )
 
     def _scan_directory_level(
