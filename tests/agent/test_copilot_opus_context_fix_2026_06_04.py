@@ -364,7 +364,7 @@ import pytest as _pytest
     ("copilot", "claude-mythos-1-preview", 1_000_000, 128_000),
     # GPT-5 family on Copilot — gpt-5.5 1.05M total window (matches ./src/)
     ("copilot", "gpt-5.5", 1_050_000, 512_000),
-    ("copilot", "gpt-5.4", 750_000, 512_000),
+    ("copilot", "gpt-5.4", 1_050_000, 512_000),
     ("copilot", "gpt-5.4-mini", 400_000, 400_000),
     ("copilot", "gpt-5.3-codex", 272_000, 128_000),
     ("copilot", "gpt-5-mini", 128_000, 128_000),
