@@ -836,8 +836,32 @@ def _estimate_image_tokens(width: int, height: int) -> int:
     return max(1, (width + 511) // 512) * max(1, (height + 511) // 512) * 85
 
 
+def _display_path(path: "Path | str") -> str:
+    """Human-facing form of an on-host path for attachment notices.
+
+    Collapses the Hermes home to the canonical ``~/.hermes`` symlink the user
+    knows (on this host ~/.hermes -> the workspace HERMES_HOME), else a generic
+    ``~`` for other home paths. NON-truncated so the user can copy it and the
+    model can read it verbatim. Purely cosmetic — the real absolute path still
+    rides in ``path`` for any programmatic use.
+    """
+    s = str(path)
+    try:
+        hh = str(_hermes_home).rstrip("/")
+        if hh and (s == hh or s.startswith(hh + "/")):
+            return "~/.hermes" + s[len(hh):]
+        home = os.path.expanduser("~").rstrip("/")
+        # If the real home itself contains a .hermes that IS the hermes home,
+        # the branch above already handled it; here just abbreviate a plain home.
+        if home and (s == home or s.startswith(home + "/")):
+            return "~" + s[len(home):]
+    except Exception:
+        pass
+    return s
+
+
 def _image_meta(path: Path) -> dict:
-    meta = {"name": path.name}
+    meta = {"name": path.name, "display_path": _display_path(path)}
     try:
         from PIL import Image
 

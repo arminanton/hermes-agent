@@ -6,10 +6,14 @@ export const introMsg = (info: SessionInfo): Msg => ({ info, kind: 'intro', role
 
 export const imageTokenMeta = (info?: ImageMeta | null) => {
   const { width, height, token_estimate: t } = info ?? {}
+  const dims = width && height ? `${width}x${height}` : ''
+  const path = (info?.display_path || info?.path || '').trim()
+  const tok = (t ?? 0) > 0 ? `~${fmtK(t!)} tok` : ''
 
-  return [width && height ? `${width}x${height}` : '', (t ?? 0) > 0 ? `~${fmtK(t!)} tok` : '']
-    .filter(Boolean)
-    .join(' · ')
+  // Order: dimensions · path · token-estimate. The path sits in the middle so
+  // the user can locate/copy the exact file and the model has an explicit handle
+  // to it (the same on-host path is also threaded into the prompt content).
+  return [dims, path, tok].filter(Boolean).join(' · ')
 }
 
 export const attachedImageNotice = (info?: ({ name?: string } & ImageMeta) | null) => {
@@ -78,7 +82,9 @@ export const fmtDuration = (ms: number) => {
 }
 
 interface ImageMeta {
+  display_path?: string
   height?: number
+  path?: string
   token_estimate?: number
   width?: number
 }
