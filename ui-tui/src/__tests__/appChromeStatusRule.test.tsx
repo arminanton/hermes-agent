@@ -432,3 +432,48 @@ describe('StatusRule idle-since read-out', () => {
     expect(findComponentByName(element, 'IdleSince')).toBeNull()
   })
 })
+
+describe('StatusRule cmp compression counter thresholds', () => {
+  // Wide cols so the width-fit gate never suppresses the segment; we're testing
+  // the threshold logic, not progressive disclosure.
+  const withCmp = (compressions: number, extra: Record<string, unknown> = {}) =>
+    StatusRule({
+      ...baseProps,
+      cols: 200,
+      usage: { ...baseProps.usage, compressions },
+      ...extra
+    })
+
+  it('hides the counter below the warn threshold', () => {
+    const element = withCmp(42, { cmpWarnThreshold: 100, cmpAlertThreshold: 250 })
+    expect(textContent(element)).not.toContain('cmp ')
+  })
+
+  it('shows the counter in warn colour at/above the warn threshold', () => {
+    const element = withCmp(100, { cmpWarnThreshold: 100, cmpAlertThreshold: 250 })
+    const cmpText = findElementWithText(element, 'cmp 100')
+    expect(cmpText).not.toBeNull()
+    expect(cmpText!.props.color).toBe(DEFAULT_THEME.color.warn)
+  })
+
+  it('shows the counter in error colour at/above the alert threshold', () => {
+    const element = withCmp(250, { cmpWarnThreshold: 100, cmpAlertThreshold: 250 })
+    const cmpText = findElementWithText(element, 'cmp 250')
+    expect(cmpText).not.toBeNull()
+    expect(cmpText!.props.color).toBe(DEFAULT_THEME.color.error)
+  })
+
+  it('stays hidden between warn and alert only when below warn (defaults 100/250)', () => {
+    // 99 < warn(100) → hidden; 150 in [warn, alert) → visible + warn colour.
+    expect(textContent(withCmp(99, { cmpWarnThreshold: 100, cmpAlertThreshold: 250 }))).not.toContain('cmp ')
+    const mid = findElementWithText(withCmp(150, { cmpWarnThreshold: 100, cmpAlertThreshold: 250 }), 'cmp 150')
+    expect(mid!.props.color).toBe(DEFAULT_THEME.color.warn)
+  })
+
+  it('honours custom low thresholds (e.g. a lossy compressor engine)', () => {
+    const element = withCmp(10, { cmpWarnThreshold: 5, cmpAlertThreshold: 10 })
+    const cmpText = findElementWithText(element, 'cmp 10')
+    expect(cmpText).not.toBeNull()
+    expect(cmpText!.props.color).toBe(DEFAULT_THEME.color.error)
+  })
+})

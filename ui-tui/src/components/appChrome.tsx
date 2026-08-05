@@ -5,6 +5,7 @@ import unicodeSpinners from 'unicode-animations'
 
 import { $delegationState } from '../app/delegationStore.js'
 import type { IndicatorStyle, Notice } from '../app/interfaces.js'
+import { DEFAULT_CMP_ALERT_THRESHOLD, DEFAULT_CMP_WARN_THRESHOLD } from '../app/interfaces.js'
 import { useTurnSelector } from '../app/turnStore.js'
 import { DEV_CREDITS_MODE } from '../config/env.js'
 import { FACES } from '../content/faces.js'
@@ -524,7 +525,14 @@ export function StatusRule({
   // (the FaceTicker's elapsed tail covers the live turn) and before the first
   // turn completes. Shares the duration breakpoint and width reservation.
   const showIdle = segs.duration && !busy && lastTurnEndedAt != null && fits(SEP + stringWidth('✓ ') + MAX_DURATION_WIDTH)
-  const showCompressions = segs.compressions && compressions > 0 && fits(SEP + stringWidth(`cmp ${compressions}`))
+  // Compression counter reveal: the segment only appears once the count reaches
+  // cmpWarnThreshold (the "begin alerting" point), so routine low compaction
+  // counts add no chrome. It shows yellow in [warn, alert) and red at alert+.
+  // cmpWarnThreshold of 0 restores always-on behavior (show from the first
+  // compaction). Guard alert < warn by revealing at whichever is lower.
+  const cmpRevealAt = Math.max(1, Math.min(cmpWarnThreshold || 1, cmpAlertThreshold || Infinity))
+  const showCompressions =
+    segs.compressions && compressions >= cmpRevealAt && fits(SEP + stringWidth(`cmp ${compressions}`))
   const showVoice = segs.voice && !!voiceLabel && fits(SEP + stringWidth(voiceLabel))
   const showSessionCount = !!sessionCountText && fits(SEP + stringWidth(sessionCountText))
   const showBg = segs.bg && bgCount > 0 && fits(SEP + stringWidth(`${bgCount} bg`))
@@ -624,7 +632,15 @@ export function StatusRule({
         {showCompressions ? (
           <Text color={t.color.muted} wrap="truncate-end">
             {' │ '}
-            <Text color={compressions >= 10 ? t.color.error : compressions >= 5 ? t.color.warn : t.color.muted}>
+            <Text
+              color={
+                compressions >= cmpAlertThreshold
+                  ? t.color.error
+                  : compressions >= cmpWarnThreshold
+                    ? t.color.warn
+                    : t.color.muted
+              }
+            >
               cmp {compressions}
             </Text>
           </Text>
@@ -780,6 +796,8 @@ export function TranscriptScrollbar({ scrollRef, t }: TranscriptScrollbarProps) 
 interface StatusRuleProps {
   autopilot?: boolean
   bgCount: number
+  cmpWarnThreshold?: number
+  cmpAlertThreshold?: number
   lastTurnEndedAt?: null | number
   liveSessionCount: number
   busy: boolean

@@ -17,6 +17,8 @@ import { asRpcResult } from '../lib/rpc.js'
 
 import {
   type BusyInputMode,
+  DEFAULT_CMP_ALERT_THRESHOLD,
+  DEFAULT_CMP_WARN_THRESHOLD,
   DEFAULT_INDICATOR_STYLE,
   INDICATOR_STYLES,
   type IndicatorStyle,
@@ -164,6 +166,20 @@ const _pasteCollapseCharsFromConfig = (cfg: ConfigFullResponse | null): number =
   return 2000
 }
 
+// display.cmp_warn_threshold / display.cmp_alert_threshold: at/above warn the
+// `cmp N` counter turns yellow and becomes visible; at/above alert it turns red.
+// Defaults 100 / 250 suit CMX (retrieval-first, so a high compaction count is
+// normal and not lossy); lower them (e.g. 5 / 10) for a lossy compressor engine.
+// Non-negative integers only; bad values fall back to the default.
+const _nonNegInt = (raw: unknown, fallback: number): number => {
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) return Math.round(raw)
+  if (typeof raw === 'string') {
+    const n = parseInt(raw, 10)
+    if (Number.isFinite(n) && n >= 0) return n
+  }
+  return fallback
+}
+
 /** Fetch ``config.get full`` and fan the result through ``applyDisplay``.
  *
  * Extracted so the mtime-reload path can be exercised by the test
@@ -204,6 +220,8 @@ export const applyDisplay = (
 
   patchUiState({
     busyInputMode: normalizeBusyInputMode(d.busy_input_mode),
+    cmpWarnThreshold: _nonNegInt(d.cmp_warn_threshold, DEFAULT_CMP_WARN_THRESHOLD),
+    cmpAlertThreshold: _nonNegInt(d.cmp_alert_threshold, DEFAULT_CMP_ALERT_THRESHOLD),
     compact: !!d.tui_compact,
     detailsMode: resolveDetailsMode(d),
     detailsModeCommandOverride: false,

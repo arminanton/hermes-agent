@@ -297,6 +297,56 @@ describe('applyDisplay → busy_input_mode', () => {
   })
 })
 
+describe('applyDisplay → cmp thresholds', () => {
+  beforeEach(() => {
+    resetUiState()
+  })
+
+  it('threads display.cmp_warn_threshold / cmp_alert_threshold into $uiState', () => {
+    const setBell = vi.fn()
+
+    applyDisplay(
+      { config: { display: { cmp_warn_threshold: 100, cmp_alert_threshold: 250 } } },
+      setBell
+    )
+    expect($uiState.get().cmpWarnThreshold).toBe(100)
+    expect($uiState.get().cmpAlertThreshold).toBe(250)
+  })
+
+  it('accepts string values (hand-edited YAML) and rounds them', () => {
+    const setBell = vi.fn()
+
+    applyDisplay(
+      { config: { display: { cmp_warn_threshold: '7' as unknown as number, cmp_alert_threshold: '20' as unknown as number } } },
+      setBell
+    )
+    expect($uiState.get().cmpWarnThreshold).toBe(7)
+    expect($uiState.get().cmpAlertThreshold).toBe(20)
+  })
+
+  it('falls back to 100 / 250 defaults when missing or invalid', () => {
+    const setBell = vi.fn()
+
+    applyDisplay({ config: { display: {} } }, setBell)
+    expect($uiState.get().cmpWarnThreshold).toBe(100)
+    expect($uiState.get().cmpAlertThreshold).toBe(250)
+
+    applyDisplay(
+      { config: { display: { cmp_warn_threshold: -3 as unknown as number, cmp_alert_threshold: 'nope' as unknown as number } } },
+      setBell
+    )
+    expect($uiState.get().cmpWarnThreshold).toBe(100)
+    expect($uiState.get().cmpAlertThreshold).toBe(250)
+  })
+
+  it('accepts 0 for cmp_warn_threshold (always-on counter)', () => {
+    const setBell = vi.fn()
+
+    applyDisplay({ config: { display: { cmp_warn_threshold: 0 } } }, setBell)
+    expect($uiState.get().cmpWarnThreshold).toBe(0)
+  })
+})
+
 describe('applyDisplay → tui_status_indicator', () => {
   beforeEach(() => {
     resetUiState()

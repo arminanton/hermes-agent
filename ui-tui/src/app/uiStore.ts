@@ -4,12 +4,14 @@ import { MOUSE_TRACKING } from '../config/env.js'
 import { ZERO } from '../domain/usage.js'
 import { DEFAULT_THEME } from '../theme.js'
 
-import { DEFAULT_INDICATOR_STYLE, type UiState } from './interfaces.js'
+import { DEFAULT_CMP_ALERT_THRESHOLD, DEFAULT_CMP_WARN_THRESHOLD, DEFAULT_INDICATOR_STYLE, type UiState } from './interfaces.js'
 
 const buildUiState = (): UiState => ({
   bgTasks: new Set(),
   busy: false,
   busyInputMode: 'queue',
+  cmpWarnThreshold: DEFAULT_CMP_WARN_THRESHOLD,
+  cmpAlertThreshold: DEFAULT_CMP_ALERT_THRESHOLD,
   compact: false,
   detailsMode: 'collapsed',
   detailsModeCommandOverride: false,

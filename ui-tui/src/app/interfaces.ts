@@ -54,6 +54,14 @@ export const INDICATOR_STYLES = ['ascii', 'emoji', 'kaomoji', 'unicode'] as cons
 export type IndicatorStyle = (typeof INDICATOR_STYLES)[number]
 export const DEFAULT_INDICATOR_STYLE: IndicatorStyle = 'kaomoji'
 
+// Status-bar `cmp N` compression-counter thresholds. Single source of truth for
+// the TS fallback defaults (the config.yaml key display.cmp_warn_threshold /
+// display.cmp_alert_threshold is authoritative at runtime; these apply only
+// before config-sync lands or when the value is missing/invalid). Defaults suit
+// CMX, where a high compaction count is normal (retrieval-first, not lossy).
+export const DEFAULT_CMP_WARN_THRESHOLD = 100
+export const DEFAULT_CMP_ALERT_THRESHOLD = 250
+
 export interface SelectionApi {
   captureScrolledRows: (firstRow: number, lastRow: number, side: 'above' | 'below') => void
   clearSelection: () => void
@@ -159,6 +167,8 @@ export interface UiState {
   bgTasks: Set<string>
   busy: boolean
   busyInputMode: BusyInputMode
+  cmpWarnThreshold: number
+  cmpAlertThreshold: number
   compact: boolean
   detailsMode: DetailsMode
   detailsModeCommandOverride: boolean

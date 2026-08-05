@@ -154,6 +154,11 @@ export type CommandDispatchResponse =
 export interface ConfigDisplayConfig {
   bell_on_complete?: boolean
   busy_input_mode?: string
+  // Status-bar `cmp N` compression-counter thresholds. At/above warn the counter
+  // turns yellow and becomes visible; at/above alert it turns red. Wire type is
+  // number|string (hand-edited YAML may be a string); normalized at runtime.
+  cmp_warn_threshold?: number | string
+  cmp_alert_threshold?: number | string
   details_mode?: string
   inline_diffs?: boolean
   mouse_tracking?: boolean | null | number | string

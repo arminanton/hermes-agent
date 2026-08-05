@@ -1611,6 +1611,23 @@ DEFAULT_CONFIG = {
         # failure isn't silent from the UI's perspective.  Set false to suppress.
         "turn_completion_explainer": True,
         "show_cost": False,       # Show $ cost in the status bar (off by default)
+        # Status-bar compression counter (`cmp N`) thresholds. The counter
+        # tracks how many times the active context engine has compacted this
+        # session. Note: with the CMX context engine, `cmp N` is NOT lossy
+        # compression — CMX does retrieval-first context-window management, so a
+        # high count is normal and not inherently a problem. Two knobs control
+        # the counter's coloring and visibility:
+        #   cmp_warn_threshold  — at/above this count the `cmp N` text turns
+        #                         yellow AND the segment begins showing (below
+        #                         it the counter stays hidden, so routine
+        #                         compactions add no chrome). Default 100.
+        #   cmp_alert_threshold — at/above this count it turns red (a genuinely
+        #                         unusual count worth a look). Default 250.
+        # Lower these (e.g. 5 / 10) if you run a lossy compressor engine where
+        # each compaction degrades context and you want an early heads-up. Set
+        # cmp_warn_threshold to 0 to show the counter from the first compaction.
+        "cmp_warn_threshold": 100,
+        "cmp_alert_threshold": 250,
         "skin": "default",
         # UI language for static user-facing messages (approval prompts, a
         # handful of gateway slash-command replies).  Does NOT affect agent
