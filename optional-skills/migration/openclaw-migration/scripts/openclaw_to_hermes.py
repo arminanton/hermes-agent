@@ -1820,10 +1820,20 @@ class Migrator:
             self.record("tts-config", source_path, destination, "migrated", "Would set TTS config", settings=list(tts_data.keys()))
 
     def migrate_shared_skills(self) -> None:
-        # Check all OpenClaw skill sources: managed, personal, project-level
+        # Check all OpenClaw skill sources: managed, personal, project-level.
+        # The personal-skills root is normally the real user home, but is
+        # overridable via HERMES_OPENCLAW_PERSONAL_SKILLS_HOME so tests (and
+        # any caller that already scoped source_root/target_root to an
+        # isolated tmp directory) don't have this one path silently escape
+        # to the real filesystem and pick up unrelated, possibly broken,
+        # skill directories.
+        personal_skills_home = os.environ.get("HERMES_OPENCLAW_PERSONAL_SKILLS_HOME")
+        personal_skills_root = (
+            Path(personal_skills_home) if personal_skills_home else Path.home()
+        ) / ".agents" / "skills"
         skill_sources = [
             (self.source_root / "skills", "shared-skills", "managed skills"),
-            (Path.home() / ".agents" / "skills", "personal-skills", "personal cross-project skills"),
+            (personal_skills_root, "personal-skills", "personal cross-project skills"),
             (self.source_root / "workspace" / ".agents" / "skills", "project-skills", "project-level shared skills"),
             (self.source_root / "workspace.default" / ".agents" / "skills", "project-skills", "project-level shared skills"),
         ]

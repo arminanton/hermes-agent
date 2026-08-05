@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2]
@@ -14,6 +16,22 @@ SCRIPT_PATH = (
     / "scripts"
     / "openclaw_to_hermes.py"
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_personal_skills_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redirect Migrator.migrate_shared_skills()'s personal-skills lookup.
+
+    That method reads ``~/.agents/skills`` unconditionally unless this env
+    var is set. Without this fixture, tests that don't happen to have this
+    directory (or that do, with content the migrator chokes on) leak into
+    the real filesystem instead of staying inside ``tmp_path`` — violating
+    the hermetic-test invariant and making failures depend on whatever is
+    sitting in the machine's real home directory.
+    """
+    monkeypatch.setenv(
+        "HERMES_OPENCLAW_PERSONAL_SKILLS_HOME", str(tmp_path / "_no_personal_skills_home")
+    )
 
 
 def load_module():
