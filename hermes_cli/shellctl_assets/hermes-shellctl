@@ -1,0 +1,602 @@
+#!/usr/bin/env python3
+"""hermes-shellctl - the CLIENT half of the Hermes SSH media/file bridge.
+
+Runs on YOUR machine (Mac / Linux / WSL / PuTTY host) - the box you SSH FROM.
+It is a tiny HTTP server (Python 3 stdlib only, zero dependencies) that the
+Hermes host (the box you SSH INTO, running the TUI + dashboard) reaches back
+through a reverse SSH forward (RemoteForward). That lets the remote Hermes:
+
+  - PULL a local file from this machine  (image / pdf / any file -> attach in TUI)
+  - PUSH a file to this machine and open it  (agent-produced image / artifact)
+  - PLAY audio on this machine's speakers  (TTS reply)
+  - RECORD this machine's microphone  (voice input -> STT)
+  - read this machine's CLIPBOARD image  (paste)
+
+Design: stdlib only, no sudo, no ControlMaster dependency, localhost-bound +
+token-gated.
+
+Run:  hermes-shellctl daemon --port 8765 --token <tok>
+"""
+from __future__ import annotations
+
+import argparse
+import hmac
+import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+SHELLCTL_VERSION = "0.2.0"
+_IS_MAC = platform.system() == "Darwin"
+
+_TOKEN = ""
+_DOWNLOAD_DIR = os.path.expanduser("~/Downloads")
+_MAX_BYTES = 64 * 1024 * 1024  # 64 MB cap per transfer
+
+
+def _which(*cands: str):
+    for c in cands:
+        p = shutil.which(c)
+        if p:
+            return p
+    return None
+
+
+def _open_file(path: str):
+    opener = "open" if _IS_MAC else _which("xdg-open", "gio")
+    if not opener:
+        return False, "no opener (install xdg-utils on Linux)"
+    try:
+        subprocess.Popen([opener, path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True, "opened"
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+
+
+def _play_via_gui_helper(path: str):
+    """Play audio through the GUI-session miccap_helper so afplay runs INSIDE
+    the user's Aqua session. The daemon itself runs outside that session, and
+    its afplay drops out / "scissors" the audio. Returns (ok, msg) or None when
+    no helper is watching (so the caller falls back to direct afplay)."""
+    if not _miccap_helper_alive():
+        return None
+    req = os.path.join(_MICCAP_DIR, "req")
+    done = os.path.join(_MICCAP_DIR, "done")
+    for stale in (req, done):
+        try:
+            os.unlink(stale)
+        except OSError:
+            pass
+    try:
+        with open(req, "w") as f:
+            f.write("play %s\n" % path)
+        # The GUI helper now starts playback fire-and-forget (barge-in: a newer
+        # reply preempts the current one) and writes `done` as soon as afplay is
+        # launched — so we only wait briefly for that start ack, not the whole
+        # clip. This lets a fresh reply's audio cut off a still-playing one.
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            if os.path.isfile(done):
+                status = ""
+                try:
+                    with open(done) as f:
+                        status = f.read().strip()
+                except OSError:
+                    pass
+                try:
+                    os.unlink(done)
+                except OSError:
+                    pass
+                return (not status.startswith("err"), status or "played")
+            time.sleep(0.05)
+        return (False, "gui play timeout")
+    except Exception as e:  # noqa: BLE001
+        return (False, str(e))
+
+
+def _play_audio(path: str):
+    # Prefer the GUI-session helper on macOS (smooth, in-session afplay).
+    if _IS_MAC:
+        gui = _play_via_gui_helper(path)
+        if gui is not None:
+            return gui
+    if _IS_MAC:
+        player = _which("afplay")
+        args = [player, path] if player else None
+    else:
+        player = _which("paplay", "aplay", "ffplay", "mpv")
+        if player and player.endswith("ffplay"):
+            args = [player, "-nodisp", "-autoexit", "-loglevel", "quiet", path]
+        elif player:
+            args = [player, path]
+        else:
+            args = None
+    if not args:
+        return False, "no audio player found"
+    try:
+        subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
+        return True, "played"
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+
+
+def _find_micrec():
+    """Locate the native AVFoundation recorder. Checks next to this client AND
+    ~/.hermes/shellctl/micrec (where the installer/builder places it)."""
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "micrec"),
+        os.path.expanduser("~/.hermes/shellctl/micrec"),
+    ]
+    for c in candidates:
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+_MICCAP_DIR = os.path.expanduser("~/.hermes/shellctl/miccap")
+
+
+def _record_via_gui_helper(seconds: int):
+    """Request a FIXED-window capture from the GUI-session miccap_helper.
+    Returns (bytes, status) or None if no helper is watching."""
+    if not _miccap_helper_alive():
+        return None
+    out_wav = os.path.join(_MICCAP_DIR, "capture-%d.wav" % int(time.time() * 1000))
+    req = os.path.join(_MICCAP_DIR, "req")
+    done = os.path.join(_MICCAP_DIR, "done")
+    try:
+        for stale in (req, done):
+            try:
+                os.unlink(stale)
+            except OSError:
+                pass
+        with open(req, "w") as f:
+            f.write("%s %d\n" % (out_wav, seconds))
+        deadline = time.time() + seconds + 20
+        return _await_helper_done(done, out_wav, deadline)
+    except Exception as e:  # noqa: BLE001
+        return None, str(e)
+
+
+def _miccap_helper_alive():
+    heartbeat = os.path.join(_MICCAP_DIR, "alive")
+    try:
+        return os.path.isfile(heartbeat) and (time.time() - os.path.getmtime(heartbeat)) <= 30
+    except OSError:
+        return False
+
+
+def _await_helper_done(done, out_wav, deadline):
+    while time.time() < deadline:
+        if os.path.isfile(done):
+            status = ""
+            try:
+                with open(done) as f:
+                    status = f.read().strip()
+            except OSError:
+                pass
+            try:
+                os.unlink(done)
+            except OSError:
+                pass
+            if status.startswith("err"):
+                return None, status
+            if os.path.isfile(out_wav):
+                with open(out_wav, "rb") as f:
+                    data = f.read()
+                try:
+                    os.unlink(out_wav)
+                except OSError:
+                    pass
+                return data, "ok"
+            return None, "helper reported done but no wav"
+        time.sleep(0.1)
+    return None, "gui helper timeout"
+
+
+# Open-ended (press-to-stop) capture state. _record_start kicks off an "until"
+# capture on the GUI helper; _record_stop drops the stop flag and waits for the
+# finalized WAV. Used for the TUI Ctrl+O start / Ctrl+O stop toggle so a long
+# utterance is never truncated by a fixed window.
+_OPEN_CAPTURE = {"out_wav": None, "active": False}
+
+
+def _record_start_open():
+    """Begin an open-ended GUI-helper capture. Returns (True, msg) on success."""
+    if not _miccap_helper_alive():
+        return False, "no gui helper"
+    out_wav = os.path.join(_MICCAP_DIR, "capture-%d.wav" % int(time.time() * 1000))
+    req = os.path.join(_MICCAP_DIR, "req")
+    for stale in (req, os.path.join(_MICCAP_DIR, "done"), os.path.join(_MICCAP_DIR, "stop")):
+        try:
+            os.unlink(stale)
+        except OSError:
+            pass
+    try:
+        with open(req, "w") as f:
+            f.write("%s until\n" % out_wav)
+        _OPEN_CAPTURE["out_wav"] = out_wav
+        _OPEN_CAPTURE["active"] = True
+        return True, "recording"
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+
+
+def _record_stop_open():
+    """Stop the open-ended capture and return (bytes, status)."""
+    if not _OPEN_CAPTURE.get("active"):
+        return None, "no open capture"
+    out_wav = _OPEN_CAPTURE.get("out_wav")
+    _OPEN_CAPTURE["active"] = False
+    stop = os.path.join(_MICCAP_DIR, "stop")
+    done = os.path.join(_MICCAP_DIR, "done")
+    try:
+        with open(stop, "w") as f:
+            f.write("1\n")
+        # Helper finalizes shortly after seeing the stop flag.
+        return _await_helper_done(done, out_wav, time.time() + 30)
+    except Exception as e:  # noqa: BLE001
+        return None, str(e)
+
+
+def _record_mic(seconds: int):
+    seconds = max(1, min(seconds, 120))
+    # On macOS, prefer the GUI-session helper (the ONLY path that captures real
+    # audio when the daemon runs outside the Aqua login session). Falls through
+    # to direct spawning when no helper is watching (e.g. daemon IS in the GUI
+    # session, or non-mac).
+    if _IS_MAC:
+        gui = _record_via_gui_helper(seconds)
+        if gui is not None:
+            return gui
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp.close()
+    try:
+        if _IS_MAC:
+            # Direct fallback: native AVFoundation recorder (only yields real
+            # audio if THIS process is itself in the GUI session).
+            micrec = _find_micrec()
+            if micrec:
+                args = [micrec, tmp.name, str(seconds)]
+            else:
+                rec = _which("rec", "sox")
+                if rec:
+                    args = ([rec, "-q", "-d", tmp.name, "trim", "0", str(seconds)]
+                            if rec.endswith("rec")
+                            else [rec, "-q", "-d", "-t", "wav", tmp.name, "trim", "0", str(seconds)])
+                else:
+                    ff = _which("ffmpeg")
+                    if not ff:
+                        return None, "no recorder (native micrec missing; install sox)"
+                    args = [ff, "-y", "-f", "avfoundation", "-i", ":default",
+                            "-t", str(seconds), "-loglevel", "quiet", tmp.name]
+        else:
+            rec = _which("arecord")
+            if rec:
+                args = [rec, "-q", "-d", str(seconds), "-f", "cd", tmp.name]
+            else:
+                ff = _which("ffmpeg")
+                if not ff:
+                    return None, "no recorder (install alsa-utils or ffmpeg)"
+                args = [ff, "-y", "-f", "pulse", "-i", "default",
+                        "-t", str(seconds), "-loglevel", "quiet", tmp.name]
+        subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=seconds + 15)
+        with open(tmp.name, "rb") as f:
+            return f.read(), "ok"
+    except Exception as e:  # noqa: BLE001
+        return None, str(e)
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
+_MIME_BY_EXT = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+    ".tiff": "image/tiff", ".tif": "image/tiff", ".heic": "image/heic",
+    ".heif": "image/heif", ".svg": "image/svg+xml", ".pdf": "application/pdf",
+}
+
+
+def _guess_ctype(name):
+    import mimetypes
+    ext = os.path.splitext(name or "")[1].lower()
+    if ext in _MIME_BY_EXT:
+        return _MIME_BY_EXT[ext]
+    return mimetypes.guess_type(name or "")[0] or "application/octet-stream"
+
+
+def _macos_clipboard_file_paths():
+    """Return POSIX paths of files currently on the macOS clipboard, or [].
+
+    When you Cmd+C a file in Finder (or copy a file from most apps), the
+    pasteboard carries a ``public.file-url`` reference to the ORIGINAL file on
+    disk, not a re-rendered bitmap. Reading those bytes straight off disk is
+    byte-perfect and works for ANY type (pdf, exe, zip, high-res image), which
+    is exactly the as-is transfer the user wants. AppleScript's
+    ``the clipboard as «class furl»`` returns the file URL(s); a list when
+    several files are copied. We ask for a newline-joined POSIX path list.
+    """
+    script = (
+        'set out to ""\n'
+        'try\n'
+        '  set theFiles to (the clipboard as «class furl»)\n'
+        '  if class of theFiles is not list then set theFiles to {theFiles}\n'
+        '  repeat with f in theFiles\n'
+        '    set out to out & POSIX path of f & linefeed\n'
+        '  end repeat\n'
+        'end try\n'
+        'return out'
+    )
+    try:
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, timeout=10)
+        if r.returncode != 0:
+            return []
+        raw = (r.stdout or b"").decode("utf-8", "replace")
+        return [p for p in (line.strip() for line in raw.splitlines()) if p]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _clipboard_grab():
+    """Grab clipboard contents losslessly. Returns (data, filename, ctype, msg).
+
+    Priority, highest fidelity first:
+      1. A FILE on the clipboard (Finder copy / file URL) -> read the ORIGINAL
+         bytes off disk, keep the real name + extension. Byte-perfect, any type.
+      2. Raw image data on the clipboard (screenshot, copy-from-Preview) with no
+         backing file -> extract as PNG (lossless container; this is the only
+         representation the OS actually holds for a screenshot, so it's as-is).
+    """
+    if _IS_MAC:
+        # 1. Real file(s) on the clipboard -> transfer the original bytes as-is.
+        for path in _macos_clipboard_file_paths():
+            try:
+                if os.path.isfile(path):
+                    sz = os.path.getsize(path)
+                    if sz > _MAX_BYTES:
+                        return None, None, None, "clipboard file too large (%d bytes)" % sz
+                    with open(path, "rb") as f:
+                        data = f.read()
+                    name = os.path.basename(path) or "clipboard-file"
+                    return data, name, _guess_ctype(name), "ok"
+            except Exception:  # noqa: BLE001
+                continue  # fall through to the bitmap path
+
+        # 2. No backing file: raw image bitmap on the clipboard (screenshot etc).
+        pp = _which("pngpaste")
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        tmp.close()
+        try:
+            if pp:
+                r = subprocess.run([pp, tmp.name], capture_output=True, timeout=10)
+                if r.returncode != 0:
+                    return None, None, None, "no image on clipboard"
+            else:
+                script = ('set p to (POSIX file "%s")\n'
+                          'set d to the clipboard as \xc2\xabclass PNGf\xc2\xbb\n'
+                          'set fh to open for access p with write permission\n'
+                          'write d to fh\nclose access fh') % tmp.name
+                r = subprocess.run(["osascript", "-e", script], capture_output=True, timeout=10)
+                if r.returncode != 0:
+                    return None, None, None, "no image on clipboard (or osascript denied)"
+            with open(tmp.name, "rb") as f:
+                data = f.read()
+            if not data:
+                return None, None, None, "clipboard image empty"
+            return data, "clip-%d.png" % int(time.time()), "image/png", "ok"
+        except Exception as e:  # noqa: BLE001
+            return None, None, None, str(e)
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+    else:
+        # Linux/WSL. 1. File(s) copied in a file manager land on the clipboard as
+        # text/uri-list; read the original bytes off disk (byte-perfect, any type).
+        xc = _which("xclip")
+        if xc:
+            try:
+                r = subprocess.run([xc, "-selection", "clipboard", "-t", "text/uri-list", "-o"],
+                                   capture_output=True, timeout=10)
+                if r.returncode == 0 and r.stdout:
+                    for line in r.stdout.decode("utf-8", "replace").splitlines():
+                        line = line.strip()
+                        if line.startswith("file://"):
+                            from urllib.parse import unquote, urlparse as _up
+                            p = unquote(_up(line).path)
+                            if os.path.isfile(p):
+                                sz = os.path.getsize(p)
+                                if sz > _MAX_BYTES:
+                                    return None, None, None, "clipboard file too large (%d bytes)" % sz
+                                with open(p, "rb") as f:
+                                    data = f.read()
+                                name = os.path.basename(p) or "clipboard-file"
+                                return data, name, _guess_ctype(name), "ok"
+            except Exception:  # noqa: BLE001
+                pass
+            # 2. Raw image bitmap on the clipboard.
+            try:
+                r = subprocess.run([xc, "-selection", "clipboard", "-t", "image/png", "-o"],
+                                   capture_output=True, timeout=10)
+                if r.returncode == 0 and r.stdout:
+                    return r.stdout, "clip-%d.png" % int(time.time()), "image/png", "ok"
+            except Exception as e:  # noqa: BLE001
+                return None, None, None, str(e)
+            return None, None, None, "no image on clipboard"
+        return None, None, None, "install xclip for clipboard images"
+
+
+def _clipboard_image():
+    """Back-compat shim: legacy callers want (data, msg) for an image only."""
+    data, _name, _ctype, msg = _clipboard_grab()
+    return data, msg
+
+
+def _capabilities():
+    return {
+        "open": bool("open" if _IS_MAC else _which("xdg-open", "gio")),
+        "play": bool(_which("afplay", "paplay", "aplay", "ffplay", "mpv")),
+        "record": bool(_find_micrec() or _which("rec", "sox", "arecord", "ffmpeg")),
+        "clipboard": bool(_which("pngpaste") or _IS_MAC or _which("xclip")),
+    }
+
+
+class _Handler(BaseHTTPRequestHandler):
+    server_version = "hermes-shellctl/" + SHELLCTL_VERSION
+
+    def log_message(self, *a):
+        pass
+
+    def _auth_ok(self):
+        tok = self.headers.get("X-Shellctl-Token", "")
+        return bool(_TOKEN) and hmac.compare_digest(tok, _TOKEN)
+
+    def _send(self, code, payload=None, raw=None, ctype="application/json", extra_headers=None):
+        body = raw if raw is not None else json.dumps(payload or {}).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        for k, v in (extra_headers or {}).items():
+            self.send_header(k, str(v))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _read_body(self):
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        if n > _MAX_BYTES:
+            return b""
+        return self.rfile.read(n) if n else b""
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        if u.path == "/ping":
+            return self._send(200, {"ok": True, "version": SHELLCTL_VERSION,
+                                    "os": platform.system(), "caps": _capabilities()})
+        if not self._auth_ok():
+            return self._send(401, {"error": "unauthorized"})
+        q = parse_qs(u.query)
+        if u.path == "/pull":
+            path = os.path.expanduser((q.get("path") or [""])[0])
+            if not path or not os.path.isfile(path):
+                return self._send(404, {"error": "file not found: " + path})
+            sz = os.path.getsize(path)
+            if sz > _MAX_BYTES:
+                return self._send(413, {"error": "file too large (%d bytes)" % sz})
+            with open(path, "rb") as f:
+                return self._send(200, raw=f.read(), ctype="application/octet-stream")
+        if u.path == "/clipboard":
+            data, name, ctype, msg = _clipboard_grab()
+            if data is None:
+                return self._send(404, {"error": msg})
+            # Carry the real filename + content-type so the remote side saves
+            # the bytes verbatim with the correct extension (image, pdf, exe,
+            # anything), instead of assuming .png. Legacy remotes that ignore
+            # these headers still get the raw bytes unchanged.
+            extra = {
+                "X-Clipboard-Filename": name or "clipboard-file",
+                "X-Clipboard-Kind": "image" if (ctype or "").startswith("image/") else "file",
+            }
+            return self._send(200, raw=data, ctype=ctype or "application/octet-stream",
+                              extra_headers=extra)
+        return self._send(404, {"error": "no such endpoint"})
+
+    def do_POST(self):
+        u = urlparse(self.path)
+        if not self._auth_ok():
+            return self._send(401, {"error": "unauthorized"})
+        q = parse_qs(u.query)
+        if u.path == "/push":
+            name = os.path.basename((q.get("name") or ["hermes-file"])[0]) or "hermes-file"
+            data = self._read_body()
+            if not data:
+                return self._send(400, {"error": "empty body or too large"})
+            os.makedirs(_DOWNLOAD_DIR, exist_ok=True)
+            dest = os.path.join(_DOWNLOAD_DIR, name)
+            with open(dest, "wb") as f:
+                f.write(data)
+            opened = (q.get("open") or ["1"])[0] not in ("0", "false", "no")
+            if opened:
+                _open_file(dest)
+            return self._send(200, {"ok": True, "path": dest, "opened": opened, "bytes": len(data)})
+        if u.path == "/play":
+            data = self._read_body()
+            if not data:
+                return self._send(400, {"error": "empty body or too large"})
+            ext = (q.get("fmt") or ["mp3"])[0].lstrip(".")
+            tmp = tempfile.NamedTemporaryFile(suffix="." + ext, delete=False)
+            tmp.write(data)
+            tmp.close()
+            try:
+                ok, msg = _play_audio(tmp.name)
+                return self._send(200 if ok else 500, {"ok": ok, "msg": msg})
+            finally:
+                try:
+                    os.unlink(tmp.name)
+                except OSError:
+                    pass
+        if u.path == "/record":
+            secs = int((q.get("secs") or ["8"])[0])
+            data, msg = _record_mic(secs)
+            if data is None:
+                return self._send(500, {"error": msg})
+            return self._send(200, raw=data, ctype="audio/wav")
+        if u.path == "/record-start":
+            # Open-ended press-to-stop: begin capture, return immediately.
+            ok, msg = _record_start_open()
+            if not ok:
+                return self._send(409, {"error": msg})
+            return self._send(200, {"ok": True, "status": msg})
+        if u.path == "/record-stop":
+            # End the open capture, return the finalized WAV.
+            data, msg = _record_stop_open()
+            if data is None:
+                return self._send(500, {"error": msg})
+            return self._send(200, raw=data, ctype="audio/wav")
+        return self._send(404, {"error": "no such endpoint"})
+
+
+def cmd_daemon(args):
+    global _TOKEN, _DOWNLOAD_DIR
+    _TOKEN = args.token or os.environ.get("HERMES_SHELLCTL_TOKEN", "")
+    if not _TOKEN:
+        print("FATAL: no token (pass --token or set HERMES_SHELLCTL_TOKEN)", file=sys.stderr)
+        return 2
+    if args.download_dir:
+        _DOWNLOAD_DIR = os.path.expanduser(args.download_dir)
+    srv = ThreadingHTTPServer((args.host, args.port), _Handler)
+    print("hermes-shellctl %s listening on %s:%d (%s, caps=%s)" % (
+        SHELLCTL_VERSION, args.host, args.port, platform.system(), _capabilities()), flush=True)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="hermes-shellctl", description=__doc__)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    d = sub.add_parser("daemon", help="run the bridge listener")
+    d.add_argument("--host", default="127.0.0.1")
+    d.add_argument("--port", type=int, default=8765)
+    d.add_argument("--token", default="")
+    d.add_argument("--download-dir", default="")
+    d.set_defaults(func=cmd_daemon)
+    v = sub.add_parser("version", help="print version")
+    v.set_defaults(func=lambda a: (print(SHELLCTL_VERSION), 0)[1])
+    args = p.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

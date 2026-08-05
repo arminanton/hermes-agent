@@ -12055,6 +12055,23 @@ def main():
     bundles_parser.set_defaults(func=bundles_command)
 
     # =========================================================================
+    # install command — SSH-layer media/file bridge client (shellctl)
+    # =========================================================================
+    install_parser = subparsers.add_parser(
+        "install",
+        help="Install optional Hermes companions (e.g. the SSH media/file bridge)",
+        description=(
+            "Install optional Hermes companion tools. `hermes install shellctl` "
+            "sets up the SSH-layer bridge so a remote TUI can move images, PDFs, "
+            "audio (TTS/mic), and any file between the Hermes host and your local "
+            "machine over your existing SSH connection."
+        ),
+    )
+    from hermes_cli.install_cmd import register_cli as _install_register, install_command
+    _install_register(install_parser)
+    install_parser.set_defaults(func=install_command)
+
+    # =========================================================================
     # plugins command  (parser built in hermes_cli/subcommands/plugins.py)
     # =========================================================================
     build_plugins_parser(subparsers, cmd_plugins=cmd_plugins)

@@ -6697,6 +6697,18 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                     return
                 prompt = ctx.message
 
+            # Attached non-image files (pdf, exe, zip, ...) pulled byte-for-byte
+            # from the user's clipboard via the SSH bridge. They are NOT vision
+            # images; surface their on-host paths so the agent can read them with
+            # its normal file tools. Prepend as a short note ahead of the prompt.
+            if files:
+                _flines = "\n".join(f"- {p}" for p in files)
+                _note = (
+                    "[Attached file(s) from your clipboard, saved on this host "
+                    "(verbatim, no re-encode):\n" + _flines + "]\n\n"
+                )
+                prompt = _note + (prompt or "")
+
             # Decide image routing per-turn based on active provider/model.
             # "native" → pass pixels to the main model as OpenAI-style content
             # parts (adapters translate for Anthropic/Gemini/Bedrock/etc.).
@@ -6953,24 +6965,73 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             # CLI parity: when voice-mode TTS is on, speak the agent reply
             # (cli.py:_voice_speak_response).  Only the final text — tool
             # calls / reasoning already stream separately and would be
-            # noisy to read aloud.
+            # noisy to read aloud. The FULL reply is spoken (no first-sentence
+            # truncation); speak_text caps at 4000 chars and strips markdown.
             if (
                 status == "complete"
                 and isinstance(raw, str)
                 and raw.strip()
                 and _voice_tts_enabled()
             ):
+                spoken = raw
+                # On-screen feedback: tell the TUI we're synthesizing so the
+                # status bar can show "generating audio response..." between the
+                # text arriving and the audio starting (there's a real TTS +
+                # playback round-trip; the user shouldn't wonder if it stalled).
                 try:
-                    from hermes_cli.voice import speak_text
+                    _voice_emit("voice.status", {"state": "synthesizing"})
+                except Exception:  # noqa: BLE001
+                    pass
+                # Seamless over-SSH: when shellctl is reachable, speak the FULL
+                # reply on the USER's Mac speakers via the bridge instead of
+                # this headless host (which has no audio out). Falls back to
+                # host-side speak_text when the bridge isn't available.
+                _spoke_via_bridge = False
+                try:
+                    if _shellbridge_available():
+                        def _bridge_say_reply(_t=spoken):
+                            try:
+                                _run_shellbridge_command("say", _t, {})
+                            finally:
+                                # Clear the synthesizing indicator once playback
+                                # has been dispatched to the user's machine.
+                                try:
+                                    _voice_emit("voice.status", {"state": "idle"})
+                                except Exception:  # noqa: BLE001
+                                    pass
+                        threading.Thread(
+                            target=_bridge_say_reply, daemon=True
+                        ).start()
+                        _spoke_via_bridge = True
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("voice TTS bridge dispatch failed: %s", e)
+                if not _spoke_via_bridge:
+                    try:
+                        from hermes_cli.voice import speak_text
 
-                    spoken = raw
-                    threading.Thread(
-                        target=speak_text, args=(spoken,), daemon=True
-                    ).start()
-                except ImportError:
-                    logger.warning("voice TTS skipped: hermes_cli.voice unavailable")
-                except Exception as e:
-                    logger.warning("voice TTS dispatch failed: %s", e)
+                        def _host_say_reply(_t=spoken):
+                            try:
+                                speak_text(_t)
+                            finally:
+                                try:
+                                    _voice_emit("voice.status", {"state": "idle"})
+                                except Exception:  # noqa: BLE001
+                                    pass
+                        threading.Thread(
+                            target=_host_say_reply, daemon=True
+                        ).start()
+                    except ImportError:
+                        logger.warning("voice TTS skipped: hermes_cli.voice unavailable")
+                        try:
+                            _voice_emit("voice.status", {"state": "idle"})
+                        except Exception:  # noqa: BLE001
+                            pass
+                    except Exception as e:
+                        logger.warning("voice TTS dispatch failed: %s", e)
+                        try:
+                            _voice_emit("voice.status", {"state": "idle"})
+                        except Exception:  # noqa: BLE001
+                            pass
         except Exception as e:
             import traceback
 
@@ -7086,6 +7147,46 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
+
+    # Seamless over-SSH path: when shellctl is installed and the user's local
+    # daemon is reachable, Cmd+V / /paste pulls the USER's clipboard image (their
+    # Mac/laptop), not this headless host's. Falls through to the host clipboard
+    # when the bridge isn't available, so behavior is unchanged without shellctl.
+    try:
+        if _shellbridge_available():
+            local_path, kind = _shellbridge_pull_clipboard(session)
+            if local_path:
+                if kind == "file":
+                    # Arbitrary file (pdf, exe, zip, ...) transferred byte-for-byte.
+                    # Not a vision image: surface it as an attached file the agent
+                    # can read, with no re-encode.
+                    return _ok(
+                        rid,
+                        {
+                            "attached": True,
+                            "path": local_path,
+                            "display_path": _display_path(local_path),
+                            "kind": "file",
+                            "name": os.path.basename(local_path),
+                            "count": len(session.get("attached_files", [])),
+                        },
+                    )
+                return _ok(
+                    rid,
+                    {
+                        "attached": True,
+                        "path": local_path,
+                        "kind": "image",
+                        "count": len(session.get("attached_images", [])),
+                        **_image_meta(Path(local_path)),
+                    },
+                )
+            # bridge up but nothing on the user's clipboard — report it instead
+            # of silently checking the headless host clipboard.
+            return _ok(rid, {"attached": False, "message": "Nothing on your clipboard"})
+    except Exception:  # noqa: BLE001 — never let the bridge probe break paste
+        pass
+
     try:
         from hermes_cli.clipboard import has_clipboard_image, save_clipboard_image
     except Exception as e:
@@ -10270,6 +10371,160 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
     return ""
 
 
+_shellbridge_probe_cache = {"ts": 0.0, "ok": False}
+
+
+def _shellbridge_available() -> bool:
+    """True when shellctl is installed AND a client daemon is reachable.
+
+    Cheap probe: the bridge `ping` returns quickly when the reverse-forward is
+    up and the user's daemon is running; otherwise it fails fast. Used to decide
+    whether clipboard/mic operations should target the user's LOCAL machine (via
+    the bridge) instead of this host's headless clipboard/mic. Result is cached
+    for 10s so frequent paste/voice calls don't re-spawn the probe each time.
+    """
+    now = time.time()
+    if now - _shellbridge_probe_cache["ts"] < 10.0:
+        return bool(_shellbridge_probe_cache["ok"])
+    home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+    bridge = os.path.join(home, "shellctl", "hermes-shellbridge")
+    if not os.path.isfile(bridge):
+        _shellbridge_probe_cache.update(ts=now, ok=False)
+        return False
+    import subprocess as _sp
+    env = dict(os.environ)
+    env_file = os.path.join(home, "shellctl", "bridge.env")
+    if os.path.isfile(env_file):
+        try:
+            for line in open(env_file):
+                line = line.strip()
+                if line and "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    env[k] = v
+        except OSError:
+            pass
+    ok = False
+    try:
+        proc = _sp.run([sys.executable, bridge, "ping"], capture_output=True,
+                       text=True, timeout=6, env=env)
+        import json as _json
+        res = _json.loads((proc.stdout or "{}").splitlines()[-1])
+        ok = bool(res.get("ok"))
+    except Exception:  # noqa: BLE001
+        ok = False
+    _shellbridge_probe_cache.update(ts=now, ok=ok)
+    return ok
+
+
+def _shellbridge_pull_clipboard(session: dict):
+    """Pull the user's LOCAL clipboard content via the bridge.
+
+    Returns (path, kind) where kind is "image" or "file", or (None, None) when
+    nothing was on the clipboard. An IMAGE lands in attached_images (native
+    vision attach); any other file (pdf, exe, zip, ...) lands in attached_files
+    and is transferred byte-for-byte, no re-encode.
+    """
+    session.pop("_last_shellbridge_pull", None)
+    out = _run_shellbridge_command("grab", "", session)
+    if out.startswith("📎"):
+        last = session.get("_last_shellbridge_pull") or {}
+        if last.get("path"):
+            return last["path"], last.get("kind", "image")
+    return None, None
+
+
+def _run_shellbridge_command(base: str, arg: str, session: dict) -> str:
+    """Execute a shellctl bridge command (get/send/say/listen/paste).
+
+    Shells to the installed hermes-shellbridge with the bridge token + the
+    dashboard session token in the env. For file-pulling commands (get/paste)
+    the pulled file lands in the gateway images dir; we auto-attach it to the
+    session so the agent sees it on the next turn.
+    """
+    import json as _json
+    import subprocess as _sp
+
+    home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+    shellctl_dir = os.path.join(home, "shellctl")
+    bridge = os.path.join(shellctl_dir, "hermes-shellbridge")
+    if not os.path.isfile(bridge):
+        return ("shellctl not installed. Run `hermes install shellctl` and follow "
+                "the steps to set up the SSH bridge on your local machine.")
+
+    # Build the bridge env: client token from bridge.env, dashboard token live.
+    env = dict(os.environ)
+    env_file = os.path.join(shellctl_dir, "bridge.env")
+    if os.path.isfile(env_file):
+        try:
+            for line in open(env_file):
+                line = line.strip()
+                if line and "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    env[k] = v
+        except OSError:
+            pass
+    # dashboard session token (gateway reads it from its own env at startup)
+    _dtok_var = "HERMES_DASHBOARD_SESSION_" + "TOKEN"
+    if env.get(_dtok_var):
+        pass  # already present in our env
+
+    # /grab is the shellctl clipboard-pull (bridge subcommand is `paste`).
+    bridge_sub = "paste" if base == "grab" else base
+    argv = [sys.executable, bridge, bridge_sub]
+    if base in {"get", "send", "say"}:
+        if not arg:
+            return f"usage: /{base} <{'text' if base == 'say' else 'path'}>"
+        argv.append(arg)
+    elif base == "listen":
+        if arg.strip().isdigit():
+            argv.append(arg.strip())
+
+    try:
+        proc = _sp.run(argv, capture_output=True, text=True, timeout=180, env=env)
+    except _sp.TimeoutExpired:
+        return f"/{base} timed out (is the shellctl daemon running on your machine?)"
+    except Exception as e:  # noqa: BLE001
+        return f"/{base} failed: {e}"
+
+    raw = (proc.stdout or "").strip() or (proc.stderr or "").strip()
+    try:
+        res = _json.loads(raw.splitlines()[-1]) if raw else {}
+    except Exception:  # noqa: BLE001
+        return raw or f"/{base}: no output"
+
+    if not res.get("ok"):
+        return f"/{base}: {res.get('error', 'failed')}"
+
+    # Auto-attach pulled files (get/grab) into the session for the agent.
+    if base in {"get", "grab"} and res.get("path"):
+        try:
+            kind = (res.get("kind") or "").lower()
+            path = res["path"]
+            # Record the last pull so callers (clipboard.paste) can tell whether
+            # it was an image or an arbitrary file without re-parsing.
+            session["_last_shellbridge_pull"] = {"path": path, "kind": kind or "image"}
+            if kind == "file":
+                session.setdefault("attached_files", []).append(path)
+            else:
+                session.setdefault("attached_images", []).append(path)
+            return f"📎 attached from your machine: {os.path.basename(path)}"
+        except Exception:  # noqa: BLE001
+            return f"pulled to {res['path']}"
+    if base == "send":
+        return f"📤 sent to your machine: {res.get('path', 'ok')}"
+    if base == "say":
+        return "🔊 played on your machine" if res.get("played") else "say: playback failed"
+    if base == "listen":
+        t = res.get("transcript", "").strip()
+        return f"🎤 {t}" if t else "listen: no speech detected"
+    if base == "listen-start":
+        return "🎙️ recording"
+    if base == "listen-stop":
+        t = res.get("transcript", "").strip()
+        return f"🎤 {t}" if t else "listen: no speech detected"
+    return raw
+
+
 @method("slash.exec")
 def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
@@ -10301,6 +10556,16 @@ def _(rid, params: dict) -> dict:
                 "session_id": params.get("session_id", ""),
             },
         )
+
+    # shellctl bridge commands — move images/pdf/audio/files between this host
+    # and the user's local machine over their SSH reverse-forward. Handled here
+    # (gateway-side, no TUI bundle dep) by shelling to hermes-shellbridge. The
+    # commands auto-attach pulled files into the session so the agent sees them.
+    # NOTE: `paste` is intentionally NOT here — the TUI already owns /paste
+    # (clipboard attach); shellctl exposes clipboard pull as /grab instead.
+    if _cmd_base in {"get", "grab", "send", "say", "listen"}:
+        out = _run_shellbridge_command(_cmd_base, _cmd_arg, session)
+        return _ok(rid, {"output": out})
 
     if _cmd_base in _WORKER_BLOCKED_COMMANDS:
         subcommand = _cmd_arg.split(maxsplit=1)[0].lower() if _cmd_arg else ""
@@ -10550,6 +10815,34 @@ def _(rid, params: dict) -> dict:
                 global _voice_event_sid
                 _voice_event_sid = params.get("session_id") or _voice_event_sid
 
+            # Seamless over-SSH path: when shellctl is installed and the user's
+            # local daemon is reachable, Ctrl+B records the USER's microphone
+            # (their Mac/laptop) via the bridge, not this headless host's mic.
+            # We replicate the normal contract: emit voice.status 'listening',
+            # record a fixed window on the user's machine, transcribe via the
+            # gateway STT, then emit voice.transcript — so the TUI UX (REC badge,
+            # transcript becomes the next turn) is identical. Falls through to
+            # the local VAD recorder when the bridge isn't available.
+            try:
+                _bridge_up = _shellbridge_available()
+            except Exception:  # noqa: BLE001
+                _bridge_up = False
+            if _bridge_up:
+                # Press-to-stop: begin an OPEN-ENDED capture on the user's Mac
+                # (Ctrl+O starts, Ctrl+O again stops). The bridge listen-start
+                # returns immediately; the actual WAV is pulled on `stop` via
+                # listen-stop. This removes the fixed-window truncation so a long
+                # utterance is captured in full.
+                def _bridge_capture_start():
+                    _voice_emit("voice.status", {"state": "listening"})
+                    out = _run_shellbridge_command("listen-start", "", {})
+                    # listen-start emits a small JSON ack; nothing to transcribe yet.
+                    if "error" in (out or "").lower() and "ok" not in (out or "").lower():
+                        _voice_emit("voice.status", {"state": "idle"})
+
+                threading.Thread(target=_bridge_capture_start, daemon=True).start()
+                return _ok(rid, {"status": "recording"})
+
             from hermes_cli.voice import start_continuous
 
             # Shape-safe lookups: malformed ``voice:`` YAML (bool/scalar/list)
@@ -10591,6 +10884,26 @@ def _(rid, params: dict) -> dict:
         with _voice_sid_lock:
             _voice_event_sid = params.get("session_id") or _voice_event_sid
 
+        # Press-to-stop over the bridge: end the open-ended Mac capture, pull the
+        # full WAV, transcribe, and emit the transcript. Mirrors the host VAD
+        # stop contract (emit voice.transcript -> becomes the next turn).
+        try:
+            _bridge_up = _shellbridge_available()
+        except Exception:  # noqa: BLE001
+            _bridge_up = False
+        if _bridge_up:
+            def _bridge_capture_stop():
+                _voice_emit("voice.status", {"state": "transcribing"})
+                out = _run_shellbridge_command("listen-stop", "", {})
+                text = out[1:].strip() if out.startswith("🎤") else ""
+                if text:
+                    _voice_emit("voice.transcript", {"text": text})
+                else:
+                    _voice_emit("voice.status", {"state": "idle"})
+
+            threading.Thread(target=_bridge_capture_stop, daemon=True).start()
+            return _ok(rid, {"status": "stopped"})
+
         from hermes_cli.voice import stop_continuous
 
         stop_continuous(force_transcribe=True)
@@ -10603,11 +10916,60 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5025, str(e))
 
 
+@method("voice.stop_playback")
+def _(rid, params: dict) -> dict:
+    """Interrupt any in-flight TTS playback (barge-in).
+
+    Bound to the record key (Ctrl+O) in the TUI: pressing it while the agent's
+    reply is being spoken cuts the audio so the user can respond without hearing
+    the whole thing. Over the bridge this preempts the user's Mac playback via
+    the miccap helper's newest-play-wins; locally it terminates the afplay/
+    sounddevice playback. Best-effort + idempotent — safe when nothing plays.
+    """
+    # Clear the on-screen synthesizing indicator immediately.
+    try:
+        _voice_emit("voice.status", {"state": "idle"})
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        _bridge_up = _shellbridge_available()
+    except Exception:  # noqa: BLE001
+        _bridge_up = False
+
+    if _bridge_up:
+        def _bridge_stop():
+            try:
+                _run_shellbridge_command("stop-play", "", {})
+            except Exception as e:  # noqa: BLE001
+                logger.warning("voice stop-play bridge dispatch failed: %s", e)
+        threading.Thread(target=_bridge_stop, daemon=True).start()
+        return _ok(rid, {"status": "stopped"})
+
+    try:
+        from tools.voice_mode import stop_playback
+
+        threading.Thread(target=stop_playback, daemon=True).start()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("voice stop_playback (host) failed: %s", e)
+    return _ok(rid, {"status": "stopped"})
+
+
 @method("voice.tts")
 def _(rid, params: dict) -> dict:
     text = params.get("text", "")
     if not text:
         return _err(rid, 4020, "text required")
+    # Seamless over-SSH: when shellctl is reachable, speak on the USER's
+    # speakers (their Mac) via the bridge instead of this headless host.
+    try:
+        if _shellbridge_available():
+            def _bridge_say():
+                _run_shellbridge_command("say", text, {})
+            threading.Thread(target=_bridge_say, daemon=True).start()
+            return _ok(rid, {"status": "speaking"})
+    except Exception:  # noqa: BLE001
+        pass
     try:
         from hermes_cli.voice import speak_text
 

@@ -5,6 +5,14 @@ export const shortCwd = (cwd: string, max = 28) => {
   return p.length <= max ? p : `…${p.slice(-(max - 1))}`
 }
 
+// Home-abbreviated but NON-truncated path, for places where the user (or the
+// model) must be able to read/copy the whole path — e.g. the clipboard-paste
+// attachment notice. Unlike shortCwd this never elides the middle/filename.
+export const tildePath = (path: string) => {
+  const h = process.env.HOME
+  return h && path.startsWith(h + '/') ? `~${path.slice(h.length)}` : path
+}
+
 export const fmtCwdBranch = (cwd: string, branch: null | string, max = 40) => {
   if (!branch) {
     return shortCwd(cwd, max)

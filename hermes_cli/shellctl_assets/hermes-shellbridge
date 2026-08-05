@@ -1,0 +1,334 @@
+#!/usr/bin/env python3
+"""hermes-shellbridge - the HOST half of the Hermes SSH media/file bridge.
+
+Runs on the Hermes host. Talks to the hermes-shellctl daemon on the user's
+machine through a reverse SSH forward (RemoteForward 127.0.0.1:8765 -> the
+user's daemon). Commands:
+
+  get <local-path>   pull a file from the user's machine into the gateway images
+                     dir; print the gateway path the TUI attaches.
+  paste              pull the user's clipboard image into the gateway images dir.
+  send <gateway-path> push a gateway file to the user's machine and open it.
+  say <text>         gateway TTS -> play on the user's speakers.
+  listen [secs]      record the user's mic -> gateway STT -> print transcript.
+  ping               check the client daemon + capabilities.
+
+stdlib only.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import sys
+import time
+import urllib.request
+import urllib.error
+from urllib.parse import quote
+
+CLIENT_URL = os.environ.get("HERMES_SHELLCTL_URL", "http://127.0.0.1:8765")
+_CLIENT_TOK_VAR = "HERMES_SHELLCTL_" + "TOKEN"
+CLIENT_TOKEN = os.environ.get(_CLIENT_TOK_VAR, "")
+DASH_URL = os.environ.get("HERMES_DASHBOARD_URL", "http://127.0.0.1:9192")
+_DASH_TOK_VAR = "HERMES_DASHBOARD_SESSION_" + "TOKEN"
+DASH_TOKEN = os.environ.get(_DASH_TOK_VAR, "")
+IMAGES_DIR = os.environ.get(
+    "HERMES_SHELLBRIDGE_IMAGES_DIR",
+    os.path.join(os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes")), "images"),
+)
+FILES_DIR = os.environ.get(
+    "HERMES_SHELLBRIDGE_FILES_DIR",
+    os.path.join(os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes")), "downloads"),
+)
+
+# Image extensions that should land in IMAGES_DIR + carry an `/image` hint so
+# the TUI attaches them as visual content. Everything else (pdf, zip, csv, docx,
+# arbitrary binaries) is a general file → FILES_DIR + a plain-path hint.
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic", ".heif", ".svg"}
+
+
+def _is_image_name(name):
+    return os.path.splitext(name or "")[1].lower() in _IMAGE_EXTS
+
+
+def _client_req(method, path, body=None, timeout=130):
+    req = urllib.request.Request(CLIENT_URL + path, data=body, method=method)
+    if CLIENT_TOKEN:
+        req.add_header("X-Shellctl-Token", CLIENT_TOKEN)
+    if body is not None:
+        req.add_header("Content-Type", "application/octet-stream")
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def _dash_req(method, path, body=None, ctype="application/json", timeout=130):
+    req = urllib.request.Request(DASH_URL + path, data=body, method=method)
+    if DASH_TOKEN:
+        req.add_header("X-Hermes-Session-Token", DASH_TOKEN)
+    if body is not None:
+        req.add_header("Content-Type", ctype)
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def _emit(obj):
+    print(json.dumps(obj), flush=True)
+
+
+def _save_into_images(data, name):
+    os.makedirs(IMAGES_DIR, exist_ok=True)
+    safe = os.path.basename(name) or ("shellctl-%d" % int(time.time()))
+    dest = os.path.join(IMAGES_DIR, safe)
+    if os.path.exists(dest):
+        stem, ext = os.path.splitext(safe)
+        dest = os.path.join(IMAGES_DIR, "%s-%d%s" % (stem, int(time.time()), ext))
+    with open(dest, "wb") as f:
+        f.write(data)
+    return dest
+
+
+def _save_into_files(data, name):
+    os.makedirs(FILES_DIR, exist_ok=True)
+    safe = os.path.basename(name) or ("shellctl-%d" % int(time.time()))
+    dest = os.path.join(FILES_DIR, safe)
+    if os.path.exists(dest):
+        stem, ext = os.path.splitext(safe)
+        dest = os.path.join(FILES_DIR, "%s-%d%s" % (stem, int(time.time()), ext))
+    with open(dest, "wb") as f:
+        f.write(data)
+    return dest
+
+
+def cmd_ping(args):
+    try:
+        with _client_req("GET", "/ping", timeout=8) as r:
+            _emit({"ok": True, **json.loads(r.read())})
+        return 0
+    except Exception as e:  # noqa: BLE001
+        _emit({"ok": False, "error": "client unreachable at %s: %s" % (CLIENT_URL, e)})
+        return 1
+
+
+def cmd_get(args):
+    try:
+        with _client_req("GET", "/pull?path=" + quote(args.path), timeout=130) as r:
+            data = r.read()
+    except urllib.error.HTTPError as e:
+        _emit({"ok": False, "error": "pull failed: HTTP %d %r" % (e.code, e.read()[:200])})
+        return 1
+    except Exception as e:  # noqa: BLE001
+        _emit({"ok": False, "error": "pull failed: %s" % e})
+        return 1
+    dest = (_save_into_images(data, os.path.basename(args.path))
+            if _is_image_name(args.path)
+            else _save_into_files(data, os.path.basename(args.path)))
+    hint = ("/image " + dest) if _is_image_name(args.path) else dest
+    _emit({"ok": True, "path": dest, "bytes": len(data), "hint": hint})
+    return 0
+
+
+def cmd_paste(args):
+    try:
+        with _client_req("GET", "/clipboard", timeout=60) as r:
+            data = r.read()
+            hdr_name = r.headers.get("X-Clipboard-Filename") or ""
+            hdr_kind = (r.headers.get("X-Clipboard-Kind") or "").lower()
+    except urllib.error.HTTPError as e:
+        _emit({"ok": False, "error": "no clipboard content: HTTP %d %s" % (e.code, e.read()[:200])})
+        return 1
+    except Exception as e:  # noqa: BLE001
+        _emit({"ok": False, "error": "clipboard pull failed: %s" % e})
+        return 1
+    # Save the bytes VERBATIM under the real filename the daemon reported, so an
+    # image keeps its format and a pdf/exe/zip lands intact. Legacy daemons send
+    # no headers -> fall back to the historical clip-<ts>.png image behavior.
+    name = os.path.basename(hdr_name) if hdr_name else ("clip-%d.png" % int(time.time()))
+    is_image = hdr_kind == "image" or (not hdr_kind and _is_image_name(name))
+    dest = _save_into_images(data, name) if is_image else _save_into_files(data, name)
+    hint = ("/image " + dest) if is_image else ("/get " + dest)
+    _emit({"ok": True, "path": dest, "bytes": len(data), "kind": "image" if is_image else "file",
+           "hint": hint})
+    return 0
+
+
+def cmd_send(args):
+    path = os.path.expanduser(args.path)
+    if not os.path.isfile(path):
+        _emit({"ok": False, "error": "gateway file not found: " + path})
+        return 1
+    with open(path, "rb") as f:
+        data = f.read()
+    openq = "0" if args.no_open else "1"
+    try:
+        with _client_req("POST", "/push?name=%s&open=%s" % (quote(os.path.basename(path)), openq),
+                         body=data, timeout=130) as r:
+            _emit({"ok": True, **json.loads(r.read())})
+        return 0
+    except Exception as e:  # noqa: BLE001
+        _emit({"ok": False, "error": "push failed: %s" % e})
+        return 1
+
+
+def _strip_markdown_for_speech(text):
+    """Strip markdown so TTS doesn't read "hashtag hashtag Title" or
+    "asterisk asterisk bold". Mirrors hermes_cli/voice.py:speak_text."""
+    import re
+    t = text
+    t = re.sub(r'```[\s\S]*?```', ' ', t)              # fenced code blocks
+    t = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', t)     # [text](url) -> text
+    t = re.sub(r'https?://\S+', '', t)                  # bare URLs
+    t = re.sub(r'\*\*(.+?)\*\*', r'\1', t)             # bold
+    t = re.sub(r'\*(.+?)\*', r'\1', t)                 # italic
+    t = re.sub(r'`(.+?)`', r'\1', t)                   # inline code
+    t = re.sub(r'^#+\s*', '', t, flags=re.MULTILINE)   # headers ## Title
+    t = re.sub(r'^\s*[-*]\s+', '', t, flags=re.MULTILINE)  # list bullets
+    t = re.sub(r'^\s*\d+\.\s+', '', t, flags=re.MULTILINE)  # numbered lists
+    t = re.sub(r'_{1,2}(.+?)_{1,2}', r'\1', t)         # _italic_ / __bold__
+    t = re.sub(r'~~(.+?)~~', r'\1', t)                 # strikethrough
+    t = re.sub(r'^>\s*', '', t, flags=re.MULTILINE)    # blockquotes
+    t = re.sub(r'\|', ' ', t)                          # table pipes
+    t = re.sub(r'-{3,}', '', t)                        # horizontal rules / table seps
+    t = re.sub(r'#', '', t)                            # stray hashes
+    t = re.sub(r'\n{3,}', '\n\n', t)                  # excess newlines
+    return t.strip()
+
+
+def cmd_say(args):
+    text = _strip_markdown_for_speech(args.text)
+    if not text:
+        _emit({"ok": True, "played": False, "bytes": 0, "note": "nothing to speak"})
+        return 0
+    try:
+        with _dash_req("POST", "/api/audio/speak",
+                       body=json.dumps({"text": text}).encode(), timeout=60) as r:
+            res = json.loads(r.read())
+    except Exception as e:  # noqa: BLE001
+        _emit({"ok": False, "error": "TTS failed: %s" % e})
+        return 1
+    data_url = res.get("data_url") or res.get("audio") or ""
+    if not data_url.startswith("data:"):
+        _emit({"ok": False, "error": "TTS returned no audio data_url"})
+        return 1
+    header, b64 = data_url.split(",", 1)
+    audio = base64.b64decode(b64)
+    fmt = "mp3"
+    if "audio/" in header:
+        fmt = header.split("audio/")[1].split(";")[0] or "mp3"
+    try:
+        with _client_req("POST", "/play?fmt=" + fmt, body=audio, timeout=600) as r:
+            pres = json.loads(r.read())
+        _emit({"ok": pres.get("ok", False), "played": pres.get("ok"), "bytes": len(audio)})
+        return 0 if pres.get("ok") else 1
+    except Exception as e:  # noqa: BLE001
+        _emit({"ok": False, "error": "play failed: %s" % e})
+        return 1
+
+
+def cmd_listen(args):
+    secs = int(args.secs)
+    try:
+        with _client_req("POST", "/record?secs=%d" % secs, timeout=secs + 30) as r:
+            wav = r.read()
+    except Exception as e:  # noqa: BLE001
+        _emit({"ok": False, "error": "record failed: %s" % e})
+        return 1
+    if not wav:
+        _emit({"ok": False, "error": "no audio recorded"})
+        return 1
+    return _transcribe_and_emit(wav)
+
+
+def cmd_listen_start(args):
+    """Begin an open-ended (press-to-stop) capture on the user's machine."""
+    try:
+        with _client_req("POST", "/record-start", timeout=15) as r:
+            res = json.loads(r.read())
+        _emit({"ok": bool(res.get("ok")), "status": res.get("status", "recording")})
+        return 0
+    except Exception as e:  # noqa: BLE001
+        _emit({"ok": False, "error": "record-start failed: %s" % e})
+        return 1
+
+
+def cmd_listen_stop(args):
+    """Stop the open capture, pull the WAV, transcribe."""
+    try:
+        with _client_req("POST", "/record-stop", timeout=40) as r:
+            wav = r.read()
+    except Exception as e:  # noqa: BLE001
+        _emit({"ok": False, "error": "record-stop failed: %s" % e})
+        return 1
+    if not wav:
+        _emit({"ok": False, "error": "no audio recorded"})
+        return 1
+    return _transcribe_and_emit(wav)
+
+
+def _silent_wav(ms: int = 60, rate: int = 8000) -> bytes:
+    """Build a tiny silent mono 16-bit PCM WAV in memory.
+
+    Used by ``stop-play`` to preempt in-flight TTS: pushing this through the
+    daemon's ``/play`` triggers the miccap helper's barge-in (a new play kills
+    the currently-playing afplay), so the agent's spoken reply stops at once and
+    only ~60ms of silence plays in its place. No Mac-side change required.
+    """
+    import struct
+
+    nsamples = max(1, int(rate * ms / 1000))
+    data = b"\x00\x00" * nsamples
+    byte_rate = rate * 1 * 2
+    return (
+        b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVE"
+        + b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, byte_rate, 2, 16)
+        + b"data" + struct.pack("<I", len(data)) + data
+    )
+
+
+def cmd_stop_play(args):
+    """Interrupt any audio currently playing on the user's machine.
+
+    Relies on the miccap helper's existing barge-in (newest-play-wins): we POST
+    a ~60ms silent WAV to ``/play``; the helper terminates the in-flight afplay
+    before starting this one. Cheap, idempotent, safe when nothing is playing.
+    """
+    try:
+        with _client_req("POST", "/play?fmt=wav", body=_silent_wav(), timeout=15) as r:
+            pres = json.loads(r.read())
+        _emit({"ok": bool(pres.get("ok")), "stopped": True})
+        return 0 if pres.get("ok") else 1
+    except Exception as e:  # noqa: BLE001
+        _emit({"ok": False, "error": "stop-play failed: %s" % e})
+        return 1
+
+
+def _transcribe_and_emit(wav):
+    data_url = "data:audio/wav;base64," + base64.b64encode(wav).decode()
+    try:
+        with _dash_req("POST", "/api/audio/transcribe",
+                       body=json.dumps({"data_url": data_url, "mime_type": "audio/wav"}).encode(),
+                       timeout=130) as r:
+            res = json.loads(r.read())
+    except Exception as e:  # noqa: BLE001
+        _emit({"ok": False, "error": "STT failed: %s" % e})
+        return 1
+    _emit({"ok": True, "transcript": res.get("transcript", ""), "bytes": len(wav)})
+    return 0
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="hermes-shellbridge", description=__doc__)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("ping").set_defaults(func=cmd_ping)
+    g = sub.add_parser("get"); g.add_argument("path"); g.set_defaults(func=cmd_get)
+    sub.add_parser("paste").set_defaults(func=cmd_paste)
+    s = sub.add_parser("send"); s.add_argument("path"); s.add_argument("--no-open", action="store_true"); s.set_defaults(func=cmd_send)
+    sa = sub.add_parser("say"); sa.add_argument("text"); sa.set_defaults(func=cmd_say)
+    li = sub.add_parser("listen"); li.add_argument("secs", nargs="?", default="8"); li.set_defaults(func=cmd_listen)
+    sub.add_parser("listen-start").set_defaults(func=cmd_listen_start)
+    sub.add_parser("listen-stop").set_defaults(func=cmd_listen_stop)
+    sub.add_parser("stop-play").set_defaults(func=cmd_stop_play)
+    args = p.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

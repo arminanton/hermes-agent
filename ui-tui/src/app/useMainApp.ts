@@ -699,7 +699,19 @@ export function useMainApp(gw: GatewayClient) {
         }
 
         if (r.attached) {
+          // imageTokenMeta now renders "dims · ~/path · ~N tok" (path included),
+          // so the user can locate/copy the exact file AND the model has an
+          // explicit handle to it (the same on-host path is also threaded into
+          // the prompt content the model receives, so it never has to hunt for a
+          // freshly pasted image).
           const meta = imageTokenMeta(r)
+
+          if (r.kind === 'file') {
+            // A pasted non-image file (pdf, exe, zip, ...) transferred verbatim.
+            const pathStr = r.display_path || (r.path ? tildePath(r.path) : '')
+            const label = r.name ? `File: ${r.name}` : 'File'
+            return sys(`📎 ${label} attached from clipboard${pathStr ? ` · ${pathStr}` : ''}`)
+          }
 
           return sys(`📎 Image #${r.count} attached from clipboard${meta ? ` · ${meta}` : ''}`)
         }
