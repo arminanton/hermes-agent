@@ -74,3 +74,13 @@ export const INLINE_MODE = inlineOverride ?? TERMUX_TUI_MODE
 // Live FPS counter overlay, fed by ink's onFrame (real render rate, not a
 // synthetic timer).
 export const SHOW_FPS = truthy(process.env.HERMES_TUI_FPS)
+
+// Auto state-resync during autopilot runs. When a long unattended autopilot
+// run accumulates transcript projection drift (looped/stale rows), the healer
+// periodically re-attaches to gateway truth on continuation boundaries via the
+// proven-safe /resync path. DEFAULT ON (autopilot is exactly where the drift
+// hurts and the user isn't watching to type /resync). Disable explicitly with
+// HERMES_TUI_AUTO_RESYNC=0. The paint-heal (forceRedraw) and manual /resync are
+// always on regardless; this flag only gates the AUTOMATIC state re-sync.
+export const AUTO_RESYNC_AUTOPILOT = parseToggle(process.env.HERMES_TUI_AUTO_RESYNC) ?? true
+

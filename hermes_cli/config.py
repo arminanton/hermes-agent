@@ -1988,6 +1988,52 @@ DEFAULT_CONFIG = {
         "no_progress_k": 3,        # stop after this many continuations with no progress
         "council_model": "",       # "" = use the main model via the Council hermes lane
         "verify_on_complete": "low_confidence",  # low_confidence | always
+        # Decision log (ADR): when on, every autopilot judgment (completion,
+        # continue, clarify) is appended to a human-readable markdown file so you
+        # can review, after an unattended run, what was sent for verification,
+        # what the reviewer returned, and which path was taken. Default ON on this
+        # deployment (operator opt, 2026-06-24) so every run is auditable; set to
+        # false to opt out. (Upstream/PR default is OFF per the public PR promise.)
+        "adr": True,
+        "adr_path": "",            # "" = <workspace>/.hermes/autopilot/adr/AUTOPILOT-<session>-<date>.md
+        # ADR project copy: also drop a copy of the decision log next to the code
+        # being worked on (the goal's declared path, else the git repo root, else
+        # cwd). The canonical .hermes copy is ALWAYS kept regardless. Default on.
+        "adr_project_copy": True,
+        # Subdir under the project root for the project copy. "" = auto: "docs/adr"
+        # for a git repo (conventional), else ".autopilot/adr".
+        "adr_project_subdir": "",
+        # Anti-deception reinforcement: re-assert the behavioral contract every N
+        # continuations so it stays salient over a long run (a one-time system
+        # prompt fades by recency, which is when models derail). 0 disables the
+        # cadence; deception detections still trigger reinforcement regardless.
+        "reinforce_every_n": 5,
+        # Refinement-churn terminus: conclude the run when K consecutive judged
+        # rounds are all presentation-only (a real reviewer ran, none returned
+        # 'deny', no acceptance criterion newly closed, confidence not trending to
+        # accept). This self-concludes a diminishing-returns "polish" loop on an
+        # already-complete deliverable WITHOUT any max-continuations cap — it stops
+        # on the shape of the loop, never a turn count, so a genuinely-progressing
+        # run is never cut short. 0 disables. Default 4.
+        "refinement_churn_k": 4,
+        # Naive-user contract floor: when a bare one-sentence goal parses to NO
+        # criteria and no project checks are detectable, synthesize a single minimal
+        # agent-achievable criterion so the achievable-bar + refinement-churn
+        # terminus still have a deliverable to bind to. Gives an average user's
+        # one-line goal the same self-termination floor a hand-authored contract
+        # gets. Default ON; set false to restore the empty-contract behavior.
+        "synthesize_contract_floor": True,
+        # Goal-document discovery: auto-discover a default GOAL.md (or AUTOPILOT.md)
+        # contract document in the project workdir and chase it — the conventional,
+        # project-agnostic default name for an autopilot goal contract (the REBORN.md
+        # pattern, standardized). Drop a GOAL.md in the repo and run /autopilot with
+        # no goal string. Default ON; set false to disable discovery.
+        "goal_document": True,
+        # Run ledger: auto-maintain a human-readable GOAL-LEDGER.md recording what
+        # the run accomplished + how it concluded (a milestone/terminal-outcome
+        # trail, companion to the turn-by-turn ADR). Written to the workspace + a
+        # copy next to the project. Default ON; set false to disable.
+        "ledger": True,
     },
 
     # Skills — external skill directories for sharing skills across tools/agents.

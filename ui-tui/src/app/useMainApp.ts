@@ -2,12 +2,12 @@ import { type ScrollBoxHandle, useApp, useHasSelection, useSelection, useStdout,
 import { useStore } from '@nanostores/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { STARTUP_RESUME_ID } from '../config/env.js'
+import { AUTO_RESYNC_AUTOPILOT, STARTUP_RESUME_ID } from '../config/env.js'
 import { MAX_HISTORY, WHEEL_SCROLL_STEP } from '../config/limits.js'
 import { hasLeadGap, prevRenderedMsg } from '../domain/blockLayout.js'
 import { SECTION_NAMES, sectionMode } from '../domain/details.js'
 import { attachedImageNotice, imageTokenMeta } from '../domain/messages.js'
-import { composeTabTitle, fmtCwdBranch, shortCwd } from '../domain/paths.js'
+import { composeTabTitle, fmtCwdBranch, shortCwd, tildePath } from '../domain/paths.js'
 import { type GatewayClient } from '../gatewayClient.js'
 import type {
   ClarifyRespondResponse,
@@ -780,6 +780,118 @@ export function useMainApp(gw: GatewayClient) {
 
   onEventRef.current = onEvent
 
+  // ── Auto-healing full repaint (render-corruption self-recovery) ──────────
+  // In alt-screen mode every frame is an INCREMENTAL diff; a full repaint only
+  // ever fires on a terminal resize (renderer.ts: "every frame is incremental;
+  // no fullResetSequence"). So if Ink's screen model desyncs even once — a cell
+  // the diff loop misses, a scroll the relative-cursor math mistracks (the known
+  // log-update cursor-desync class, worse under tmux), or any foreign write to
+  // the shared TTY — the corruption ACCUMULATES with nothing to clear it until
+  // the user manually resizes the terminal. That manual resize is exactly what
+  // William has been doing every ~30s to un-garble the screen.
+  //
+  // This timer does that resize-grade recovery AUTOMATICALLY, on EVERY tick,
+  // idle OR busy (garble accumulates on a screen left mid-turn or scrolled while
+  // idle, not only during active render). William's steer evolved in two parts:
+  //   • (2026-07-09 part 1) run the heal every 20s regardless of busy state.
+  //   • (2026-07-09 part 2) use the SOFT heal — forceRedraw() (resize-grade,
+  //     repaints IN PLACE) — as the automatic default, NOT the strong ?1049h
+  //     hardResetScreen(). The strong swap holds garble off longer (~5min vs the
+  //     soft redraw's ~20s decay) but it DISCARDS+reallocates the terminal's
+  //     alt-screen buffer, which kicks tmux out of copy-mode and BROKE his
+  //     scrollback. Running the soft redraw every 20s keeps pace with the decay
+  //     without ever touching the alt buffer, so scrolling stays intact.
+  // Cheap: an erase+home+repaint of changed cells; a no-op when not mounted/TTY
+  // (forceRedraw guards internally). This auto heal is KEYLESS — it repaints on
+  // a timer and occupies NO keyboard shortcut (Ctrl+O is voice; the manual hard
+  // reset is Ctrl+T / /hardreset; everyday redraw is Ctrl+L / /redraw).
+  //
+  // Nothing is hardcoded — two env knobs tune it:
+  //   HERMES_TUI_HEAL_INTERVAL_MS  cadence in ms (default 20000, floor 2000)
+  //   HERMES_TUI_HEAL_MODE         'redraw' (default) | 'hardreset' | 'off'
+  // MODE=hardreset promotes the automatic heal to the strong ?1049h buffer swap
+  // (for hosts where only a full swap clears the garble, at the cost of tmux
+  // scrollback); MODE=off disables the automatic paint heal entirely (Ctrl+L,
+  // Ctrl+T, and the /redraw + /hardreset slash commands still work by hand).
+  // The legacy HERMES_TUI_HARD_RESET_AFTER_N_HEALS escalation counter is retired.
+  //
+  // STATE drift (separate from PAINT drift): a long AUTOPILOT run re-enters
+  // _run_prompt_submit each continuation (server.py:6843), emitting repeated
+  // message.start + status.update(goal) sys() rows. The append-only TUI
+  // projection accumulates these and, on any event mis-order, the visible
+  // transcript DRIFTS from the gateway's durable history — the "looped old
+  // message / stuck stall, detached from the live run" symptom. forceRedraw
+  // can't fix that (it re-paints the same wrong rows). So during autopilot ONLY,
+  // and ONLY on the busy→idle settle edge (a continuation boundary — never
+  // mid-stream), we also re-attach to the gateway via resumeById(storedSid) at a
+  // slow cadence. This is the proven-safe /resync path (live-tested: subagents
+  // survive, in-flight turn preserved); it self-heals unattended autopilot runs
+  // the user isn't watching. Off entirely for normal interactive sessions.
+  useEffect(() => {
+    const intervalEnv = process.env.HERMES_TUI_HEAL_INTERVAL_MS
+    const HEAL_INTERVAL_MS = Math.max(2_000, parseInt(intervalEnv ?? '20000', 10) || 20_000)
+    const RESYNC_EVERY_N_TICKS = 3 // ≈60s between autopilot state re-syncs
+    // Automatic paint-heal mode. 'redraw' (DEFAULT) = the no-flash resize-grade
+    // forceRedraw that repaints IN PLACE — it does NOT touch the terminal's
+    // alt-screen buffer, so it leaves tmux scrollback / copy-mode intact.
+    // William's steer (2026-07-09, part 2): the previous 'hardreset' default
+    // (?1049h alt-screen buffer swap) was BREAKING his tmux scrolling because
+    // re-entering the alt screen discards+reallocates the buffer, kicking tmux
+    // out of copy-mode. forceRedraw decays back in ~20s on its own but now RUNS
+    // every 20s, so it keeps pace without disturbing scroll. 'hardreset' = the
+    // strong buffer swap (still available on demand via Ctrl+T / /hardreset, and
+    // selectable here for hosts where only a full swap clears the garble);
+    // 'off' = no automatic paint heal at all.
+    const healMode = (process.env.HERMES_TUI_HEAL_MODE ?? 'redraw').trim().toLowerCase()
+    const paintHeal =
+      healMode === 'off'
+        ? null
+        : healMode === 'hardreset'
+          ? hardResetScreen
+          : forceRedraw
+    let lastBusy = false
+    let ticksSinceResync = 0
+
+    const healer = setInterval(() => {
+      const ui = getUiState()
+      const busy = ui.busy
+
+      // Paint heal on EVERY tick, idle OR busy (garble accumulates on a screen
+      // left mid-turn or scrolled while idle, not only during active render).
+      // Soft forceRedraw is the default (tmux-scroll-safe); see the block
+      // comment above for the mode/interval env knobs.
+      if (paintHeal) {
+        paintHeal(stdout ?? process.stdout)
+      }
+
+      // State heal (autopilot only): on the busy→idle settle edge — a
+      // continuation boundary, safe (no live stream to clobber) — re-attach to
+      // gateway truth at a slow cadence so projection drift can't accumulate
+      // across an unattended multi-hour run. storedSid (durable key) is what
+      // session.resume needs; sid is the ephemeral renderer id.
+      const settledEdge = !busy && lastBusy
+      const inAutopilot = Boolean(ui.info?.autopilot)
+      const key = ui.storedSid
+
+      if (AUTO_RESYNC_AUTOPILOT && settledEdge && inAutopilot && key) {
+        ticksSinceResync += 1
+
+        if (ticksSinceResync >= RESYNC_EVERY_N_TICKS) {
+          ticksSinceResync = 0
+          // Same proven-safe path as /resync: fast-path reuse of the live
+          // session (no teardown, subagents/inflight preserved).
+          session.resumeById(key)
+        }
+      }
+
+      lastBusy = busy
+    }, HEAL_INTERVAL_MS)
+
+    healer.unref?.()
+
+    return () => clearInterval(healer)
+  }, [stdout, session])
+
   useEffect(() => {
     // Busy-state watchdog. The status indicator (FaceTicker) repaints the Ink
     // tree at SPINNER_TICK_MS (100ms = 10Hz) while `busy` is true. That's
@@ -806,14 +918,91 @@ export function useMainApp(gw: GatewayClient) {
         return
       }
 
+      // A delegated subagent can legitimately run SILENT for minutes — a long
+      // tool call (build, sleep, deep search) or pure-token generation. The
+      // parent session only receives subagent.start then nothing until
+      // subagent.tool/complete (subagent.text is intentionally not relayed to
+      // the parent), so the activity clock can exceed WEDGE_TIMEOUT_MS while the
+      // turn is perfectly healthy. Firing the stall here wrongly drops `busy`,
+      // hides the live transcript, and surfaces a false "stream stalled". While
+      // a subagent is still running/queued the turn is NOT wedged — defer the
+      // verdict and keep the activity window fresh so we re-evaluate once they
+      // finish (completed subagents don't suppress, so a genuinely wedged turn
+      // after delegation still trips the watchdog).
+      if (getTurnState().subagents.some(isRunning)) {
+        lastActivityRef.current = Date.now()
+        return
+      }
+
+      // SAME legitimate-silence case, but in the MAIN turn: a long-running tool
+      // call in flight (a multi-minute build/test wait, `process wait`, a deep
+      // search, a sleep) emits nothing between tool.start and tool.result, so
+      // the activity clock can blow past WEDGE_TIMEOUT_MS while the turn is
+      // perfectly healthy. The subagent guard above only covers DELEGATED long
+      // tool calls; an in-flight tool on the parent turn hit neither exemption
+      // and tripped a false "stream stalled" (transcript clears, last message
+      // loops). `tools` is the published in-flight set: populated on tool.start,
+      // removed on tool.result, cleared on idle() — so it self-clears and can't
+      // mask a genuinely wedged turn any longer than the running subagent guard.
+      // While a tool is still in flight the turn is NOT wedged; keep the window
+      // fresh and re-evaluate once it resolves.
+      if (getTurnState().tools.length > 0) {
+        lastActivityRef.current = Date.now()
+        return
+      }
+
+      // A blocking prompt (clarify / sudo / secret / confirm / approval) is the
+      // OTHER legitimately-busy-but-silent state: the turn is parked waiting on
+      // a HUMAN, so no backend events arrive while the user reads the question,
+      // picks "Other", and types a custom answer. Without this guard the 3m
+      // watchdog tears down the live overlay (turnController.reset drops `busy`
+      // and resetFlowOverlays clears `clarify`), so a slow answer makes the
+      // prompt vanish, surfaces a false "stream stalled", and the user's typed
+      // response lands on a clarify that no longer exists — it's lost. While a
+      // prompt is open the turn is NOT wedged; keep the activity window fresh
+      // and re-evaluate once the user responds and the overlay clears.
+      const ov = getOverlayState()
+      if (ov.clarify || ov.sudo || ov.secret || ov.confirm || ov.approval) {
+        lastActivityRef.current = Date.now()
+        return
+      }
+
       // No backend activity for WEDGE_TIMEOUT_MS while busy: the turn is wedged.
       // Reset so the 10Hz indicator stops and the session is usable again.
       turnController.reset()
-      patchUiState({ busy: false, status: 'stream stalled · /logs to inspect' })
-      turnController.pushActivity(
-        'no backend activity for 3m — turn marked stalled (any in-flight reply may be lost)',
-        'warn'
-      )
+
+      // Self-heal instead of stranding the user on a dead sid. The durable
+      // session usually survives the drop (it lives in SQLite and, until the
+      // gateway's orphan reaper fires, still in gateway memory), so re-attach to
+      // it via the same proven-safe path /resync and the autopilot healer use.
+      // resumeById re-registers a live session, adopts a fresh sid, and re-renders
+      // the transcript from gateway truth — turning the old "stream stalled" dead
+      // end into a transparent reconnect. If there's no durable key we fall back
+      // to the old visible-stall notice so a genuinely unrecoverable wedge still
+      // surfaces. Keep `busy` reset either way so the 10Hz repaint stops (the
+      // CPU-peg bug this watchdog originally fixed stays fixed).
+      const storedSid = getUiState().storedSid
+
+      if (storedSid) {
+        patchUiState({ busy: false, status: 'stream stalled · reconnecting…' })
+        turnController.pushActivity(
+          'no backend activity for 3m — reconnecting to your session (any in-flight reply may be lost)',
+          'warn'
+        )
+
+        try {
+          session.resumeById(storedSid)
+        } catch {
+          patchUiState({ busy: false, status: 'stream stalled · /resync to reconnect' })
+        }
+      } else {
+        patchUiState({ busy: false, status: 'stream stalled · /logs to inspect' })
+        turnController.pushActivity(
+          'no backend activity for 3m — turn marked stalled (any in-flight reply may be lost)',
+          'warn'
+        )
+      }
+
       lastActivityRef.current = Date.now()
     }, 15_000)
     wedgeWatchdog.unref?.()

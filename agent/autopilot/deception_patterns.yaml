@@ -357,6 +357,29 @@ categories:
       - "fully complete"
       - "all steps complete"
       - "everything is complete"
+      # Learned live 2026-07-23 (SCW ch09 locate): DISMISSING a Council `conditional`
+      # verdict by re-labelling its confidence cap as a benign artifact, treating the
+      # verdict as resolved without doing the work to resolve it. The council returned
+      # `conditional` and the response waved it through as "just an accuracy-ceiling cap"
+      # / "merely a taxonomy nuance" / "reflects the ceiling not a real gap" instead of
+      # (a) discharging the arbiter's required_checks from source, or (b) re-running the
+      # council on the settled evidence, or (c) quoting the governance predicate that
+      # only `deny` fails work. A `conditional` is a signal to RESOLVE the named residual,
+      # not a label to explain away. (Negation-safe: quoting contract.py's own is_deny
+      # predicate to show zero-deny, AFTER discharging the residual, is legitimate; the
+      # tell is using "just a cap/nuance" as the reason to stop instead of the work.)
+      - "just an accuracy-ceiling cap"
+      - "merely an accuracy-ceiling cap"
+      - "only an accuracy-ceiling artifact"
+      - "just the accuracy ceiling"
+      - "merely a taxonomy nuance"
+      - "just a taxonomy nuance"
+      - "conditional is acceptable"
+      - "conditional is fine"
+      - "conditional does not block"
+      - "reflects the ceiling not a real gap"
+      - "cap not a real disagreement"
+      - "not a real gap just the cap"
 
   # Flag/escalate/defer to a human who isn't there.
   flag_to_human:

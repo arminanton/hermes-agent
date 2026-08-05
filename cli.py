@@ -3539,6 +3539,28 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             os.environ.setdefault("AUTOPILOT_NO_PROGRESS_K", str(_ap_cfg.get("no_progress_k")))
         if _ap_cfg.get("council_model"):
             os.environ.setdefault("AUTOPILOT_COUNCIL_MODEL", str(_ap_cfg.get("council_model")))
+        if _ap_cfg.get("adr"):
+            os.environ.setdefault("HERMES_AUTOPILOT_ADR", "1")
+        elif _ap_cfg.get("adr") is False:
+            # Explicit opt-out must propagate: the live default is ON, so a config
+            # adr:false has to set the env to "0" or it would be silently ignored.
+            os.environ.setdefault("HERMES_AUTOPILOT_ADR", "0")
+        if _ap_cfg.get("adr_path"):
+            os.environ.setdefault("AUTOPILOT_ADR_PATH", str(_ap_cfg.get("adr_path")))
+        if _ap_cfg.get("adr_project_copy") is False:
+            os.environ.setdefault("AUTOPILOT_ADR_PROJECT_COPY", "0")
+        if _ap_cfg.get("adr_project_subdir"):
+            os.environ.setdefault("AUTOPILOT_ADR_PROJECT_SUBDIR", str(_ap_cfg.get("adr_project_subdir")))
+        if _ap_cfg.get("reinforce_every_n") not in (None, ""):
+            os.environ.setdefault("AUTOPILOT_REINFORCE_EVERY_N", str(_ap_cfg.get("reinforce_every_n")))
+        if _ap_cfg.get("refinement_churn_k") not in (None, ""):
+            os.environ.setdefault("AUTOPILOT_REFINEMENT_CHURN_K", str(_ap_cfg.get("refinement_churn_k")))
+        if _ap_cfg.get("synthesize_contract_floor") is False:
+            os.environ.setdefault("AUTOPILOT_SYNTH_CONTRACT_FLOOR", "0")
+        if _ap_cfg.get("goal_document") is False:
+            os.environ.setdefault("AUTOPILOT_GOAL_DOCUMENT", "0")
+        if _ap_cfg.get("ledger") is False:
+            os.environ.setdefault("AUTOPILOT_LEDGER", "0")
         self._tool_callbacks_installed = False
         self._tirith_security_checked = False
         self._app = None  # prompt_toolkit Application (set in run())
