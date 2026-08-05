@@ -141,37 +141,38 @@ const _NAMED_KEY_ALIASES: Record<string, VoiceRecordKeyNamed> = {
 
 /** ``useInputHandlers()`` intercepts these unconditionally before the
  * voice check runs, so a binding like ``ctrl+c`` (interrupt),
- * ``ctrl+d`` (quit), or ``ctrl+l`` (clear screen) would be advertised
- * in /voice status but never fire push-to-talk. Reject at parse time
- * so the user gets the documented Ctrl+B instead of a dead shortcut
- * (Copilot round-4 review on #19835).
+ * ``ctrl+d`` (quit), ``ctrl+l`` (clear screen), or ``ctrl+t`` (hard-reset
+ * screen) would be advertised in /voice status but never fire push-to-talk.
+ * Reject at parse time so the user gets the documented Ctrl+B instead of a
+ * dead shortcut (Copilot round-4 review on #19835).
  *
  * ``ctrl+x`` is intentionally NOT here — it's only claimed during
  * queue-edit (``queueEditIdx !== null``), so the voice binding works
  * for most of the session and matches CLI parity for ``ctrl+<letter>``
  * bindings (Copilot round-8 review on #19835). */
-const _RESERVED_CTRL_CHARS = new Set(['c', 'd', 'l'])
+const _RESERVED_CTRL_CHARS = new Set(['c', 'd', 'l', 't'])
 
 /** On macOS the action-modifier intercepts these editor chords via
  * ``isCopyShortcut`` / ``isAction`` in ``useInputHandlers()``:
  *  - super+c → copy
  *  - super+d → exit
  *  - super+l → clear screen
+ *  - super+t → hard-reset screen
  *  - super+v → paste (also claimed at the TextInput layer)
  * On Linux/Windows those globals key off Ctrl instead of Super, so
  * super+<letter> bindings don't collide. Gate the rejection to darwin
  * at parse time so kitty/CSI-u ``super+<key>`` configs still work for
  * non-mac users (Copilot round-8 review on #19835). */
-const _RESERVED_SUPER_CHARS = new Set(['c', 'd', 'l', 'v'])
+const _RESERVED_SUPER_CHARS = new Set(['c', 'd', 'l', 't', 'v'])
 
 /** On macOS ``isActionMod`` accepts ``key.meta`` as the action
  * modifier — but hermes-ink reports Alt as ``key.meta`` on many
  * terminals. So on darwin a configured ``alt+c`` / ``alt+d`` / ``alt+l``
- * gets swallowed by ``isCopyShortcut`` / ``isAction`` before the voice
- * check runs. Block at parse time so /voice status doesn't advertise
- * a shortcut that actually copies / quits / clears (Copilot round-12
- * review on #19835). */
-const _RESERVED_ALT_CHARS_MAC = new Set(['c', 'd', 'l'])
+ * / ``alt+t`` gets swallowed by ``isCopyShortcut`` / ``isAction`` before
+ * the voice check runs. Block at parse time so /voice status doesn't
+ * advertise a shortcut that actually copies / quits / clears / hard-resets
+ * (Copilot round-12 review on #19835). */
+const _RESERVED_ALT_CHARS_MAC = new Set(['c', 'd', 'l', 't'])
 
 interface RuntimeKeyEvent {
   alt?: boolean

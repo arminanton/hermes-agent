@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useI18n } from '@/i18n'
 import { playSpeechText, stopVoicePlayback } from '@/lib/voice-playback'
 import { notify, notifyError } from '@/store/notifications'
+import { $syncTextAudio, setVoiceHold } from '@/store/voice-prefs'
 
 import { useMicRecorder } from './use-mic-recorder'
 
@@ -80,56 +81,6 @@ export function useVoiceConversation({
     speechBufferRef.current = ''
   }
 
-  const appendSpeechText = (text: string) => {
-    if (!text) {
-      return
-    }
-
-    speechBufferRef.current = `${speechBufferRef.current}${text}`
-  }
-
-  const takeSpeechChunk = (force = false): string | null => {
-    const buffer = speechBufferRef.current.replace(/\s+/g, ' ').trim()
-
-    if (!buffer) {
-      speechBufferRef.current = ''
-
-      return null
-    }
-
-    const sentence = buffer.match(/^(.+?[.!?。！？])(?:\s+|$)/)
-
-    if (sentence?.[1] && (sentence[1].length >= 8 || force)) {
-      const chunk = sentence[1].trim()
-      speechBufferRef.current = buffer.slice(sentence[1].length).trim()
-
-      return chunk
-    }
-
-    if (!force && buffer.length > 220) {
-      const softBoundary = Math.max(
-        buffer.lastIndexOf(', ', 180),
-        buffer.lastIndexOf('; ', 180),
-        buffer.lastIndexOf(': ', 180)
-      )
-
-      if (softBoundary > 80) {
-        const chunk = buffer.slice(0, softBoundary + 1).trim()
-        speechBufferRef.current = buffer.slice(softBoundary + 1).trim()
-
-        return chunk
-      }
-    }
-
-    if (!force) {
-      return null
-    }
-
-    speechBufferRef.current = ''
-
-    return buffer
-  }
-
   const handleTurn = useCallback(
     async (forceTranscribe = false) => {
       if (turnClosingRef.current) {
@@ -154,6 +105,10 @@ export function useVoiceConversation({
         }
 
         try {
+          // Acknowledge capture so the user isn't guessing — a long utterance
+          // + cold STT can take a while; the pill shows "transcribing" but a
+          // toast makes it explicit that their audio landed and is processing.
+          notify({ kind: 'info', title: 'Audio received — transcribing…', message: '' })
           const transcript = (await onTranscribeAudio(result.audio)).trim()
 
           if (!transcript) {
@@ -201,8 +156,8 @@ export function useVoiceConversation({
       // VAD tuning mirrors `tools.voice_mode` defaults so the browser loop matches the CLI.
       await handle.start({
         silenceLevel: 0.075,
-        silenceMs: 1_250,
-        idleSilenceMs: 12_000,
+        silenceMs: 5_000,
+        idleSilenceMs: 25_000,
         onError: error => {
           notifyError(error, voiceCopy.microphoneFailed)
           pendingStartRef.current = false
@@ -211,7 +166,7 @@ export function useVoiceConversation({
         onSilence: () => void handleTurn()
       })
       setStatus('listening')
-      turnTimeoutRef.current = window.setTimeout(() => void handleTurn(), 60_000)
+      turnTimeoutRef.current = window.setTimeout(() => void handleTurn(), 300_000)
     } catch (error) {
       notifyError(error, voiceCopy.couldNotStartSession)
       pendingStartRef.current = false
@@ -220,14 +175,30 @@ export function useVoiceConversation({
     }
   }, [handle, handleTurn, onFatalError, voiceCopy.couldNotStartSession, voiceCopy.microphoneFailed])
 
-  const speak = useCallback(async (text: string) => {
+  const speak = useCallback(async (text: string, holdId?: string) => {
     setStatus('speaking')
 
+    // Safety net: never let a held reply stay hidden. If audio never starts
+    // (TTS stalls/fails), reveal it anyway after a few seconds so the user
+    // always sees text. onStart clears it sooner on the happy path.
+    let revealTimer: number | null = null
+    if (holdId) {
+      revealTimer = window.setTimeout(() => setVoiceHold(null), 6_000)
+    }
+
     try {
-      await playSpeechText(text, { source: 'voice-conversation' })
+      await playSpeechText(text, {
+        source: 'voice-conversation',
+        onStart: () => setVoiceHold(null)
+      })
     } catch (error) {
       notifyError(error, voiceCopy.playbackFailed)
     } finally {
+      if (revealTimer) {
+        window.clearTimeout(revealTimer)
+      }
+      // Whatever happened, never leave a reply hidden.
+      setVoiceHold(null)
       if (enabledRef.current) {
         pendingStartRef.current = true
         setStatus('idle')
@@ -261,6 +232,7 @@ export function useVoiceConversation({
     pendingStartRef.current = false
     clearTurnTimeout()
     stopVoicePlayback()
+    setVoiceHold(null)
     handle.cancel()
     turnClosingRef.current = false
     awaitingSpokenResponseRef.current = false
@@ -275,6 +247,25 @@ export function useVoiceConversation({
       void handleTurn(true)
     }
   }, [handleTurn])
+
+  // Barge-in: cut off the assistant mid-speech so the user can respond without
+  // hearing the whole reply (the terminal's newest-wins behaviour). Stops the
+  // current playback and immediately re-arms the mic, so the user isn't locked
+  // out until the reply finishes (William's "won't let me record until idle").
+  const interruptSpeech = useCallback(() => {
+    if (statusRef.current !== 'speaking') {
+      return
+    }
+
+    stopVoicePlayback()
+    setVoiceHold(null)
+
+    if (enabledRef.current && !mutedRef.current) {
+      pendingStartRef.current = true
+    }
+
+    setStatus('idle')
+  }, [])
 
   const toggleMute = useCallback(() => {
     setMuted(value => {
@@ -302,6 +293,15 @@ export function useVoiceConversation({
         return
       }
 
+      // While the assistant is speaking, Space barges in: stop playback and
+      // re-arm the mic so the user can respond immediately, no need to wait.
+      if (statusRef.current === 'speaking') {
+        event.preventDefault()
+        interruptSpeech()
+
+        return
+      }
+
       if (statusRef.current !== 'listening') {
         return
       }
@@ -313,10 +313,14 @@ export function useVoiceConversation({
     window.addEventListener('keydown', onKeyDown, { capture: true })
 
     return () => window.removeEventListener('keydown', onKeyDown, { capture: true })
-  }, [enabled, stopTurn])
+  }, [enabled, interruptSpeech, stopTurn])
 
-  // Drive the loop: after a voice-submitted turn, speak stable chunks as the
-  // assistant stream grows. Otherwise start listening when idle between turns.
+  // Drive the loop: after a voice-submitted turn, speak the WHOLE reply once it
+  // is complete (matches the terminal's smooth one-shot TTS, which William much
+  // prefers). The old design chopped the reply into per-sentence chunks and
+  // `await speak(chunk)` serialized them — each sentence waited for the prior
+  // one's full TTS round-trip + playback, ~20-30s/sentence. Speaking once at
+  // the end removes that. Otherwise start listening when idle between turns.
   useEffect(() => {
     if (!enabled || muted) {
       return
@@ -331,23 +335,30 @@ export function useVoiceConversation({
           responseIdRef.current = response.id
         }
 
-        if (response.text.length > spokenSourceLengthRef.current) {
-          appendSpeechText(response.text.slice(spokenSourceLengthRef.current))
-          spokenSourceLengthRef.current = response.text.length
+        // Sync text+audio: hold the in-flight reply out of the transcript as
+        // soon as it appears, so its text doesn't render seconds before audio.
+        // Released when playback begins (speak → onStart) or on completion below.
+        if ($syncTextAudio.get()) {
+          setVoiceHold(response.id)
         }
 
-        const chunk = takeSpeechChunk(!response.pending && !busy)
-
-        if (chunk) {
-          void speak(chunk)
-
-          return
-        }
-
+        // Only speak once the reply is COMPLETE (not pending, not busy). The
+        // full text is read in a single TTS call, so playback is smooth and
+        // fast — no inter-sentence gaps. While still streaming, just wait.
         if (!response.pending && !busy) {
+          const fullReply = response.text.trim()
+          const holdId = $syncTextAudio.get() ? response.id : undefined
           awaitingSpokenResponseRef.current = false
           consumePendingResponse()
           resetSpeechBuffer()
+
+          if (fullReply) {
+            void speak(fullReply, holdId)
+
+            return
+          }
+
+          setVoiceHold(null)
           pendingStartRef.current = true
           setStatus('idle')
 
@@ -386,5 +397,5 @@ export function useVoiceConversation({
     wasEnabledRef.current = enabled
   }, [enabled, end, start])
 
-  return { end, level, muted, start, status, stopTurn, toggleMute }
+  return { end, interruptSpeech, level, muted, start, status, stopTurn, toggleMute }
 }

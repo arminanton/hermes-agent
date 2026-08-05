@@ -46,6 +46,7 @@ import {
   sessionPinId
 } from '@/store/session'
 import { isSecondaryWindow } from '@/store/windows'
+import { $voiceHoldMessageId } from '@/store/voice-prefs'
 import type { ModelOptionsResponse } from '@/types/hermes'
 
 import { routeSessionId } from '../routes'
@@ -199,7 +200,12 @@ function ChatRuntimeBoundary({
   suppressMessages
 }: ChatRuntimeBoundaryProps) {
   const storeMessages = useStore($messages)
-  const messages = suppressMessages ? NO_MESSAGES : storeMessages
+  const voiceHoldId = useStore($voiceHoldMessageId)
+  const baseMessages = suppressMessages ? NO_MESSAGES : storeMessages
+  // Sync text+audio: while a completed voice reply's TTS is synthesizing, hold
+  // that one assistant message out of the transcript so its text appears the
+  // instant audio is ready (text + speech together), not seconds earlier.
+  const messages = voiceHoldId ? baseMessages.filter(m => m.id !== voiceHoldId) : baseMessages
   const runtimeMessageCacheRef = useRef(new WeakMap<ChatMessage, ThreadMessage>())
 
   const runtimeMessageRepository = useMemo(() => {

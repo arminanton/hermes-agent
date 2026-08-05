@@ -249,6 +249,27 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
   // The gateway publishes voice.status + voice.transcript events that
   // createGatewayEventHandler turns into UI badges and composer injection.
   const voiceRecordToggle = () => {
+    // Barge-in: if the agent's reply is currently being synthesized / spoken,
+    // the record key first INTERRUPTS that playback so the user can cut it off
+    // (William's ask: "press Ctrl+O to stop it, perhaps to allow me to record a
+    // response"). This is best-effort + idempotent on the gateway. We then fall
+    // through to the normal start-recording path when voice mode is on, so a
+    // single press = "stop talking and let me respond".
+    if (voice.synthesizing) {
+      voice.setSynthesizing(false)
+      gateway
+        .rpc('voice.stop_playback', { session_id: getUiState().sid })
+        .catch(() => {
+          /* best-effort: nothing playing / bridge down is fine */
+        })
+      // If voice mode isn't on, stopping playback is the whole action.
+      if (!voice.enabled) {
+        return actions.sys('voice: playback interrupted')
+      }
+      // Voice mode on → continue into start-recording below so the user can
+      // immediately speak their response.
+    }
+
     if (!voice.enabled) {
       return actions.sys('voice: mode is off — enable with /voice on')
     }

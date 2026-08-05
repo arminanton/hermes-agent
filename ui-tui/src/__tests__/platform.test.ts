@@ -103,7 +103,7 @@ describe('parseVoiceRecordKey (#18994)', () => {
   it('parses ctrl+<letter> bindings', async () => {
     const { parseVoiceRecordKey } = await importPlatform('linux')
 
-    expect(parseVoiceRecordKey('ctrl+o')).toEqual({ ch: 'o', mod: 'ctrl', raw: 'ctrl+o' })
+    expect(parseVoiceRecordKey('ctrl+p')).toEqual({ ch: 'p', mod: 'ctrl', raw: 'ctrl+p' })
     expect(parseVoiceRecordKey('Ctrl+R')).toEqual({ ch: 'r', mod: 'ctrl', raw: 'ctrl+r' })
   })
 
@@ -191,14 +191,14 @@ describe('parseVoiceRecordKey (#18994)', () => {
 
     // The classic CLI's prompt_toolkit binds raw-char configs to the key
     // itself (``c-o`` requires an explicit modifier); rewriting ``o``
-    // → ``ctrl+o`` would silently diverge the two runtimes. Refuse.
+    // → ``ctrl+p`` would silently diverge the two runtimes. Refuse.
     expect(parseVoiceRecordKey('o')).toEqual(DEFAULT_VOICE_RECORD_KEY)
     expect(parseVoiceRecordKey('b')).toEqual(DEFAULT_VOICE_RECORD_KEY)
     expect(parseVoiceRecordKey('space')).toEqual(DEFAULT_VOICE_RECORD_KEY)
     expect(parseVoiceRecordKey('escape')).toEqual(DEFAULT_VOICE_RECORD_KEY)
   })
 
-  it('rejects ctrl+c / ctrl+d / ctrl+l — reserved by the TUI input handler', async () => {
+  it('rejects ctrl+c / ctrl+d / ctrl+l / ctrl+t — reserved by the TUI input handler', async () => {
     const { DEFAULT_VOICE_RECORD_KEY, parseVoiceRecordKey } = await importPlatform('linux')
 
     // ``useInputHandlers()`` intercepts these before the voice check,
@@ -207,6 +207,13 @@ describe('parseVoiceRecordKey (#18994)', () => {
     expect(parseVoiceRecordKey('ctrl+c')).toEqual(DEFAULT_VOICE_RECORD_KEY)
     expect(parseVoiceRecordKey('ctrl+d')).toEqual(DEFAULT_VOICE_RECORD_KEY)
     expect(parseVoiceRecordKey('ctrl+l')).toEqual(DEFAULT_VOICE_RECORD_KEY)
+    // ``ctrl+t`` hard-resets the screen (the raw-key manual hard-reset binding),
+    // intercepted before the voice check, so it is reserved → coerces to default.
+    expect(parseVoiceRecordKey('ctrl+t')).toEqual(DEFAULT_VOICE_RECORD_KEY)
+    // ``ctrl+o`` is a VALID voice key — the manual Ctrl+O hard-reset key binding
+    // was removed (William uses Ctrl+O for voice; hard-reset moved to Ctrl+T).
+    // So ctrl+o must parse through, not coerce.
+    expect(parseVoiceRecordKey('ctrl+o')).toEqual({ ch: 'o', mod: 'ctrl', raw: 'ctrl+o' })
     // Alt-modifier versions of those letters are NOT intercepted, so
     // they remain usable.
     expect(parseVoiceRecordKey('alt+c').mod).toBe('alt')
@@ -217,18 +224,23 @@ describe('parseVoiceRecordKey (#18994)', () => {
     expect(parseVoiceRecordKey('ctrl+x').ch).toBe('x')
   })
 
-  it('rejects super+{c,d,l,v} on macOS — action-mod chords are claimed before voice', async () => {
+  it('rejects super+{c,d,l,t,v} on macOS — action-mod chords are claimed before voice', async () => {
     const { DEFAULT_VOICE_RECORD_KEY, parseVoiceRecordKey } = await importPlatform('darwin')
 
-    // On macOS super+c/d/l/v are copy / exit / clear / paste. Reject at
-    // parse time so /voice status doesn't advertise dead bindings.
+    // On macOS super+c/d/l/v are copy / exit / clear / paste, and super+t is
+    // the hard-reset (Cmd+T via isAction). Reject at parse time so /voice
+    // status doesn't advertise dead bindings.
     expect(parseVoiceRecordKey('super+c')).toEqual(DEFAULT_VOICE_RECORD_KEY)
     expect(parseVoiceRecordKey('super+d')).toEqual(DEFAULT_VOICE_RECORD_KEY)
     expect(parseVoiceRecordKey('super+l')).toEqual(DEFAULT_VOICE_RECORD_KEY)
+    expect(parseVoiceRecordKey('super+t')).toEqual(DEFAULT_VOICE_RECORD_KEY)
     expect(parseVoiceRecordKey('super+v')).toEqual(DEFAULT_VOICE_RECORD_KEY)
+    // super+o is no longer reserved (the Ctrl+O/Cmd+O hard-reset binding was
+    // removed so Ctrl+O can serve as the voice key), so it parses through.
+    expect(parseVoiceRecordKey('super+o').mod).toBe('super')
     // Other super letters still work (no global chord claims them).
     expect(parseVoiceRecordKey('super+b').mod).toBe('super')
-    expect(parseVoiceRecordKey('super+o').mod).toBe('super')
+    expect(parseVoiceRecordKey('super+p').mod).toBe('super')
   })
 
   it('allows super+{c,d,l,v} on Linux/Windows — those globals key off Ctrl, not Super', async () => {
@@ -244,17 +256,18 @@ describe('parseVoiceRecordKey (#18994)', () => {
     expect(parseVoiceRecordKey('super+v').mod).toBe('super')
   })
 
-  it('rejects alt+{c,d,l} on macOS — meta-as-alt collides with isAction', async () => {
+  it('rejects alt+{c,d,l,t} on macOS — meta-as-alt collides with isAction', async () => {
     const { DEFAULT_VOICE_RECORD_KEY, parseVoiceRecordKey } = await importPlatform('darwin')
 
     // hermes-ink reports Alt as ``key.meta`` on many terminals, and
     // ``isActionMod`` on darwin accepts ``key.meta`` as the action
-    // modifier. So ``alt+c`` / ``alt+d`` / ``alt+l`` get claimed by
-    // isCopyShortcut / isAction('d') / isAction('l') before voice
-    // runs (Copilot round-12 on #19835).
+    // modifier. So ``alt+c`` / ``alt+d`` / ``alt+l`` / ``alt+t`` get claimed
+    // by isCopyShortcut / isAction('d') / isAction('l') / isAction('t')
+    // before voice runs (Copilot round-12 on #19835).
     expect(parseVoiceRecordKey('alt+c')).toEqual(DEFAULT_VOICE_RECORD_KEY)
     expect(parseVoiceRecordKey('alt+d')).toEqual(DEFAULT_VOICE_RECORD_KEY)
     expect(parseVoiceRecordKey('alt+l')).toEqual(DEFAULT_VOICE_RECORD_KEY)
+    expect(parseVoiceRecordKey('alt+t')).toEqual(DEFAULT_VOICE_RECORD_KEY)
     // Other alt letters stay usable on darwin.
     expect(parseVoiceRecordKey('alt+r').mod).toBe('alt')
     expect(parseVoiceRecordKey('alt+space').mod).toBe('alt')
@@ -303,17 +316,17 @@ describe('parseVoiceRecordKey (#18994)', () => {
 
   it('ctrl+<key> rejects chords with extra alt / meta / super bits', async () => {
     const { isVoiceToggleKey, parseVoiceRecordKey } = await importPlatform('linux')
-    const ctrlO = parseVoiceRecordKey('ctrl+o')
+    const ctrlP = parseVoiceRecordKey('ctrl+p')
 
-    // ``ctrl+o`` must fire ONLY on literal Ctrl+O, not on
+    // ``ctrl+p`` must fire ONLY on literal Ctrl+P, not on
     // Ctrl+Alt+O / Ctrl+Cmd+O / Ctrl+Meta+O — otherwise the runtime
     // matches a different chord than the parser would let you
     // configure.
-    expect(isVoiceToggleKey({ alt: true, ctrl: true, meta: false, super: false }, 'o', ctrlO)).toBe(false)
-    expect(isVoiceToggleKey({ ctrl: true, meta: true, super: false }, 'o', ctrlO)).toBe(false)
-    expect(isVoiceToggleKey({ ctrl: true, meta: false, super: true }, 'o', ctrlO)).toBe(false)
-    // Sanity: plain Ctrl+O still fires.
-    expect(isVoiceToggleKey({ ctrl: true, meta: false, super: false }, 'o', ctrlO)).toBe(true)
+    expect(isVoiceToggleKey({ alt: true, ctrl: true, meta: false, super: false }, 'p', ctrlP)).toBe(false)
+    expect(isVoiceToggleKey({ ctrl: true, meta: true, super: false }, 'p', ctrlP)).toBe(false)
+    expect(isVoiceToggleKey({ ctrl: true, meta: false, super: true }, 'p', ctrlP)).toBe(false)
+    // Sanity: plain Ctrl+P still fires.
+    expect(isVoiceToggleKey({ ctrl: true, meta: false, super: false }, 'p', ctrlP)).toBe(true)
   })
 
   it('super+<key> rejects chords with extra ctrl / alt / meta bits', async () => {
@@ -345,15 +358,15 @@ describe('parseVoiceRecordKey (#18994)', () => {
     // otherwise ``ctrl+tab`` would fire on Ctrl+Shift+Tab.
     const ctrlTab = parseVoiceRecordKey('ctrl+tab')
     const altEnter = parseVoiceRecordKey('alt+enter')
-    const ctrlO = parseVoiceRecordKey('ctrl+o')
+    const ctrlP = parseVoiceRecordKey('ctrl+p')
 
     expect(isVoiceToggleKey({ ctrl: true, meta: false, shift: true, super: false, tab: true }, '', ctrlTab)).toBe(false)
     expect(isVoiceToggleKey({ alt: true, ctrl: false, meta: false, return: true, shift: true, super: false }, '', altEnter)).toBe(false)
-    expect(isVoiceToggleKey({ ctrl: true, meta: false, shift: true, super: false }, 'o', ctrlO)).toBe(false)
+    expect(isVoiceToggleKey({ ctrl: true, meta: false, shift: true, super: false }, 'p', ctrlP)).toBe(false)
 
     // Sanity: same events without Shift still fire.
     expect(isVoiceToggleKey({ ctrl: true, meta: false, shift: false, super: false, tab: true }, '', ctrlTab)).toBe(true)
-    expect(isVoiceToggleKey({ ctrl: true, meta: false, shift: false, super: false }, 'o', ctrlO)).toBe(true)
+    expect(isVoiceToggleKey({ ctrl: true, meta: false, shift: false, super: false }, 'p', ctrlP)).toBe(true)
   })
 })
 
@@ -362,7 +375,7 @@ describe('formatVoiceRecordKey (#18994)', () => {
     const { formatVoiceRecordKey, parseVoiceRecordKey } = await importPlatform('linux')
 
     expect(formatVoiceRecordKey(parseVoiceRecordKey('ctrl+b'))).toBe('Ctrl+B')
-    expect(formatVoiceRecordKey(parseVoiceRecordKey('ctrl+o'))).toBe('Ctrl+O')
+    expect(formatVoiceRecordKey(parseVoiceRecordKey('ctrl+p'))).toBe('Ctrl+P')
     expect(formatVoiceRecordKey(parseVoiceRecordKey('alt+r'))).toBe('Alt+R')
     // ``super``/``win`` render as ``Super`` on non-mac so the hint
     // doesn't tell Linux/Windows users to press a Cmd key they don't
@@ -383,11 +396,11 @@ describe('formatVoiceRecordKey (#18994)', () => {
 describe('isVoiceToggleKey honours configured record key (#18994)', () => {
   it('binds the configured letter, not hardcoded b', async () => {
     const { isVoiceToggleKey, parseVoiceRecordKey } = await importPlatform('linux')
-    const ctrlO = parseVoiceRecordKey('ctrl+o')
+    const ctrlP = parseVoiceRecordKey('ctrl+p')
 
-    expect(isVoiceToggleKey({ ctrl: true, meta: false, super: false }, 'o', ctrlO)).toBe(true)
+    expect(isVoiceToggleKey({ ctrl: true, meta: false, super: false }, 'p', ctrlP)).toBe(true)
     // The old hardcoded 'b' must NOT match when the user configured 'o'.
-    expect(isVoiceToggleKey({ ctrl: true, meta: false, super: false }, 'b', ctrlO)).toBe(false)
+    expect(isVoiceToggleKey({ ctrl: true, meta: false, super: false }, 'b', ctrlP)).toBe(false)
   })
 
   it('alt+<letter> binding matches alt OR meta (terminal-protocol parity)', async () => {
@@ -477,13 +490,13 @@ describe('isVoiceToggleKey honours configured record key (#18994)', () => {
 
   it('custom ctrl+<letter> does NOT accept Cmd fallback on macOS', async () => {
     const { isVoiceToggleKey, parseVoiceRecordKey } = await importPlatform('darwin')
-    const ctrlO = parseVoiceRecordKey('ctrl+o')
+    const ctrlP = parseVoiceRecordKey('ctrl+p')
 
-    // Only ``ctrl+b`` gets the action-modifier fallback; ``ctrl+o`` must
+    // Only ``ctrl+b`` gets the action-modifier fallback; ``ctrl+p`` must
     // be a literal Ctrl bit — otherwise Cmd+O would steal the shortcut.
-    expect(isVoiceToggleKey({ ctrl: false, meta: true, super: false }, 'o', ctrlO)).toBe(false)
-    expect(isVoiceToggleKey({ ctrl: false, meta: false, super: true }, 'o', ctrlO)).toBe(false)
-    expect(isVoiceToggleKey({ ctrl: true, meta: false, super: false }, 'o', ctrlO)).toBe(true)
+    expect(isVoiceToggleKey({ ctrl: false, meta: true, super: false }, 'p', ctrlP)).toBe(false)
+    expect(isVoiceToggleKey({ ctrl: false, meta: false, super: true }, 'p', ctrlP)).toBe(false)
+    expect(isVoiceToggleKey({ ctrl: true, meta: false, super: false }, 'p', ctrlP)).toBe(true)
   })
 
   it('super+b renders "Cmd+B" on darwin and requires the literal key.super bit', async () => {

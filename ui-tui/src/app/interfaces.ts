@@ -295,8 +295,10 @@ export interface InputHandlerContext {
     recording: boolean
     setProcessing: StateSetter<boolean>
     setRecording: StateSetter<boolean>
+    setSynthesizing: StateSetter<boolean>
     setVoiceEnabled: StateSetter<boolean>
     setVoiceTts: StateSetter<boolean>
+    synthesizing: boolean
   }
   wheelStep: number
 }
@@ -338,6 +340,7 @@ export interface GatewayEventHandlerContext {
   voice: {
     setProcessing: StateSetter<boolean>
     setRecording: StateSetter<boolean>
+    setSynthesizing: StateSetter<boolean>
     setVoiceEnabled: StateSetter<boolean>
     setVoiceTts: StateSetter<boolean>
   }

@@ -29,6 +29,8 @@ function currentState(
 export interface VoicePlaybackOptions {
   messageId?: string | null
   source: VoicePlaybackSource
+  /** Fired the instant audio playback actually begins (after synth). */
+  onStart?: () => void
 }
 
 export function stopVoicePlayback() {
@@ -76,6 +78,7 @@ export async function playSpeechText(text: string, options: VoicePlaybackOptions
     const audio = new Audio(response.data_url)
     currentAudio = audio
     setVoicePlaybackState(currentState('speaking', options, audio))
+    options.onStart?.()
 
     await new Promise<void>((resolve, reject) => {
       const cleanup = () => {

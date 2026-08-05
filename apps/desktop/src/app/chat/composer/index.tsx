@@ -53,6 +53,7 @@ import {
 } from '@/store/composer-queue'
 import { $statusItemsBySession } from '@/store/composer-status'
 import { notify } from '@/store/notifications'
+import { $speakThinking } from '@/store/voice-prefs'
 import { $gatewayState, $messages, setSessionPickerOpen } from '@/store/session'
 import { $threadScrolledUp } from '@/store/thread-scroll'
 import { useTheme } from '@/themes'
@@ -1739,6 +1740,7 @@ export function ChatBar({
           void conversation.end()
         },
         onStart: () => setVoiceConversationActive(true),
+        onInterrupt: conversation.interruptSpeech,
         onStopTurn: conversation.stopTurn,
         onToggleMute: conversation.toggleMute,
         status: conversation.status

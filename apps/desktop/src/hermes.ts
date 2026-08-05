@@ -749,6 +749,10 @@ export function transcribeAudio(dataUrl: string, mimeType?: string): Promise<Aud
   return window.hermesDesktop.api<AudioTranscriptionResponse>({
     path: '/api/audio/transcribe',
     method: 'POST',
+    // STT on a long utterance (and a cold whisper warmup) easily exceeds the
+    // 15s default IPC timeout, which surfaced as "Voice transcription failed:
+    // timed out after 15000ms". Give audio a generous 2-minute ceiling.
+    timeoutMs: 120_000,
     body: {
       data_url: dataUrl,
       mime_type: mimeType
@@ -760,6 +764,7 @@ export function speakText(text: string): Promise<AudioSpeakResponse> {
   return window.hermesDesktop.api<AudioSpeakResponse>({
     path: '/api/audio/speak',
     method: 'POST',
+    timeoutMs: 120_000,
     body: { text }
   })
 }

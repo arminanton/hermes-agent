@@ -2,11 +2,13 @@ import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { KbdCombo } from '@/components/ui/kbd'
 import { Tip } from '@/components/ui/tooltip'
+import { useStore } from '@nanostores/react'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
-import { AudioLines, Layers3, Loader2, Square, SteeringWheel } from '@/lib/icons'
+import { AudioLines, Brain, Layers3, Loader2, Square, SteeringWheel } from '@/lib/icons'
 import { formatCombo } from '@/lib/keybinds/combo'
 import { cn } from '@/lib/utils'
+import { $speakThinking, setSpeakThinking } from '@/store/voice-prefs'
 
 import type { ConversationStatus } from './hooks/use-voice-conversation'
 import { ModelPill } from './model-pill'
@@ -33,6 +35,7 @@ interface ConversationProps {
   muted: boolean
   status: ConversationStatus
   onEnd: () => void
+  onInterrupt: () => void
   onStart: () => void
   onStopTurn: () => void
   onToggleMute: () => void
@@ -148,12 +151,14 @@ function ConversationPill({
   level,
   muted,
   onEnd,
+  onInterrupt,
   onStopTurn,
   onToggleMute,
   status
 }: ConversationProps & { disabled: boolean }) {
   const { t } = useI18n()
   const c = t.composer
+  const speakThinking = useStore($speakThinking)
   const speaking = status === 'speaking'
   const listening = status === 'listening' && !muted
 
@@ -170,6 +175,23 @@ function ConversationPill({
 
   return (
     <div className="ml-auto flex shrink-0 items-center gap-(--composer-control-gap)">
+      <Tip label={speakThinking ? 'Speaking thoughts: on' : 'Speak thoughts: off'}>
+        <Button
+          aria-label="Toggle speaking the assistant's thinking aloud"
+          aria-pressed={speakThinking}
+          className={cn(GHOST_ICON_BTN, 'p-0', speakThinking && 'bg-muted text-foreground')}
+          disabled={disabled}
+          onClick={() => {
+            triggerHaptic('selection')
+            setSpeakThinking(!speakThinking)
+          }}
+          size="icon"
+          type="button"
+          variant="ghost"
+        >
+          <Brain className="size-4" />
+        </Button>
+      </Tip>
       <Tip label={muted ? c.unmuteMic : c.muteMic}>
         <Button
           aria-label={muted ? c.unmuteMic : c.muteMic}
@@ -197,6 +219,23 @@ function ConversationPill({
             onStopTurn()
           }}
           title={c.stopListening}
+          type="button"
+          variant="ghost"
+        >
+          <Square className="fill-current" size={11} />
+          <span>{c.stopShort}</span>
+        </Button>
+      )}
+      {speaking && (
+        <Button
+          aria-label={c.stopShort}
+          className="h-(--composer-control-size) shrink-0 gap-1.5 rounded-full px-2.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+          disabled={disabled}
+          onClick={() => {
+            triggerHaptic('submit')
+            onInterrupt()
+          }}
+          title={c.stopShort}
           type="button"
           variant="ghost"
         >

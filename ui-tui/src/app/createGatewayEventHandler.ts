@@ -83,7 +83,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
   const { appendMessage, panel, setHistoryItems } = ctx.transcript
   const { setInput } = ctx.composer
   const { submitRef } = ctx.submission
-  const { setProcessing: setVoiceProcessing, setRecording: setVoiceRecording, setVoiceEnabled } = ctx.voice
+  const { setProcessing: setVoiceProcessing, setRecording: setVoiceRecording, setSynthesizing: setVoiceSynthesizing, setVoiceEnabled } = ctx.voice
 
   let pendingThinkingStatus = ''
   let thinkingStatusTimer: null | ReturnType<typeof setTimeout> = null
@@ -607,12 +607,26 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         if (state === 'listening') {
           setVoiceRecording(true)
           setVoiceProcessing(false)
+          setVoiceSynthesizing(false)
         } else if (state === 'transcribing') {
           setVoiceRecording(false)
           setVoiceProcessing(true)
+          setVoiceSynthesizing(false)
+          // Visible feedback (like the image-paste notice) so the user knows
+          // their audio was captured and is being transcribed while they wait.
+          sys('🎤 audio received, transcribing...')
+        } else if (state === 'synthesizing' || state === 'speaking') {
+          // The reply text has arrived and TTS is being generated / played.
+          // Surface a status-bar cue ("generating audio response…") so the
+          // gap between text and audio doesn't feel like a stall, and so the
+          // user knows they can press the record key to barge-in / interrupt.
+          setVoiceRecording(false)
+          setVoiceProcessing(false)
+          setVoiceSynthesizing(true)
         } else {
           setVoiceRecording(false)
           setVoiceProcessing(false)
+          setVoiceSynthesizing(false)
         }
 
         return

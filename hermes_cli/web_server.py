@@ -2601,6 +2601,59 @@ async def check_hermes_update(force: bool = False):
     return payload
 
 
+def _llm_cleanup_transcript(raw: str) -> str:
+    """Clean a raw STT transcript with a fast auxiliary LLM.
+
+    Whisper output from dictation is often grammatically rough, mis-punctuated,
+    and run-on, which loses the speaker's intent. This pass fixes grammar,
+    punctuation, and sentence structure while preserving meaning and adding
+    NOTHING. Gated by ``stt.llm_cleanup`` (default off). Best-effort: returns the
+    raw transcript unchanged on any failure or when disabled.
+    """
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config()
+        stt_cfg = cfg.get("stt", {}) if isinstance(cfg.get("stt"), dict) else {}
+        if not stt_cfg.get("llm_cleanup"):
+            return raw
+    except Exception:
+        return raw
+
+    # Skip tiny / empty transcripts (single words, whisper filler like "You").
+    if len(raw.split()) < 3:
+        return raw
+
+    system = (
+        "You clean up raw speech-to-text dictation. Fix grammar, punctuation, "
+        "capitalization, and run-on sentences so the text reads as the speaker "
+        "clearly intended. Preserve the original meaning and every concrete "
+        "detail. Do NOT add, summarize, answer, or comment. Do NOT use em "
+        "dashes or en dashes; use commas, periods, or parentheses. Return ONLY "
+        "the cleaned text, nothing else."
+    )
+    try:
+        from agent.auxiliary_client import call_llm
+
+        resp = call_llm(
+            task="title_generation",  # reuse the configured fast/cheap aux model
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": raw},
+            ],
+            temperature=0.2,
+            max_tokens=2000,
+            timeout=30.0,
+        )
+        cleaned = (resp.choices[0].message.content or "").strip()
+        # Guard against the model refusing or returning something absurd.
+        if cleaned and len(cleaned) <= len(raw) * 3 + 50:
+            return cleaned
+    except Exception:
+        _log.debug("transcript llm cleanup failed", exc_info=True)
+    return raw
+
+
 @app.post("/api/audio/transcribe")
 async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
     data_url = (payload.data_url or "").strip()
@@ -2668,9 +2721,27 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
             detail=result.get("error") or "Transcription failed",
         )
 
+    transcript = str(result.get("transcript") or "").strip()
+
+    # Optional LLM cleanup: raw STT (whisper) output is often grammatically
+    # rough and loses sentence sense, especially on long dictation. When
+    # ``stt.llm_cleanup`` is enabled, pass the raw transcript through a fast
+    # model that fixes grammar/punctuation and preserves the speaker's true
+    # intent WITHOUT adding content. Best-effort: any failure falls back to the
+    # raw transcript so dictation never breaks.
+    if transcript:
+        try:
+            cleaned = await asyncio.get_running_loop().run_in_executor(
+                None, _llm_cleanup_transcript, transcript
+            )
+            if cleaned:
+                transcript = cleaned
+        except Exception:
+            _log.debug("STT llm_cleanup skipped", exc_info=True)
+
     return {
         "ok": True,
-        "transcript": str(result.get("transcript") or "").strip(),
+        "transcript": transcript,
         "provider": result.get("provider"),
     }
 

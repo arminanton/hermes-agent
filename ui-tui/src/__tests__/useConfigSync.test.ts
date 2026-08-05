@@ -452,7 +452,7 @@ describe('hydrateFullConfig', () => {
     }) as any
 
   it('re-applies voice.record_key from a fresh config.get full response', async () => {
-    const gw = makeFakeGw({ config: { display: {}, voice: { record_key: 'ctrl+o' } } })
+    const gw = makeFakeGw({ config: { display: {}, voice: { record_key: 'ctrl+p' } } })
     const setBell = vi.fn()
     const setVoiceRecordKey = vi.fn()
 
@@ -460,7 +460,7 @@ describe('hydrateFullConfig', () => {
 
     expect(gw.request).toHaveBeenCalledWith('config.get', { key: 'full' })
     expect(setVoiceRecordKey).toHaveBeenCalledWith(
-      expect.objectContaining({ ch: 'o', mod: 'ctrl', raw: 'ctrl+o' })
+      expect.objectContaining({ ch: 'p', mod: 'ctrl', raw: 'ctrl+p' })
     )
     expect(setBell).toHaveBeenCalledWith(false)
   })

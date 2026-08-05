@@ -99,6 +99,7 @@ import { playSpeechText, stopVoicePlayback } from '@/lib/voice-playback'
 import { $compactionActive } from '@/store/compaction'
 import type { ComposerAttachment } from '@/store/composer'
 import { notifyError } from '@/store/notifications'
+import { $expandThinking } from '@/store/voice-prefs'
 import { $connection } from '@/store/session'
 import { notifyThreadEditClose, notifyThreadEditOpen } from '@/store/thread-scroll'
 import { $voicePlayback } from '@/store/voice-playback'
@@ -474,12 +475,16 @@ const ThinkingDisclosure: FC<{
   // reasoning surfaces a live preview without manual interaction. The first
   // explicit toggle wins from then on.
   const [userOpen, setUserOpen] = useState<boolean | null>(null)
+  const expandThinking = useStore($expandThinking)
   const elapsed = useElapsedSeconds(pending, timerKey)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const contentRef = useRef<HTMLDivElement | null>(null)
   const enterRef = useEnterAnimation(messageRunning, timerKey)
 
-  const open = userOpen ?? pending
+  // Default open while streaming, and (per the expand-thinking pref) stay open
+  // after streaming so William can read thinking as it appears. First explicit
+  // user toggle wins. With the pref off, collapse-when-done (original behaviour).
+  const open = userOpen ?? (pending || expandThinking)
   const isPreview = pending && userOpen === null
 
   // While the preview is live, pin the scroll container to the bottom on
@@ -513,7 +518,7 @@ const ThinkingDisclosure: FC<{
 
   return (
     <div
-      className="text-[length:var(--conversation-tool-font-size)] text-(--ui-text-tertiary)"
+      className="text-[length:var(--conversation-tool-font-size)] text-(--ui-text-secondary)"
       data-slot="aui_thinking-disclosure"
       ref={enterRef}
     >
@@ -877,6 +882,7 @@ const UserMessage: FC<{
 }> = ({ onCancel, onRestoreToMessage }) => {
   const { t } = useI18n()
   const copy = t.assistant.thread
+  const expandFull = useStore($expandThinking)
   const [restoreConfirmOpen, setRestoreConfirmOpen] = useState(false)
   const messageId = useAuiState(s => s.message.id)
   const content = useAuiState(s => s.message.content)
@@ -977,7 +983,7 @@ const UserMessage: FC<{
     // Render the user's text through a minimal markdown pipeline:
     // backtick `code` and ``` fenced ``` blocks, with directive chips
     // (`@file:` etc.) still resolved inside the plain-text spans.
-    <div className="sticky-human-clamp" data-clamped={bodyClamped ? 'true' : undefined}>
+    <div className="sticky-human-clamp" data-clamped={bodyClamped && !expandFull ? 'true' : undefined}>
       {/* Match the edit composer's collapsed line box (min-h-[1.25rem]) so
           clicking to edit can't grow the bubble by a sub-pixel and reflow the
           turn 1px. */}

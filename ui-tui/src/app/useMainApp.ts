@@ -176,6 +176,7 @@ export function useMainApp(gw: GatewayClient) {
   const [voiceTts, setVoiceTts] = useState(false)
   const [voiceRecording, setVoiceRecording] = useState(false)
   const [voiceProcessing, setVoiceProcessing] = useState(false)
+  const [voiceSynthesizing, setVoiceSynthesizing] = useState(false)
   const [voiceRecordKey, setVoiceRecordKey] = useState<ParsedVoiceRecordKey>(DEFAULT_VOICE_RECORD_KEY)
   const [sessionStartedAt, setSessionStartedAt] = useState(() => Date.now())
   const [turnStartedAt, setTurnStartedAt] = useState<null | number>(null)
@@ -780,8 +781,10 @@ export function useMainApp(gw: GatewayClient) {
       recording: voiceRecording,
       setProcessing: setVoiceProcessing,
       setRecording: setVoiceRecording,
+      setSynthesizing: setVoiceSynthesizing,
       setVoiceEnabled,
-      setVoiceTts
+      setVoiceTts,
+      synthesizing: voiceSynthesizing
     },
     wheelStep: WHEEL_SCROLL_STEP
   })
@@ -806,6 +809,7 @@ export function useMainApp(gw: GatewayClient) {
         voice: {
           setProcessing: setVoiceProcessing,
           setRecording: setVoiceRecording,
+          setSynthesizing: setVoiceSynthesizing,
           setVoiceEnabled,
           setVoiceTts
         }
@@ -1384,7 +1388,7 @@ export function useMainApp(gw: GatewayClient) {
       turnStartedAt: ui.sid ? turnStartedAt : null,
       // CLI parity: the classic prompt_toolkit status bar shows a red dot
       // on REC (cli.py:_get_voice_status_fragments line 2344).
-      voiceLabel: voiceRecording ? '● REC' : voiceProcessing ? '◉ STT' : `voice ${voiceEnabled ? 'on' : 'off'}${voiceTts ? ' [tts]' : ''}`
+      voiceLabel: voiceRecording ? '● REC' : voiceProcessing ? '◉ STT' : voiceSynthesizing ? '♪ generating audio response…' : `voice ${voiceEnabled ? 'on' : 'off'}${voiceTts ? ' [tts]' : ''}`
     }),
     [
       cwd,
@@ -1398,6 +1402,7 @@ export function useMainApp(gw: GatewayClient) {
       voiceEnabled,
       voiceProcessing,
       voiceRecording,
+      voiceSynthesizing,
       voiceTts
     ]
   )

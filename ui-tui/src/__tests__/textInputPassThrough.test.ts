@@ -25,7 +25,7 @@ describe('shouldPreserveCtrlJNewline', () => {
 describe('shouldPassThroughToGlobalHandler', () => {
   it('passes through the configured voice shortcut while composer is focused', () => {
     expect(
-      shouldPassThroughToGlobalHandler('o', key({ ctrl: true }), parseVoiceRecordKey('ctrl+o'))
+      shouldPassThroughToGlobalHandler('p', key({ ctrl: true }), parseVoiceRecordKey('ctrl+p'))
     ).toBe(true)
     expect(
       shouldPassThroughToGlobalHandler('r', key({ meta: true }), parseVoiceRecordKey('alt+r'))
@@ -44,8 +44,8 @@ describe('shouldPassThroughToGlobalHandler', () => {
   })
 
   it('does not swallow ordinary typing keys', () => {
-    expect(shouldPassThroughToGlobalHandler('h', key(), parseVoiceRecordKey('ctrl+o'))).toBe(false)
-    expect(shouldPassThroughToGlobalHandler('o', key(), parseVoiceRecordKey('ctrl+o'))).toBe(false)
+    expect(shouldPassThroughToGlobalHandler('h', key(), parseVoiceRecordKey('ctrl+p'))).toBe(false)
+    expect(shouldPassThroughToGlobalHandler('p', key(), parseVoiceRecordKey('ctrl+p'))).toBe(false)
   })
 
   it('always passes through non-voice global control keys', () => {
