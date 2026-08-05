@@ -1521,6 +1521,23 @@ def _enable_gateway_prompts() -> None:
 # ── Blocking prompt factory ──────────────────────────────────────────
 
 
+def _clarify_block_timeout() -> int:
+    """Clarify wait timeout (seconds) for the TUI blocking bridge.
+
+    Honors ``agent.clarify_timeout`` from config (same key the messaging
+    adapters read via tools.clarify_gateway.get_clarify_timeout) so a user
+    who is away can let a clarify wait far longer than the 300s default
+    used by the other _block prompts. Falls back to 300 on any error so a
+    broken/missing config can never make the prompt hang forever.
+    """
+    try:
+        from tools.clarify_gateway import get_clarify_timeout
+
+        return int(get_clarify_timeout())
+    except Exception:
+        return 300
+
+
 def _block(event: str, sid: str, payload: dict, timeout: int = 300) -> str:
     rid = uuid.uuid4().hex[:8]
     ev = threading.Event()
@@ -3237,7 +3254,8 @@ def _agent_cbs(sid: str) -> dict:
             "notification.clear", sid, {"key": key}
         ),
         "clarify_callback": lambda q, c: _block(
-            "clarify.request", sid, {"question": q, "choices": c}
+            "clarify.request", sid, {"question": q, "choices": c},
+            timeout=_clarify_block_timeout(),
         ),
         # read_terminal tool (desktop GUI): same blocking bridge as clarify — the
         # renderer answers terminal.read.respond with the serialized buffer.
