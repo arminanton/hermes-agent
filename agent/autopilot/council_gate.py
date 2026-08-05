@@ -1,6 +1,6 @@
-"""Autopilot's anti-sycophancy judge — drives the real Hermes Council.
+"""Autopilot's anti-sycophancy judge — drives the real Council.
 
-This wires the user's separate ``hermes_council`` package into the agent through
+This wires the user's separate ``council`` package into the agent through
 its **Hermes-native backend** (``COUNCIL_PROVIDER=hermes``) so every persona
 deliberates *in-process* on the user's own configured provider/model — no
 external CLI, model-agnostic, works on weak models. The Council is the
@@ -65,7 +65,7 @@ def _candidate_council_srcs() -> list[Path]:
 def ensure_council_importable(council_model: str = "") -> bool:
     """Locate the Council package, add it to ``sys.path``, select the hermes lane.
 
-    Returns True if ``hermes_council`` is importable afterwards. Idempotent.
+    Returns True if ``council`` is importable afterwards. Idempotent.
     """
     global _COUNCIL_READY, _COUNCIL_SRC
     if _COUNCIL_READY is not None:
@@ -84,7 +84,7 @@ def ensure_council_importable(council_model: str = "") -> bool:
         os.environ.setdefault("COUNCIL_HERMES_MODEL", council_model)
 
     try:
-        import hermes_council.deliberation  # noqa: F401  (already on path)
+        import council.deliberation  # noqa: F401  (already on path)
         _COUNCIL_READY = True
         return True
     except Exception:
@@ -93,14 +93,14 @@ def ensure_council_importable(council_model: str = "") -> bool:
     for src in _candidate_council_srcs():
         try:
             libs = src / "libs"
-            if (libs / "hermes_council" / "deliberation.py").exists():
+            if (libs / "council" / "deliberation.py").exists():
                 if str(libs) not in sys.path:
                     sys.path.insert(0, str(libs))
                 os.environ.setdefault("COUNCIL_SRC", str(src))
-                import hermes_council.deliberation  # noqa: F401
+                import council.deliberation  # noqa: F401
                 _COUNCIL_SRC = str(src)
                 _COUNCIL_READY = True
-                logger.info("autopilot: Hermes Council loaded from %s", src)
+                logger.info("autopilot: Council loaded from %s", src)
                 return True
         except Exception as exc:  # noqa: BLE001
             logger.debug("autopilot: council candidate %s failed: %s", src, exc)
@@ -194,7 +194,7 @@ def _council_run(question: str, *, mode: str, max_tokens: int,
     deliberators reason against the engine's actual re-run, not the agent's prose.
     Falls back gracefully if the installed engine predates the receipts parameter.
     """
-    from hermes_council.deliberation import run_council
+    from council.deliberation import run_council
 
     kwargs: dict[str, Any] = dict(mode=mode, evidence_search=False, max_tokens=max_tokens)
     if evidence_receipts:
@@ -536,7 +536,7 @@ def _aux_completion(
 
 def _council_decision(options: list[str], decision_context: str) -> dict[str, Any]:
     """Seam: council multi-option decision (separate so tests can stub it)."""
-    from hermes_council.deliberation import decision as _decision
+    from council.deliberation import decision as _decision
 
     return _decision(options, decision_context=decision_context)
 

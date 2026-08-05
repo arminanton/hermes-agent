@@ -184,7 +184,8 @@ def _playwright_index() -> Optional[str]:
         if os.path.exists(p):
             return p
     try:
-        root = subprocess.run(["npm", "root", "-g"], capture_output=True, text=True, timeout=10).stdout.strip()
+        root = subprocess.run(["npm", "root", "-g"], capture_output=True, text=True, timeout=10,
+                              stdin=subprocess.DEVNULL).stdout.strip()
         cand = os.path.join(root, "playwright", "index.js")
         if os.path.exists(cand):
             return cand
@@ -332,7 +333,8 @@ def _run_browser_playwright(spec: ProbeSpec, node: str, pw: str, *, timeout: flo
     }
     try:
         proc = subprocess.run([node, js_path, pw, json.dumps(payload)],
-                              capture_output=True, text=True, timeout=timeout)
+                              capture_output=True, text=True, timeout=timeout,
+                              stdin=subprocess.DEVNULL)
         data = {}
         for line in reversed((proc.stdout or "").strip().splitlines()):
             try:
@@ -458,7 +460,7 @@ def _run_http(spec: ProbeSpec, *, timeout: float) -> ProbeReceipt:
     try:
         from agent.autopilot import council_gate  # noqa: F401
         try:
-            from hermes_council.evidence import _validate_url  # type: ignore
+            from council.evidence import _validate_url  # type: ignore
             _validate_url(url)
         except Exception:  # noqa: BLE001 — guard optional; only blocks if importable
             pass
@@ -579,7 +581,8 @@ def _ocr_text(image_path: str, *, timeout: float = 30) -> Optional[str]:
         return None
     try:
         proc = subprocess.run(["tesseract", image_path, "stdout"],
-                              capture_output=True, text=True, timeout=timeout)
+                              capture_output=True, text=True, timeout=timeout,
+                              stdin=subprocess.DEVNULL)
         return proc.stdout if proc.returncode == 0 else None
     except Exception:  # noqa: BLE001
         return None
@@ -764,7 +767,8 @@ def _run_video(spec: ProbeSpec, *, timeout: float, workdir: str) -> ProbeReceipt
         ts = max(0, spec.page)  # reuse 'page' as a seconds offset for the sampled frame
         try:
             subprocess.run(["ffmpeg", "-y", "-ss", str(ts), "-i", vid, "-frames:v", "1", frame],
-                          capture_output=True, text=True, timeout=timeout)
+                          capture_output=True, text=True, timeout=timeout,
+                          stdin=subprocess.DEVNULL)
         except Exception:  # noqa: BLE001
             frame = ""
         if frame and os.path.exists(frame):
@@ -802,7 +806,8 @@ def _run_document(spec: ProbeSpec, *, timeout: float, workdir: str) -> ProbeRece
                 cmd += ["-upw", spec.document_password]
             cmd += [doc, png_base]
             try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                                      stdin=subprocess.DEVNULL)
             except Exception as exc:  # noqa: BLE001
                 return ProbeReceipt(DOCUMENT, ERROR, spec.criterion_id,
                                     summary="pdftoppm render error", detail=str(exc)[:200], ran_at=_now())
@@ -828,7 +833,8 @@ def _run_document(spec: ProbeSpec, *, timeout: float, workdir: str) -> ProbeRece
                 cmd += ["-upw", spec.document_password]
             cmd += [doc, "-"]
             try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                                      stdin=subprocess.DEVNULL)
             except Exception as exc:  # noqa: BLE001
                 return ProbeReceipt(DOCUMENT, ERROR, spec.criterion_id,
                                     summary="pdftotext error", detail=str(exc)[:200], ran_at=_now())
