@@ -6030,6 +6030,105 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"found": ok, "subagent_id": subagent_id})
 
 
+@method("subagent.soft_kill")
+def _(rid, params: dict) -> dict:
+    """Graceful stop of ONE running subagent (interrupt at next boundary)."""
+    from tools.delegate_tool import soft_kill_subagent
+
+    subagent_id = str(params.get("subagent_id") or "").strip()
+    if not subagent_id:
+        return _err(rid, 4000, "subagent_id required")
+    ok = soft_kill_subagent(subagent_id)
+    return _ok(rid, {"found": ok, "subagent_id": subagent_id})
+
+
+@method("subagent.soft_kill_all")
+def _(rid, params: dict) -> dict:
+    """Graceful stop of EVERY running subagent (completed ones untouched)."""
+    from tools.delegate_tool import soft_kill_all_subagents
+
+    return _ok(rid, {"count": soft_kill_all_subagents()})
+
+
+@method("subagent.hard_kill")
+def _(rid, params: dict) -> dict:
+    """Force-stop ONE running subagent NOW: interrupt + kill its own tool
+    subprocesses (scoped by task_id; never touches hermes/tmux)."""
+    from tools.delegate_tool import hard_kill_subagent
+
+    subagent_id = str(params.get("subagent_id") or "").strip()
+    if not subagent_id:
+        return _err(rid, 4000, "subagent_id required")
+    res = hard_kill_subagent(subagent_id)
+    res["subagent_id"] = subagent_id
+    return _ok(rid, res)
+
+
+@method("subagent.hard_kill_all")
+def _(rid, params: dict) -> dict:
+    """Force-stop EVERY running subagent (completed ones untouched)."""
+    from tools.delegate_tool import hard_kill_all_subagents
+
+    return _ok(rid, hard_kill_all_subagents())
+
+
+@method("subagent.steer")
+def _(rid, params: dict) -> dict:
+    """Inject a message into a running subagent WITHOUT stopping it; the
+    child sees it before its next tool run."""
+    from tools.delegate_tool import steer_subagent
+
+    subagent_id = str(params.get("subagent_id") or "").strip()
+    text = str(params.get("text") or "")
+    if not subagent_id:
+        return _err(rid, 4000, "subagent_id required")
+    if not text.strip():
+        return _err(rid, 4001, "text required")
+    ok = steer_subagent(subagent_id, text)
+    return _ok(rid, {"delivered": ok, "subagent_id": subagent_id})
+
+
+@method("subagent.interrupt_message")
+def _(rid, params: dict) -> dict:
+    """Interrupt a subagent's in-flight tool, hand it a message, and let it
+    CONTINUE from there (refocus, not stop)."""
+    from tools.delegate_tool import interrupt_subagent_with_message
+
+    subagent_id = str(params.get("subagent_id") or "").strip()
+    text = str(params.get("text") or "")
+    if not subagent_id:
+        return _err(rid, 4000, "subagent_id required")
+    if not text.strip():
+        return _err(rid, 4001, "text required")
+    ok = interrupt_subagent_with_message(subagent_id, text)
+    return _ok(rid, {"delivered": ok, "subagent_id": subagent_id})
+
+
+@method("subagent.pause")
+def _(rid, params: dict) -> dict:
+    """Pause ONE running subagent (hold at next boundary), distinct from the
+    global delegation.pause that only blocks new spawns."""
+    from tools.delegate_tool import pause_subagent
+
+    subagent_id = str(params.get("subagent_id") or "").strip()
+    if not subagent_id:
+        return _err(rid, 4000, "subagent_id required")
+    ok = pause_subagent(subagent_id)
+    return _ok(rid, {"paused": ok, "subagent_id": subagent_id})
+
+
+@method("subagent.resume")
+def _(rid, params: dict) -> dict:
+    """Resume a per-subagent pause hold set by subagent.pause."""
+    from tools.delegate_tool import resume_subagent
+
+    subagent_id = str(params.get("subagent_id") or "").strip()
+    if not subagent_id:
+        return _err(rid, 4000, "subagent_id required")
+    ok = resume_subagent(subagent_id)
+    return _ok(rid, {"resumed": ok, "subagent_id": subagent_id})
+
+
 # ── Spawn-tree snapshots: TUI-written, disk-persisted ────────────────
 # The TUI is the source of truth for subagent state (it assembles payloads
 # from the event stream).  On turn-complete it posts the final tree here;

@@ -210,11 +210,237 @@ def interrupt_subagent(subagent_id: str) -> bool:
     return True
 
 
+def _running_subagent_ids() -> List[str]:
+    """Ids of subagents whose status is still ``running`` (never completed).
+
+    The kill/pause controls act ONLY on live children; completed/failed
+    records are left untouched.
+    """
+    with _active_subagents_lock:
+        return [
+            sid
+            for sid, r in _active_subagents.items()
+            if r.get("status") == "running"
+        ]
+
+
+def _lookup_running_agent(subagent_id: str):
+    """Return the live child AIAgent for a RUNNING subagent, or None.
+
+    Completed/failed records return None so a control can never act on a
+    child that already finished.
+    """
+    with _active_subagents_lock:
+        record = _active_subagents.get(subagent_id)
+    if not record or record.get("status") != "running":
+        return None
+    return record.get("agent")
+
+
+def soft_kill_subagent(subagent_id: str) -> bool:
+    """Graceful stop: ask a running child to halt at its next boundary.
+
+    Bare ``interrupt()`` (no message) ends the child's turn as soon as its
+    current tool batch clears; the loop does not continue.  Only targets a
+    RUNNING child.  Returns True if one was signalled.
+    """
+    agent = _lookup_running_agent(subagent_id)
+    if agent is None:
+        return False
+    try:
+        agent.interrupt()
+    except Exception as exc:
+        logger.debug("soft_kill_subagent(%s) failed: %s", subagent_id, exc)
+        return False
+    return True
+
+
+def soft_kill_all_subagents() -> int:
+    """Soft-kill EVERY running subagent.  Returns how many were signalled."""
+    count = 0
+    for sid in _running_subagent_ids():
+        if soft_kill_subagent(sid):
+            count += 1
+    return count
+
+
+def _kill_subagent_inflight_processes(subagent_id: str) -> int:
+    """Terminate ONLY the tracked tool subprocesses owned by this child.
+
+    The hard-kill lever.  Every local terminal command a subagent runs is
+    registered in ``process_registry`` under ``task_id == subagent_id``
+    (see ``_run_single_child``: ``child_task_id = _subagent_id``).  We kill
+    exactly those tracked process-trees (psutil recursive terminate) and
+    NOTHING else -- never an untracked system process, never the hermes
+    gateway, never tmux.  Returns the number of process sessions killed.
+    """
+    killed = 0
+    try:
+        from tools.process_registry import process_registry
+    except Exception as exc:
+        logger.debug("hard-kill: process_registry unavailable: %s", exc)
+        return 0
+    try:
+        sessions = process_registry.list_sessions(task_id=subagent_id)
+    except Exception as exc:
+        logger.debug("hard-kill: list_sessions(%s) failed: %s", subagent_id, exc)
+        return 0
+    for sess in sessions:
+        sid = getattr(sess, "id", None)
+        if not sid or getattr(sess, "exited", False):
+            continue
+        try:
+            res = process_registry.kill_process(sid, source="subagent.hard_kill")
+            if isinstance(res, dict) and res.get("status") not in {
+                "not_found",
+                "already_exited",
+            }:
+                killed += 1
+        except Exception as exc:
+            logger.debug("hard-kill: kill_process(%s) failed: %s", sid, exc)
+    return killed
+
+
+def hard_kill_subagent(subagent_id: str) -> Dict[str, Any]:
+    """Force-stop a running child NOW: interrupt once, then kill what blocks it.
+
+    Hard-kill assumes soft already failed, so it does NOT wait: it fires
+    ``interrupt()`` once as a just-in-case (aborts cooperative in-flight
+    tools + ends the turn), then IMMEDIATELY terminates the child's tracked
+    tool subprocesses by ``task_id`` so a wedged terminal command can't hold
+    the worker thread.  Scoped strictly to this child's own processes; never
+    touches hermes/tmux/other sessions.  Only acts on a RUNNING child.
+
+    Returns ``{"found": bool, "interrupted": bool, "procs_killed": int}``.
+    """
+    agent = _lookup_running_agent(subagent_id)
+    if agent is None:
+        return {"found": False, "interrupted": False, "procs_killed": 0}
+    interrupted = False
+    try:
+        agent.interrupt()
+        interrupted = True
+    except Exception as exc:
+        logger.debug("hard_kill_subagent(%s) interrupt failed: %s", subagent_id, exc)
+    procs_killed = _kill_subagent_inflight_processes(subagent_id)
+    return {
+        "found": True,
+        "interrupted": interrupted,
+        "procs_killed": procs_killed,
+    }
+
+
+def hard_kill_all_subagents() -> Dict[str, Any]:
+    """Hard-kill EVERY running subagent.  Returns aggregate counts."""
+    found = 0
+    procs_killed = 0
+    for sid in _running_subagent_ids():
+        res = hard_kill_subagent(sid)
+        if res.get("found"):
+            found += 1
+            procs_killed += int(res.get("procs_killed") or 0)
+    return {"count": found, "procs_killed": procs_killed}
+
+
+def steer_subagent(subagent_id: str, text: str) -> bool:
+    """Inject a message into a running child WITHOUT stopping it.
+
+    Uses ``AIAgent.steer()``: the text is appended to the child's next tool
+    result, so the model reads it before its next iteration -- it does not
+    wait for the child to finish several turns, and the child keeps running.
+    Only targets a RUNNING child.  Returns True if accepted.
+    """
+    if not text or not text.strip():
+        return False
+    agent = _lookup_running_agent(subagent_id)
+    if agent is None:
+        return False
+    try:
+        return bool(agent.steer(text))
+    except Exception as exc:
+        logger.debug("steer_subagent(%s) failed: %s", subagent_id, exc)
+        return False
+
+
+def interrupt_subagent_with_message(subagent_id: str, text: str) -> bool:
+    """Interrupt a child's in-flight tool, hand it a message, and continue.
+
+    Distinct from soft-kill: this ABORTS whatever tool/terminal the child is
+    running right now (via ``interrupt()``'s tool-abort signal) so it stops
+    burning time, AND stashes the message via ``steer()`` so the child picks
+    it up and CONTINUES from there rather than ending.  This is the "stop
+    what you're doing, focus on this, keep going" control.  Only targets a
+    RUNNING child.  Returns True if delivered.
+    """
+    if not text or not text.strip():
+        return False
+    agent = _lookup_running_agent(subagent_id)
+    if agent is None:
+        return False
+    try:
+        # Stash the message FIRST so it survives the interrupt's steer-drop
+        # in clear_interrupt(); then abort the in-flight tool.  The loop
+        # re-primes the steer on the continuation turn.
+        agent.steer(text)
+        agent.interrupt(text)
+    except Exception as exc:
+        logger.debug(
+            "interrupt_subagent_with_message(%s) failed: %s", subagent_id, exc
+        )
+        return False
+    return True
+
+
+def pause_subagent(subagent_id: str) -> bool:
+    """Hold a running child at its next boundary until resumed.
+
+    Distinct from the GLOBAL ``set_spawn_paused`` (which only blocks NEW
+    spawns): this pauses ONE already-running child.  Sets a cooperative
+    hold flag the child checks between iterations.  Only targets a RUNNING
+    child.  Returns True if the flag was set.
+    """
+    agent = _lookup_running_agent(subagent_id)
+    if agent is None:
+        return False
+    try:
+        setattr(agent, "_subagent_hold", True)
+    except Exception as exc:
+        logger.debug("pause_subagent(%s) failed: %s", subagent_id, exc)
+        return False
+    with _active_subagents_lock:
+        record = _active_subagents.get(subagent_id)
+        if record is not None:
+            record["paused"] = True
+    return True
+
+
+def resume_subagent(subagent_id: str) -> bool:
+    """Release a per-child pause hold set by ``pause_subagent``."""
+    with _active_subagents_lock:
+        record = _active_subagents.get(subagent_id)
+    if not record:
+        return False
+    agent = record.get("agent")
+    if agent is None:
+        return False
+    try:
+        setattr(agent, "_subagent_hold", False)
+    except Exception as exc:
+        logger.debug("resume_subagent(%s) failed: %s", subagent_id, exc)
+        return False
+    with _active_subagents_lock:
+        rec = _active_subagents.get(subagent_id)
+        if rec is not None:
+            rec["paused"] = False
+    return True
+
+
 def list_active_subagents() -> List[Dict[str, Any]]:
     """Snapshot of the currently running subagent tree.
 
-    Each record: {subagent_id, parent_id, depth, goal, model, started_at,
-    tool_count, status}.  Safe to call from any thread — returns a copy.
+    Each record: {subagent_id, parent_id, depth, goal, model, session_id,
+    started_at, tool_count, status, paused}.  Safe to call from any thread —
+    returns a copy without the live ``agent`` handle.
     """
     with _active_subagents_lock:
         return [
@@ -1606,6 +1832,8 @@ def _run_single_child(
         _raw_depth = getattr(child, "_delegate_depth", 1)
         _tui_depth = max(0, _raw_depth - 1) if isinstance(_raw_depth, int) else 0
         _parent_sid = getattr(child, "_parent_subagent_id", None)
+        _raw_child_sid = getattr(child, "session_id", None)
+        _child_sid = _raw_child_sid if isinstance(_raw_child_sid, str) else None
         _register_subagent(
             {
                 "subagent_id": _subagent_id,
@@ -1617,6 +1845,12 @@ def _run_single_child(
                     if isinstance(getattr(child, "model", None), str)
                     else None
                 ),
+                # The child runs as its own AIAgent session with its own
+                # session_id + verbatim history persisted to the session DB.
+                # Exposing it lets the /agents overlay pull that history
+                # on-demand (session.history RPC) and show it per-line,
+                # instead of the parent relaying a heavy live token stream.
+                "session_id": _child_sid,
                 "started_at": time.time(),
                 "status": "running",
                 "tool_count": 0,

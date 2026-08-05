@@ -553,7 +553,9 @@ export interface SubagentEventPayload {
   output_tail?: { is_error?: boolean; preview?: string; tool?: string }[]
   output_tokens?: number
   parent_id?: null | string
+  paused?: boolean
   reasoning_tokens?: number
+  session_id?: string
   status?: SubagentStatus
   subagent_id?: string
   summary?: string
@@ -574,6 +576,8 @@ export interface DelegationStatusResponse {
     goal?: string
     model?: null | string
     parent_id?: null | string
+    paused?: boolean
+    session_id?: string
     started_at?: number
     status?: string
     subagent_id?: string
@@ -582,6 +586,21 @@ export interface DelegationStatusResponse {
   max_concurrent_children?: number
   max_spawn_depth?: number
   paused?: boolean
+}
+
+export interface SubagentControlResponse {
+  delivered?: boolean
+  found?: boolean
+  interrupted?: boolean
+  paused?: boolean
+  procs_killed?: number
+  resumed?: boolean
+  subagent_id?: string
+}
+
+export interface SubagentKillAllResponse {
+  count?: number
+  procs_killed?: number
 }
 
 export interface DelegationPauseResponse {

@@ -2,6 +2,8 @@ import { atom } from 'nanostores'
 
 import type { DelegationStatusResponse } from '../gatewayTypes.js'
 
+import { turnController } from './turnController.js'
+
 export interface DelegationState {
   // Last known caps from `delegation.status` RPC.  null until fetched.
   maxConcurrentChildren: null | number
@@ -74,4 +76,28 @@ export const applyDelegationStatus = (r: DelegationStatusResponse | null | undef
   }
 
   patchDelegationState(patch)
+
+  // Merge the authoritative per-child registry fields (session_id, paused,
+  // status) from the `active[]` snapshot onto the live turn-state subagents.
+  // createIfMissing:false so we only enrich rows the event stream already
+  // created — this poll never fabricates a subagent node. This is how the
+  // /agents overlay learns each child's own session_id (for the on-demand
+  // history view) and its individual pause state without the parent relaying
+  // a heavy live stream.
+  if (Array.isArray(r.active)) {
+    for (const a of r.active) {
+      const sid = a?.subagent_id
+      if (!sid) {
+        continue
+      }
+      turnController.upsertSubagent(
+        { goal: a.goal ?? '', subagent_id: sid, task_index: -1 },
+        () => ({
+          ...(typeof a.paused === 'boolean' ? { paused: a.paused } : {}),
+          ...(a.session_id ? { sessionId: a.session_id } : {})
+        }),
+        { createIfMissing: false }
+      )
+    }
+  }
 }

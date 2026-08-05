@@ -12,7 +12,13 @@ import { patchOverlayState } from '../app/overlayStore.js'
 import { $spawnDiff, $spawnHistory, clearDiffPair, type SpawnSnapshot } from '../app/spawnHistoryStore.js'
 import { useTurnSelector } from '../app/turnStore.js'
 import type { GatewayClient } from '../gatewayClient.js'
-import type { DelegationPauseResponse, DelegationStatusResponse, SubagentInterruptResponse } from '../gatewayTypes.js'
+import type {
+  DelegationPauseResponse,
+  DelegationStatusResponse,
+  SubagentControlResponse,
+  SubagentInterruptResponse,
+  SubagentKillAllResponse
+} from '../gatewayTypes.js'
 import { asRpcResult } from '../lib/rpc.js'
 import {
   buildSubagentTree,
@@ -34,6 +40,19 @@ import type { Theme } from '../theme.js'
 import type { SubagentNode, SubagentProgress } from '../types.js'
 
 // ── Types + lookup tables ────────────────────────────────────────────
+
+// One rendered history entry from the child's own session (session.history
+// RPC). Kept loose: the gateway returns role + a text/preview per message.
+interface HistoryMsg {
+  content?: string
+  preview?: string
+  role?: string
+  text?: string
+}
+interface SessionHistoryResponse {
+  count?: number
+  messages?: HistoryMsg[]
+}
 
 type SortMode = 'depth-first' | 'duration-desc' | 'status' | 'tools-desc'
 type FilterMode = 'all' | 'failed' | 'leaf' | 'running'
@@ -428,8 +447,9 @@ function Detail({ id, node, t }: { id?: string; node: SubagentNode; t: Theme }) 
       </Text>
 
       <Box flexDirection="column" marginTop={1}>
-        <Field name="depth" t={t} value={`${item.depth} · ${item.status}`} />
+        <Field name="depth" t={t} value={`${item.depth} · ${item.status}${item.paused ? ' · ⏸ paused' : ''}`} />
         {item.model ? <Field name="model" t={t} value={item.model} /> : null}
+        {item.sessionId ? <Field name="session" t={t} value={item.sessionId} /> : null}
         {item.toolsets?.length ? <Field name="toolsets" t={t} value={item.toolsets.join(', ')} /> : null}
         <Field name="tools" t={t} value={`${item.toolCount ?? 0} (subtree ${agg.totalTools})`} />
         <Field
@@ -712,6 +732,13 @@ export function AgentsOverlay({ gw, initialHistoryIndex = 0, onClose, t }: Agent
   // cc-style view switching: list = full-width row picker, detail = full-width
   // scrollable pane.  Two panes side-by-side in Ink fought Yoga flex.
   const [mode, setMode] = useState<'detail' | 'list'>('list')
+  // Steer/interrupt-message compose box. When set, keystrokes build the text
+  // and Enter sends it to the selected subagent via the matching RPC.
+  const [compose, setCompose] = useState<null | { kind: 'interrupt' | 'steer'; text: string }>(null)
+  // On-demand history for the selected subagent, fetched from its OWN session
+  // (session.history RPC by session_id) rather than the parent relaying a heavy
+  // live stream. Keyed by session_id so switching agents refetches.
+  const [history2, setHistory2] = useState<null | { messages: HistoryMsg[]; sessionId: string }>(null)
 
   const detailScrollRef = useRef<null | ScrollBoxHandle>(null)
   const prevLiveCountRef = useRef(liveSubagents.length)
@@ -799,24 +826,138 @@ export function AgentsOverlay({ gw, initialHistoryIndex = 0, onClose, t }: Agent
     }
   }
 
-  const interrupt = (id: string) => gw.request<SubagentInterruptResponse>('subagent.interrupt', { subagent_id: id })
+  const isRunning = (item: SubagentProgress) => item.status === 'running'
 
-  const killOne = (id: string) =>
+  // ── Soft kill (graceful stop at next boundary) ─────────────────────
+  const softKillOne = (item: SubagentProgress) =>
     guardLive(() => {
-      interrupt(id)
+      if (!isRunning(item)) {
+        return setFlash(`${item.id} already ${item.status} — nothing to kill`)
+      }
+      gw.request<SubagentControlResponse>('subagent.soft_kill', { subagent_id: item.id })
         .then(raw => {
-          const r = asRpcResult<SubagentInterruptResponse>(raw)
-          setFlash(r?.found ? `killing ${id}` : `not found: ${id}`)
+          const r = asRpcResult<SubagentControlResponse>(raw)
+          setFlash(r?.found ? `soft-kill sent · ${item.id} (stops at next step)` : `not running: ${item.id}`)
         })
-        .catch(() => setFlash(`kill failed: ${id}`))
+        .catch(() => setFlash(`soft-kill failed: ${item.id}`))
     })
 
+  const softKillAll = () =>
+    guardLive(() => {
+      gw.request<SubagentKillAllResponse>('subagent.soft_kill_all', {})
+        .then(raw => {
+          const r = asRpcResult<SubagentKillAllResponse>(raw)
+          setFlash(`soft-kill sent to ${r?.count ?? 0} running agent${r?.count === 1 ? '' : 's'}`)
+        })
+        .catch(() => setFlash('soft-kill-all failed'))
+    })
+
+  // ── Hard kill (interrupt + terminate the child's own tool procs NOW) ─
+  const hardKillOne = (item: SubagentProgress) =>
+    guardLive(() => {
+      if (!isRunning(item)) {
+        return setFlash(`${item.id} already ${item.status} — nothing to kill`)
+      }
+      gw.request<SubagentControlResponse>('subagent.hard_kill', { subagent_id: item.id })
+        .then(raw => {
+          const r = asRpcResult<SubagentControlResponse>(raw)
+          if (!r?.found) {
+            return setFlash(`not running: ${item.id}`)
+          }
+          setFlash(`HARD-kill ${item.id} · ${r.procs_killed ?? 0} proc${r.procs_killed === 1 ? '' : 's'} terminated`)
+        })
+        .catch(() => setFlash(`hard-kill failed: ${item.id}`))
+    })
+
+  const hardKillAll = () =>
+    guardLive(() => {
+      gw.request<SubagentKillAllResponse>('subagent.hard_kill_all', {})
+        .then(raw => {
+          const r = asRpcResult<SubagentKillAllResponse>(raw)
+          setFlash(`HARD-kill ${r?.count ?? 0} agent${r?.count === 1 ? '' : 's'} · ${r?.procs_killed ?? 0} procs`)
+        })
+        .catch(() => setFlash('hard-kill-all failed'))
+    })
+
+  // legacy subtree kill (kept for the X keybind) — cooperative interrupt only
+  const interrupt = (id: string) => gw.request<SubagentInterruptResponse>('subagent.interrupt', { subagent_id: id })
   const killSubtree = (node: SubagentNode) =>
     guardLive(() => {
       const ids = [node.item.id, ...descendantIds(node)]
       ids.forEach(id => interrupt(id).catch(() => {}))
-      setFlash(`killing subtree · ${ids.length} node${ids.length === 1 ? '' : 's'}`)
+      setFlash(`interrupting subtree · ${ids.length} node${ids.length === 1 ? '' : 's'}`)
     })
+
+  // ── Steer / interrupt-with-message (compose box drives these) ──────
+  const sendCompose = (kind: 'interrupt' | 'steer', item: SubagentProgress, text: string) =>
+    guardLive(() => {
+      if (!text.trim()) {
+        return setFlash('empty message — nothing sent')
+      }
+      if (!isRunning(item)) {
+        return setFlash(`${item.id} not running — can't ${kind}`)
+      }
+      const method = kind === 'steer' ? 'subagent.steer' : 'subagent.interrupt_message'
+      gw.request<SubagentControlResponse>(method, { subagent_id: item.id, text })
+        .then(raw => {
+          const r = asRpcResult<SubagentControlResponse>(raw)
+          if (!r?.delivered) {
+            return setFlash(`${kind} not delivered: ${item.id}`)
+          }
+          setFlash(kind === 'steer' ? `steer sent → ${item.id} (before next tool)` : `interrupt+msg → ${item.id} (refocus & continue)`)
+        })
+        .catch(() => setFlash(`${kind} failed: ${item.id}`))
+    })
+
+  // ── Per-subagent pause / resume (distinct from global spawn pause) ──
+  const togglePauseOne = (item: SubagentProgress) =>
+    guardLive(() => {
+      if (!isRunning(item)) {
+        return setFlash(`${item.id} not running`)
+      }
+      const method = item.paused ? 'subagent.resume' : 'subagent.pause'
+      gw.request<SubagentControlResponse>(method, { subagent_id: item.id })
+        .then(raw => {
+          const r = asRpcResult<SubagentControlResponse>(raw)
+          const ok = item.paused ? r?.resumed : r?.paused
+          setFlash(ok ? (item.paused ? `resumed ${item.id}` : `paused ${item.id} (holds at next step)`) : `pause toggle failed: ${item.id}`)
+        })
+        .catch(() => setFlash(`pause toggle failed: ${item.id}`))
+    })
+
+  // ── On-demand history from the child's OWN session ─────────────────
+  const loadHistory = (item: SubagentProgress) => {
+    const sid = item.sessionId
+    if (!sid) {
+      return setFlash('no session id for this agent yet')
+    }
+    setFlash(`loading history · ${sid}`)
+    gw.request<SessionHistoryResponse>('session.history', { session_id: sid })
+      .then(raw => {
+        const r = asRpcResult<SessionHistoryResponse>(raw)
+        const msgs = r?.messages ?? []
+        setHistory2({ messages: msgs, sessionId: sid })
+        setFlash(`history · ${msgs.length} message${msgs.length === 1 ? '' : 's'}`)
+      })
+      .catch(() => setFlash(`history load failed: ${sid}`))
+  }
+
+  // ── Reload the selected child's live view + its history snapshot ────
+  // A subagent has no renderer of its own to recycle (it's a worker under the
+  // durable gateway), so the subagent-scope "reload" just REFRESHES the
+  // snapshot data the overlay shows: re-fetch delegation.status (updates every
+  // row's status/session_id/paused) and re-pull this child's history if the
+  // history pane is open. It never touches the child's actual run.
+  const reloadSelected = (item: SubagentProgress) => {
+    gw.request<DelegationStatusResponse>('delegation.status', {})
+      .then(raw => applyDelegationStatus(asRpcResult<DelegationStatusResponse>(raw)))
+      .catch(() => {})
+    if (history2 && item.sessionId && history2.sessionId === item.sessionId) {
+      loadHistory(item) // refresh the open history pane from the live session
+    } else {
+      setFlash(`reloaded ${item.id} view`)
+    }
+  }
 
   const togglePause = () =>
     guardLive(() => {
@@ -853,11 +994,41 @@ export function AgentsOverlay({ gw, initialHistoryIndex = 0, onClose, t }: Agent
   const scrollDetail = (dy: number) => detailScrollRef.current?.scrollBy(dy)
 
   useInput((ch, key) => {
+    // ── Compose mode: building a steer / interrupt message ───────────
+    // While composing, keystrokes edit the buffer; Enter sends, Esc cancels.
+    // Intercept FIRST so control keys below don't fire mid-typing.
+    if (compose) {
+      if (key.escape) {
+        setCompose(null)
+        return setFlash('cancelled')
+      }
+      if (key.return) {
+        const target = selected?.item
+        const { kind, text } = compose
+        setCompose(null)
+        if (target) {
+          sendCompose(kind, target, text)
+        }
+        return
+      }
+      if (key.backspace || key.delete) {
+        return setCompose(c => (c ? { ...c, text: c.text.slice(0, -1) } : c))
+      }
+      if (ch && !key.ctrl && !key.meta) {
+        return setCompose(c => (c ? { ...c, text: c.text + ch } : c))
+      }
+      return
+    }
+
     if (ch === 'q') {
       return closeWithCleanup()
     }
 
     if (key.escape) {
+      if (history2) {
+        setHistory2(null)
+        return setFlash('history closed')
+      }
       return mode === 'detail' ? setMode('list') : closeWithCleanup()
     }
 
@@ -870,16 +1041,56 @@ export function AgentsOverlay({ gw, initialHistoryIndex = 0, onClose, t }: Agent
       return stepHistory(-1)
     }
 
-    if (ch === 'p') {
-      return togglePause()
+    // ── Per-subagent controls (selected, running-only enforced in fns) ─
+    if (ch === 'x' && selected) {
+      return softKillOne(selected.item) // soft kill (graceful)
     }
 
-    if (ch === 'x' && selected) {
-      return killOne(selected.item.id)
+    if (ch === 'K' && selected) {
+      return hardKillOne(selected.item) // hard kill NOW (interrupt + procs)
     }
 
     if (ch === 'X' && selected) {
-      return killSubtree(selected)
+      return killSubtree(selected) // cooperative interrupt of the subtree
+    }
+
+    // Kill-ALL running (completed untouched).
+    if (ch === 'a') {
+      return softKillAll()
+    }
+    if (ch === 'A') {
+      return hardKillAll()
+    }
+
+    // Steer (before next tool) / interrupt-with-message (refocus & continue).
+    if (ch === 't' && selected) {
+      guardLive(() => setCompose({ kind: 'steer', text: '' }))
+      return
+    }
+    if (ch === 'i' && selected) {
+      guardLive(() => setCompose({ kind: 'interrupt', text: '' }))
+      return
+    }
+
+    // Per-subagent pause/resume (distinct from global spawn pause = 'p').
+    if (ch === 'P' && selected) {
+      return togglePauseOne(selected.item)
+    }
+
+    // Load the selected child's own-session history (scrollable).
+    if (ch === 'H' && selected) {
+      return loadHistory(selected.item)
+    }
+
+    // Reload the selected child's view (refresh its snapshot data; the
+    // subagent's actual run is untouched). Subagent-scope analogue of the
+    // main session's Ctrl+R renderer reload.
+    if (ch === 'R' && selected) {
+      return reloadSelected(selected.item)
+    }
+
+    if (ch === 'p') {
+      return togglePause() // global: pause NEW spawns
     }
 
     if (mode === 'detail') {
@@ -982,7 +1193,7 @@ export function AgentsOverlay({ gw, initialHistoryIndex = 0, onClose, t }: Agent
 
   const controlsHint = replayMode
     ? ' · controls locked'
-    : ` · x kill · X subtree · p ${delegation.paused ? 'resume' : 'pause'}`
+    : ` · x soft-kill · K hard-kill · a/A kill-all · t steer · i intr+msg · P ${selected?.item.paused ? 'resume' : 'pause'} · H history · R reload · X subtree · p ${delegation.paused ? 'resume' : 'pause'}-spawns`
 
   // ── Rendering ──────────────────────────────────────────────────────
 
@@ -1041,6 +1252,43 @@ export function AgentsOverlay({ gw, initialHistoryIndex = 0, onClose, t }: Agent
           </NoSelect>
         </Box>
       )}
+
+      {history2 ? (
+        <Box borderColor={t.color.border} borderStyle="round" flexDirection="column" marginTop={1} paddingX={1}>
+          <Text bold color={t.color.primary}>
+            History · {history2.sessionId}{' '}
+            <Text color={t.color.muted}>({history2.messages.length} msg · Esc to close)</Text>
+          </Text>
+          {history2.messages.slice(-40).map((m, i) => {
+            const body = (m.text ?? m.content ?? m.preview ?? '').toString().replace(/\s+/g, ' ').slice(0, 200)
+            const roleColor =
+              m.role === 'user' ? t.color.accent : m.role === 'assistant' ? t.color.primary : t.color.muted
+            return (
+              <Text key={i} wrap="truncate-end">
+                <Text bold color={roleColor}>
+                  {(m.role ?? '?').padEnd(9)}
+                </Text>
+                <Text color={t.color.text}>{body}</Text>
+              </Text>
+            )
+          })}
+        </Box>
+      ) : null}
+
+      {compose ? (
+        <Box borderColor={t.color.accent} borderStyle="round" flexDirection="column" marginTop={1} paddingX={1}>
+          <Text color={t.color.muted}>
+            {compose.kind === 'steer'
+              ? `steer → ${selected?.item.id ?? '?'} (delivered before its next tool run · Enter send · Esc cancel)`
+              : `interrupt+msg → ${selected?.item.id ?? '?'} (aborts current tool, refocuses, continues · Enter send · Esc cancel)`}
+          </Text>
+          <Text color={t.color.text}>
+            {'> '}
+            {compose.text}
+            <Text color={t.color.accent}>▏</Text>
+          </Text>
+        </Box>
+      ) : null}
 
       <Box flexDirection="column" marginTop={1}>
         {flash ? <Text color={t.color.accent}>{flash}</Text> : null}
