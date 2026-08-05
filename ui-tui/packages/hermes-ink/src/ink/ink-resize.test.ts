@@ -47,4 +47,33 @@ describe('Ink resize healing', () => {
 
     ink.unmount()
   })
+
+  it('forceRedraw in alt-screen emits an erase-before-repaint (resize-grade heal)', async () => {
+    const stdout = new FakeTty()
+    const stdin = new FakeTty()
+    const stderr = new FakeTty()
+    const ink = new Ink({
+      exitOnCtrlC: false,
+      patchConsole: false,
+      stderr: stderr as unknown as NodeJS.WriteStream,
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      stdout: stdout as unknown as NodeJS.WriteStream
+    })
+
+    ink.setAltScreenActive(true)
+    ink.render(React.createElement(Text, null, 'hello'))
+    ink.onRender()
+    stdout.chunks = []
+
+    // The auto-healer / Ctrl+L / /redraw path. Previously this emitted only a
+    // bare ERASE_SCREEN with no needsEraseBeforePaint, so the atomic
+    // erase-in-preamble (the part that actually un-garbles a desynced screen)
+    // never ran. Now it must route through the resize-grade recovery.
+    ink.forceRedraw()
+    await tick()
+
+    expect(stdout.chunks.join('')).toContain(ERASE_SCREEN + CURSOR_HOME)
+
+    ink.unmount()
+  })
 })

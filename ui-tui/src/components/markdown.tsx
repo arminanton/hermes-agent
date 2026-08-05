@@ -169,8 +169,27 @@ interface ResolvedLinkProps {
   url: string
 }
 
+// When HERMES_TUI_RAW_URLS=1, render the literal URL as plain (non-OSC-8)
+// underlined text instead of a fetched-title hyperlink. Through an
+// iTerm2 -> SSH -> tmux -> TUI stack the OSC-8 click never reaches the
+// terminal's URL handler AND the raw URL is hidden behind the title label,
+// so the user can neither open nor copy it. This toggle shows the full,
+// copyable URL. (#tui-raw-urls)
+const rawUrlsEnabled = (): boolean => process.env.HERMES_TUI_RAW_URLS === '1'
+
 function ResolvedLink({ fallbackLabel, t, url }: ResolvedLinkProps) {
-  const fetched = useLinkTitle(url)
+  const fetched = useLinkTitle(rawUrlsEnabled() ? '' : url)
+
+  if (rawUrlsEnabled()) {
+    // Show the literal URL (mailto: stripped for readability), no <Link>
+    // wrapper -> no OSC-8 hyperlink, so the characters render verbatim.
+    return (
+      <Text color={t.color.accent} underline>
+        {url.replace(/^mailto:/, '')}
+      </Text>
+    )
+  }
+
   const display = fetched || fallbackLabel || defaultLinkLabel(url)
 
   return (

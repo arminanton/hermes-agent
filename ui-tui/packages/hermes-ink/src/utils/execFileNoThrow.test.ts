@@ -63,19 +63,46 @@ afterEach(() => {
 })
 
 describe.skipIf(onWindows)('execFileNoThrow with daemon-style children', () => {
-  // Skipped because the bug it documents is a forever-hang. Without
-  // resolveOnExit, the 'close' event doesn't fire when the immediate
-  // child has exited but a forked daemon still holds stdio open. Even
-  // SIGTERM at the timeout doesn't help — the daemon survives it. To
-  // verify by hand: remove `it.skip` and watch the test timeout. This
-  // test is here so a reviewer reading the resolveOnExit option knows
-  // *why* every clipboard-tool spawn in osc.ts wires it on.
-  it.skip("(documented hang) without resolveOnExit, await never resolves when daemon inherits stdio", async () => {
-    const pidFile = join(scriptDir, 'sleeper-skip.pid')
-    const result = await execFileNoThrow(daemonScript, [pidFile], { timeout: 300 })
+  // Regression guard for the wl-copy clipboard hang that motivated the
+  // resolveOnExit option. A daemon-style child forks a background process that
+  // inherits stdio, then exits 0 immediately. WITHOUT resolveOnExit the promise
+  // waits on 'close', which cannot fire until the orphaned daemon releases the
+  // inherited pipes — so the call is held hostage to the daemon's whole
+  // lifetime even though a timeout was set. WITH resolveOnExit it settles on the
+  // child's own 'exit', returning promptly regardless of the daemon. This pins
+  // that observable difference so a refactor can't silently revert osc.ts's
+  // clipboard spawns back to the hanging path.
+  //
+  // Previously this contrast lived in a permanently `it.skip`'d "documented
+  // hang" test on the false premise that the no-resolveOnExit path hangs
+  // forever. Measured (2026-07-13, Linux): it does NOT hang — it resolves with
+  // code 124 once the daemon's own `sleep` ends (resolve time tracks the daemon
+  // lifetime: 1s→~1005ms, 2s→~2004ms). Because the daemon self-terminates, the
+  // case is bounded and fully runnable, so it is now a real test.
+  it('without resolveOnExit, the call is held until the inherited-stdio daemon releases the pipes', async () => {
+    // Own 1s daemon (the shared daemonScript sleeps 3s — needlessly slow here).
+    // The call sets timeout:300, but the non-resolveOnExit path settles on
+    // 'close', which only fires after the daemon exits. So the promise resolves
+    // at ~the daemon lifetime, flagged timed-out (code 124), NOT at 300ms. This
+    // is exactly the latency wl-copy exhibited.
+    const holdScript = join(scriptDir, 'hold-1s.sh')
+    const pidFile = join(scriptDir, 'sleeper-hold.pid')
+    writeFileSync(holdScript, '#!/bin/sh\nsleep 1 &\necho $! > "$1"\nexit 0\n')
+    chmodSync(holdScript, 0o755)
+    const start = Date.now()
+
+    const result = await execFileNoThrow(holdScript, [pidFile], { timeout: 300 })
     trackSleeperPid(pidFile)
 
+    const elapsed = Date.now() - start
+
     expect(result.code).toBe(124)
+    // Held past the 300ms timeout, up toward the 1s daemon lifetime — proof the
+    // timeout could NOT settle it early on the 'close' path. Upper-bounded too
+    // so a genuine forever-hang regression (the original fear) still fails loud
+    // instead of silently blowing the suite timeout.
+    expect(elapsed).toBeGreaterThan(700)
+    expect(elapsed).toBeLessThan(2500)
   })
 
   it("settles immediately on 'exit' when resolveOnExit is true, regardless of daemon stdio", async () => {

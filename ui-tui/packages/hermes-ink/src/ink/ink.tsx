@@ -1222,19 +1222,86 @@ export default class Ink {
       return
     }
 
-    this.options.stdout.write(ERASE_SCREEN + CURSOR_HOME)
-
     if (this.altScreenActive) {
+      // Route through the SAME recovery the manual terminal resize uses, which
+      // is the only thing that reliably un-garbles the screen when the diff
+      // model has desynced (cells at wrong columns, footer at a stale row, two
+      // frames composited — the accumulating-corruption class). The previous
+      // implementation wrote a bare ERASE_SCREEN (2J) here and then rendered
+      // WITHOUT setting needsEraseBeforePaint, so the render preamble only
+      // prepended CURSOR_HOME (ink.tsx:974) — a weaker heal than resize, which
+      // (a) prepends ERASE+HOME (or ERASE+SCROLLBACK+HOME/3J on hosts that
+      // reflow alt-screen scrollback) ATOMICALLY inside the BSU/ESU frame so
+      // there is no blank flash, and (b) fires a SECOND reset+erase+repaint on
+      // a 160ms settle so a host that restored stale cells right after the
+      // first paint still converges. Matching that exactly is what makes the
+      // auto-healer able to fix the corruption forceRedraw previously couldn't.
       this.resetFramesForAltScreen()
-    } else {
-      this.repaint()
-      // repaint() resets frontFrame to 0×0. Without this flag the next
-      // frame's blit optimization copies from that empty screen and the
-      // diff sees no content. onRender resets the flag at frame end.
-      this.prevFrameContaminated = true
+      this.needsEraseBeforePaint = true
+      this.onRender()
+
+      if (this.resizeSettleTimer !== null) {
+        clearTimeout(this.resizeSettleTimer)
+        this.resizeSettleTimer = null
+      }
+
+      this.resizeSettleTimer = setTimeout(() => {
+        this.resizeSettleTimer = null
+
+        if (!this.canAltScreenRepaint()) {
+          return
+        }
+
+        this.resetFramesForAltScreen()
+        this.needsEraseBeforePaint = true
+        this.render(this.currentNode!)
+      }, 160)
+
+      return
     }
 
+    this.options.stdout.write(ERASE_SCREEN + CURSOR_HOME)
+    this.repaint()
+    // repaint() resets frontFrame to 0×0. Without this flag the next
+    // frame's blit optimization copies from that empty screen and the
+    // diff sees no content. onRender resets the flag at frame end.
+    this.prevFrameContaminated = true
+
     this.onRender()
+  }
+
+  /**
+   * The strongest recovery short of remounting: fully re-enter the alternate
+   * screen (?1049h), which makes the terminal DISCARD and reallocate its
+   * alt-screen buffer, then erase, reset all frame/cursor state, and schedule a
+   * fresh full render. Use only when forceRedraw() (resize-grade heal) has
+   * failed to converge — the worst corruption class where the terminal's own
+   * alt-screen buffer is polluted (two frames composited, glyphs migrated to
+   * wrong columns that survive an in-buffer erase). Resize deliberately does
+   * NOT re-enter alt-screen (iTerm2 flashes on ?1049h), so this is a strictly
+   * stronger primitive reserved for the escalation path, not the routine timer.
+   * No React teardown: the component tree and gateway session are untouched;
+   * only the terminal-side screen buffer and the renderer's diff model reset.
+   */
+  hardResetScreen(): void {
+    if (!this.options.stdout.isTTY || this.isUnmounted || this.isPaused) {
+      return
+    }
+
+    if (!this.altScreenActive) {
+      // Main-screen has no alt buffer to swap; the ERASE+repaint of
+      // forceRedraw is already the strongest available heal there.
+      this.forceRedraw()
+
+      return
+    }
+
+    if (this.resizeSettleTimer !== null) {
+      clearTimeout(this.resizeSettleTimer)
+      this.resizeSettleTimer = null
+    }
+
+    this.reenterAltScreen()
   }
 
   /**

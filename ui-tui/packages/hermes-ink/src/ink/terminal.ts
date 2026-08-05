@@ -68,10 +68,19 @@ export function isProgressReportingAvailable(): boolean {
  * When supported, BSU/ESU sequences prevent visible flicker during redraws.
  */
 export function isSynchronizedOutputSupported(): boolean {
-  // tmux parses and proxies every byte but doesn't implement DEC 2026.
-  // BSU/ESU pass through to the outer terminal but tmux has already
-  // broken atomicity by chunking. Skip to save 16 bytes/frame + parser work.
+  // tmux: older tmux (< 3.4) parses and proxies every byte but doesn't
+  // implement DEC 2026, and chunk-breaks atomicity, so BSU/ESU there is
+  // pointless or harmful. tmux >= 3.4 DOES support synchronized output and
+  // passes it through when `allow-passthrough` is on. We can't read the tmux
+  // version from env directly, so honor an explicit opt-in:
+  //   HERMES_TUI_TMUX_SYNC=1  -> enable BSU/ESU inside tmux (user confirms
+  //                              tmux >= 3.4 + a passthrough-friendly outer term)
+  // Default stays off for safety on the common old-tmux case.
   if (process.env.TMUX) {
+    const optIn = process.env.HERMES_TUI_TMUX_SYNC
+    if (optIn === '1' || optIn === 'true' || optIn === 'yes') {
+      return true
+    }
     return false
   }
 

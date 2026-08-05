@@ -68,7 +68,11 @@ describe('cursor-drift regression — composer cursorLayout matches Ink renderin
         ).toEqual(expected)
       }
     }
-  })
+    // ~3800 cursorLayout+wrapAnsi comparisons. This is correctness-bound, not
+    // logic-bound: it completes in ~8s on a slow aarch64 Termux box but well
+    // under a second on x86 CI. The default 5s per-test timeout is a hardware
+    // artifact, not a real failure, so give the walk explicit headroom.
+  }, 30_000)
 
   it('keeps cursor on the same row when text exactly fills the terminal width', () => {
     // wrap-ansi does NOT push exact-fill text onto a phantom next line.

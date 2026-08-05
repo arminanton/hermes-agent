@@ -43,6 +43,51 @@ const renderPlain = (node: React.ReactNode) => {
     .map(line => stripAnsi(line).replace(CSI_RE, '').trimEnd())
 }
 
+// Raw render (keeps OSC sequences) so we can assert on OSC-8 hyperlink
+// presence vs the literal-URL toggle.
+const renderRaw = (node: React.ReactNode): string => {
+  const stdout = new PassThrough()
+  const stdin = new PassThrough()
+  const stderr = new PassThrough()
+  let output = ''
+  Object.assign(stdout, { columns: 80, isTTY: false, rows: 24 })
+  Object.assign(stdin, { isTTY: false })
+  Object.assign(stderr, { isTTY: false })
+  stdout.on('data', chunk => {
+    output += chunk.toString()
+  })
+  const instance = renderSync(node, {
+    patchConsole: false,
+    stderr: stderr as NodeJS.WriteStream,
+    stdin: stdin as NodeJS.ReadStream,
+    stdout: stdout as NodeJS.WriteStream
+  })
+  instance.unmount()
+  instance.cleanup()
+  return output
+}
+
+describe('HERMES_TUI_RAW_URLS toggle', () => {
+  const url = 'https://example.com/a/very/long/path?q=1'
+
+  it('emits an OSC-8 hyperlink by default (env unset)', () => {
+    delete process.env.HERMES_TUI_RAW_URLS
+    const raw = renderRaw(React.createElement(Md, { t: DEFAULT_THEME, text: `see ${url} ok` }))
+    expect(raw).toContain(`${ESC}]8;`) // OSC-8 hyperlink opener present
+  })
+
+  it('renders the literal URL with no OSC-8 when HERMES_TUI_RAW_URLS=1', () => {
+    process.env.HERMES_TUI_RAW_URLS = '1'
+    try {
+      const raw = renderRaw(React.createElement(Md, { t: DEFAULT_THEME, text: `see ${url} ok` }))
+      expect(raw).not.toContain(`${ESC}]8;`) // no OSC-8 hyperlink
+      expect(stripAnsi(raw.replace(OSC_RE, ''))).toContain('example.com/a/very/long/path')
+    } finally {
+      delete process.env.HERMES_TUI_RAW_URLS
+    }
+  })
+})
+
 describe('INLINE_RE emphasis', () => {
   it('matches word-boundary italic/bold', () => {
     expect(matches('say _hi_ there')).toEqual(['_hi_'])

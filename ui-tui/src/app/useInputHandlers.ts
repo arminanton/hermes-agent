@@ -1,4 +1,4 @@
-import { forceRedraw, useInput } from '@hermes/ink'
+import { forceRedraw, hardResetScreen, useInput } from '@hermes/ink'
 import { useStore } from '@nanostores/react'
 import { useEffect, useRef } from 'react'
 
@@ -589,6 +589,28 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
       return
     }
 
+    // Ctrl+T — hard screen reset (the strongest paint recovery: re-enters the
+    // alternate screen / ?1049h so the terminal reallocates its alt buffer,
+    // clearing garble a plain redraw can't). Like Ctrl+L this is a RAW key
+    // handler, so it fires INSTANTLY even while a turn is busy — which is the
+    // point: garble usually accumulates WHILE the model works, and a typed
+    // /hardreset would sit in the composer queue or risk interrupting the run.
+    // Touches only the terminal screen + renderer diff model; the React tree and
+    // the live turn are untouched. Ctrl+T chosen because it's fully unbound
+    // (Ctrl+O is voice, Ctrl+L is redraw, Ctrl+H is the backspace byte, Ctrl+Y
+    // is redo, etc.). The /hardreset slash command remains as an alias.
+    if (isAction(key, ch, 't')) {
+      clearSelection()
+      hardResetScreen(terminal.stdout ?? process.stdout)
+
+      return
+    }
+
+    // NOTE: Ctrl+O is intentionally NOT bound to a screen reset here. William
+    // uses Ctrl+O as his voice record key (config voice.record_key: ctrl+o),
+    // so it must fall through to the voice toggle below. Manual hard-reset is
+    // on Ctrl+T (above) and the /hardreset slash command; the automatic auto-
+    // healer (useMainApp.ts) repaints on a keyless timer, so it needs no binding.
     if (isVoiceToggleKey(key, ch, voice.recordKey)) {
       return voiceRecordToggle()
     }

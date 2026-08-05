@@ -102,6 +102,25 @@ export const forceRedraw = (stdout: NodeJS.WriteStream = process.stdout): boolea
 }
 
 /**
+ * Escalation beyond forceRedraw: fully re-enter the alternate screen so the
+ * terminal reallocates its alt-screen buffer, discarding any polluted cells
+ * that survive an in-buffer erase. Reserved for the auto-healer's escalation
+ * path when a plain redraw keeps failing (corruption recurring every few
+ * seconds). Returns false when no Ink instance owns this stdout.
+ */
+export const hardResetScreen = (stdout: NodeJS.WriteStream = process.stdout): boolean => {
+  const instance = instances.get(stdout)
+
+  if (!instance) {
+    return false
+  }
+
+  instance.hardResetScreen()
+
+  return true
+}
+
+/**
  * Mount a component and render the output.
  */
 export const renderSync = (node: ReactNode, options?: NodeJS.WriteStream | RenderOptions): Instance => {

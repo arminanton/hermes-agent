@@ -29,7 +29,10 @@ describe('constants', () => {
   it('documents Ctrl/Cmd+L as non-destructive redraw', () => {
     const hotkey = HOTKEYS.find(([k]) => k.endsWith('+L'))
     expect(hotkey).toBeDefined()
-    expect(hotkey?.[1]).toBe('redraw / repaint')
+    // Label leads with "redraw / repaint" (an optional parenthetical suffix —
+    // e.g. "(in place; tmux-scroll-safe)" — may follow to clarify it's the
+    // non-destructive, scroll-preserving heal vs the Ctrl+T hard-reset).
+    expect(hotkey?.[1]).toMatch(/^redraw \/ repaint/)
   })
 
   it('TOOL_VERBS maps known tools (verb-only, no emoji)', () => {
