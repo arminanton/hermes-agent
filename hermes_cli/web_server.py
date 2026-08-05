@@ -588,6 +588,11 @@ _CATEGORY_MERGE: Dict[str, str] = {
     # with the other messaging-platform config (discord) so it isn't an
     # orphan tab of one field.
     "telegram": "discord",
+    # `humanizer.normalize_file_edits` is the only schema-surfaced humanizer
+    # field (the humanizer plugins' own tuning lives in plugin config, not
+    # here), so fold it into the agent tab rather than spawning a one-field
+    # orphan category.
+    "humanizer": "agent",
 }
 
 # Display order for tabs — unlisted categories sort alphabetically after these.
