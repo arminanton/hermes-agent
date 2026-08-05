@@ -176,6 +176,10 @@ export interface UiState {
   showReasoning: boolean
   indicatorStyle: IndicatorStyle
   sid: null | string
+  // Durable session key (stored_session_id / session_key) — distinct from the
+  // ephemeral renderer `sid`. session.resume looks up by this, so /resync and
+  // any in-place re-attach must use storedSid, not sid.
+  storedSid: null | string
   status: string
   statusBar: StatusBarMode
   streaming: boolean

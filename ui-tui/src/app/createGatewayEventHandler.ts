@@ -21,6 +21,7 @@ import type { GatewayEventHandlerContext } from './interfaces.js'
 import { getOverlayState, patchOverlayState } from './overlayStore.js'
 import { turnController } from './turnController.js'
 import { getUiState, patchUiState } from './uiStore.js'
+import { writeActiveSessionFile } from './useSessionLifecycle.js'
 
 const NO_PROVIDER_RE = /\bNo (?:LLM|inference) provider configured\b/i
 
@@ -420,12 +421,35 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       case 'session.info': {
         const info = ev.payload
 
+        // The gateway rotates the durable session id when compaction (auto or
+        // manual) ends the current SessionDB session and forks a continuation.
+        // `info.session_key` is that live durable id. Re-pin storedSid to it so
+        // /resync, in-place re-attach, and — crucially — the shell exit summary
+        // and status bar all track the CURRENT session, not the id the TUI was
+        // launched/resumed with. Without this, a long session that compacted
+        // several times reports/resumes a stale pre-compaction id whose tail is
+        // a different (older) message than the one on screen. Only act on a real
+        // change to a non-empty id so ordinary session.info refreshes (model
+        // switch, mcp refresh) don't thrash state or the active-session file.
+        const liveKey = String(info.session_key ?? '').trim()
+        const rotated = liveKey && liveKey !== getUiState().storedSid
+
         patchUiState(state => ({
           ...state,
           info,
           status: state.status === 'starting agent…' ? 'ready' : state.status,
-          usage: info.usage ? { ...state.usage, ...info.usage } : state.usage
+          usage: info.usage ? { ...state.usage, ...info.usage } : state.usage,
+          // On a durable-id rotation, the ephemeral renderer sid also follows the
+          // continuation, so keep both aligned; leave them untouched otherwise.
+          ...(rotated ? { sid: liveKey, storedSid: liveKey } : {})
         }))
+
+        if (rotated) {
+          // Mirror the durable id to the file the launcher reads at exit and the
+          // orchestrator reads on renderer recycle, so both re-attach to / print
+          // the live continuation rather than the original launch id.
+          writeActiveSessionFile(liveKey)
+        }
 
         setHistoryItems(prev => prev.map(m => (m.kind === 'intro' ? { ...m, info } : m)))
 

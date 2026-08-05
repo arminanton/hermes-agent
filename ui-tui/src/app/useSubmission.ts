@@ -7,12 +7,13 @@ import type { GatewayClient } from '../gatewayClient.js'
 import type {
   InputDetectDropResponse,
   PromptSubmitResponse,
+  SessionResumeResponse,
   SessionSteerResponse,
   ShellExecResponse
 } from '../gatewayTypes.js'
 import { asRpcResult } from '../lib/rpc.js'
 import { hasInterpolation, INTERPOLATION_RE } from '../protocol/interpolation.js'
-import { PASTE_SNIPPET_RE } from '../protocol/paste.js'
+import { buildSnipExpander } from '../protocol/paste.js'
 import type { Msg } from '../types.js'
 
 import type { ComposerActions, ComposerRefs, ComposerState, PasteSnippet } from './interfaces.js'
@@ -21,19 +22,12 @@ import { getUiState, patchUiState } from './uiStore.js'
 
 const DOUBLE_ENTER_MS = 450
 const SESSION_BUSY_RE = /session busy|waiting for model response/i
+const SESSION_GONE_RE = /session not found/i
 
 const isSessionBusyError = (e: unknown) => e instanceof Error && SESSION_BUSY_RE.test(e.message)
+const isSessionGoneError = (e: unknown) => e instanceof Error && SESSION_GONE_RE.test(e.message)
 
-const expandSnips = (snips: PasteSnippet[]) => {
-  const byLabel = new Map<string, string[]>()
-
-  for (const { label, text } of snips) {
-    const hit = byLabel.get(label)
-    hit ? hit.push(text) : byLabel.set(label, [text])
-  }
-
-  return (value: string) => value.replace(PASTE_SNIPPET_RE, tok => byLabel.get(tok)?.shift() ?? tok)
-}
+const expandSnips = (snips: PasteSnippet[]) => buildSnipExpander(snips)
 
 const spliceMatches = (text: string, matches: RegExpMatchArray[], results: string[]) =>
   matches.reduceRight((acc, m, i) => acc.slice(0, m.index!) + results[i] + acc.slice(m.index! + m[0].length), text)
@@ -107,12 +101,65 @@ export function useSubmission(opts: UseSubmissionOptions) {
         turnController.bufRef = ''
         turnController.interrupted = false
 
+        // On a transient stream/WS drop the gateway can reap the in-memory
+        // session while the renderer still holds its (now-stale) live sid, so
+        // prompt.submit hard-fails "session not found". The durable session
+        // still exists in SQLite, so recover the same way the desktop app does:
+        // resume the stored id to re-register a live session, adopt the fresh
+        // sid, and retry the submit once. Without this the user's message is
+        // simply lost with a red error (the reported dead end after a stall).
+        const recoverAndRetry = (firstErr: Error) => {
+          const storedSid = getUiState().storedSid || sid
+
+          gw.request<SessionResumeResponse>('session.resume', {
+            cols: process.stdout.columns || 80,
+            session_id: storedSid
+          })
+            .then(raw => {
+              const r = asRpcResult<SessionResumeResponse>(raw)
+              const recoveredId = r?.session_id
+
+              if (!recoveredId) {
+                sys(`error: ${firstErr.message}`)
+
+                return patchUiState({ busy: false, status: 'ready' })
+              }
+
+              // Adopt the re-registered live session so subsequent turns and
+              // steers target it, then retry the submit on the recovered id.
+              patchUiState({ sid: recoveredId, storedSid: r?.resumed ?? recoveredId })
+              turnController.pushActivity('reconnected to your session — retrying', 'warn')
+
+              gw.request<PromptSubmitResponse>('prompt.submit', { session_id: recoveredId, text: submitText }).catch(
+                (e2: Error) => {
+                  if (isSessionBusyError(e2)) {
+                    composerActions.enqueue(submitText)
+                    patchUiState({ busy: true, status: 'queued for next turn' })
+
+                    return sys(`queued: "${submitText.slice(0, 50)}${submitText.length > 50 ? '…' : ''}"`)
+                  }
+
+                  sys(`error: ${e2.message}`)
+                  patchUiState({ busy: false, status: 'ready' })
+                }
+              )
+            })
+            .catch((resumeErr: Error) => {
+              sys(`error: ${firstErr.message} (recovery failed: ${resumeErr.message})`)
+              patchUiState({ busy: false, status: 'ready' })
+            })
+        }
+
         gw.request<PromptSubmitResponse>('prompt.submit', { session_id: sid, text: submitText }).catch((e: Error) => {
           if (isSessionBusyError(e)) {
             composerActions.enqueue(submitText)
             patchUiState({ busy: true, status: 'queued for next turn' })
 
             return sys(`queued: "${submitText.slice(0, 50)}${submitText.length > 50 ? '…' : ''}"`)
+          }
+
+          if (isSessionGoneError(e)) {
+            return recoverAndRetry(e)
           }
 
           sys(`error: ${e.message}`)

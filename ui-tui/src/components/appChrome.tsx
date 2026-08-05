@@ -182,8 +182,15 @@ function ctxBarColor(pct: number | undefined, t: Theme) {
   return t.color.statusGood
 }
 
-function statusSessionCountLabel(count: number) {
-  return `${count} ${count === 1 ? 'session' : 'sessions'}`
+function statusSessionCountLabel(count: number, sessionId?: string) {
+  const base = `${count} ${count === 1 ? 'session' : 'sessions'}`
+  const sid = String(sessionId ?? '').trim()
+
+  // Surface the live durable session id alongside the count so the user can see
+  // — and copy — exactly which session is active. This id tracks compaction
+  // rotations (storedSid is re-pinned on every session.info), so it always
+  // matches what `--resume` will land on and what the shell exit summary prints.
+  return sid ? `${base} (${sid})` : base
 }
 
 // Colour a credits notice by its level. The notice TEXT already carries its
@@ -420,8 +427,11 @@ export function StatusRule({
   notice,
   usage,
   bgCount,
+  cmpWarnThreshold = DEFAULT_CMP_WARN_THRESHOLD,
+  cmpAlertThreshold = DEFAULT_CMP_ALERT_THRESHOLD,
   lastTurnEndedAt,
   liveSessionCount,
+  sessionId,
   sessionStartedAt,
   showCost,
   turnStartedAt,
@@ -496,7 +506,7 @@ export function StatusRule({
     return false
   }
 
-  const sessionCountText = liveSessionCount > 0 ? statusSessionCountLabel(liveSessionCount) : ''
+  const sessionCountText = liveSessionCount > 0 ? statusSessionCountLabel(liveSessionCount, sessionId) : ''
   const compressions = typeof usage.compressions === 'number' ? usage.compressions : 0
   const costText = typeof usage.cost_usd === 'number' ? `$${usage.cost_usd.toFixed(4)}` : ''
   // Dev-only readout (HERMES_DEV_CREDITS). The server omits the key entirely unless the
@@ -780,6 +790,7 @@ interface StatusRuleProps {
   modelReasoningEffort?: string
   indicatorStyle?: IndicatorStyle
   notice?: Notice | null
+  sessionId?: string
   sessionStartedAt?: null | number
   showCost: boolean
   status: string

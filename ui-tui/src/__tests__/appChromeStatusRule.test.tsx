@@ -133,6 +133,56 @@ describe('StatusRule session count click target', () => {
     expect(openSwitcher).toHaveBeenCalledOnce()
   })
 
+  it('shows the live session id in parens next to the count (tracks compaction rotation)', () => {
+    const element = StatusRule({
+      bgCount: 0,
+      busy: false,
+      cols: 160,
+      cwdLabel: '~/repo',
+      liveSessionCount: 1,
+      model: 'opus-4.8',
+      onSessionCountClick: vi.fn(),
+      sessionId: '20260709_190601_373ced',
+      sessionStartedAt: null,
+      showCost: false,
+      status: 'ready',
+      statusColor: DEFAULT_THEME.color.ok,
+      t: DEFAULT_THEME,
+      turnStartedAt: null,
+      usage: { total: 0 },
+      voiceLabel: ''
+    })
+
+    const rendered = textContent(element)
+    // The id is surfaced verbatim in parens so the user can read/copy exactly
+    // which session is live — and it's the same id --resume will land on.
+    expect(rendered).toContain('1 session (20260709_190601_373ced)')
+  })
+
+  it('omits the parens when no session id is available', () => {
+    const element = StatusRule({
+      bgCount: 0,
+      busy: false,
+      cols: 160,
+      cwdLabel: '~/repo',
+      liveSessionCount: 1,
+      model: 'opus-4.8',
+      onSessionCountClick: vi.fn(),
+      sessionStartedAt: null,
+      showCost: false,
+      status: 'ready',
+      statusColor: DEFAULT_THEME.color.ok,
+      t: DEFAULT_THEME,
+      turnStartedAt: null,
+      usage: { total: 0 },
+      voiceLabel: ''
+    })
+
+    const rendered = textContent(element)
+    expect(rendered).toContain('1 session')
+    expect(rendered).not.toContain('(')
+  })
+
   it('keeps status + model and drops the low-value tail on a narrow terminal', () => {
     const element = StatusRule({
       bgCount: 0,

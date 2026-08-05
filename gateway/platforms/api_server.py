@@ -1528,7 +1528,12 @@ class APIServerAdapter(BasePlatformAdapter):
         if err:
             return err
         db = self._ensure_session_db()
-        resolved_id = db.resolve_resume_session_id(session_id)
+        # REST message reads want the CURRENT state of a chat: a routed/root id
+        # that has since auto-compressed should surface the latest continuation,
+        # so opt into tip-following here (unlike explicit --resume/<resume>).
+        resolved_id = db.resolve_resume_session_id(
+            session_id, follow_compression_tip=True
+        )
         messages = db.get_messages(resolved_id)
         return web.json_response({
             "object": "list",

@@ -1598,4 +1598,71 @@ describe('createGatewayEventHandler', () => {
       expect(openExternalUrlMock).not.toHaveBeenCalled()
     })
   })
+
+  // ── session.info durable-id rotation (resume-mismatch fix) ─────────────
+  // When compaction forks a continuation, the gateway emits session.info with
+  // the NEW durable id in `session_key`. The renderer must re-pin storedSid/sid
+  // and mirror the new id to HERMES_TUI_ACTIVE_SESSION_FILE, so the shell exit
+  // summary + status bar track the latest segment (not the launch id). This is
+  // the root cause of "close prints id A, --resume A lands on an older tail".
+  describe('session.info durable session-id rotation', () => {
+    const baseInfo = { model: 'opus', skills: {}, tools: {} }
+    let activeFile: string
+    const prevEnv = process.env.HERMES_TUI_ACTIVE_SESSION_FILE
+
+    beforeEach(() => {
+      const dir = mkdtempSync(join(tmpdir(), 'hermes-tui-active-'))
+      activeFile = join(dir, 'active.json')
+      process.env.HERMES_TUI_ACTIVE_SESSION_FILE = activeFile
+    })
+
+    afterEach(() => {
+      if (prevEnv === undefined) {
+        delete process.env.HERMES_TUI_ACTIVE_SESSION_FILE
+      } else {
+        process.env.HERMES_TUI_ACTIVE_SESSION_FILE = prevEnv
+      }
+    })
+
+    it('re-pins storedSid/sid and writes the active-session file when session_key rotates', () => {
+      patchUiState({ sid: 'sid-A', storedSid: 'sid-A' })
+      const onEvent = createGatewayEventHandler(buildCtx([]))
+
+      onEvent({ payload: { ...baseInfo, session_key: 'sid-B-continuation' }, type: 'session.info' } as any)
+
+      // UI state follows the continuation…
+      expect(getUiState().storedSid).toBe('sid-B-continuation')
+      expect(getUiState().sid).toBe('sid-B-continuation')
+      // …and the file the launcher reads at exit is updated to match, so the
+      // shell "resume with --resume <id>" epilogue points at the live segment.
+      expect(existsSync(activeFile)).toBe(true)
+      expect(JSON.parse(readFileSync(activeFile, 'utf-8'))).toEqual({ session_id: 'sid-B-continuation' })
+    })
+
+    it('does NOT thrash state or the file when session_key is unchanged (model switch / mcp refresh)', () => {
+      patchUiState({ sid: 'sid-A', storedSid: 'sid-A' })
+      const onEvent = createGatewayEventHandler(buildCtx([]))
+
+      // A session.info with the SAME durable id (e.g. after a /model switch)
+      onEvent({ payload: { ...baseInfo, model: 'sonnet', session_key: 'sid-A' }, type: 'session.info' } as any)
+
+      expect(getUiState().storedSid).toBe('sid-A')
+      expect(getUiState().sid).toBe('sid-A')
+      // No rotation → no write to the active-session file.
+      expect(existsSync(activeFile)).toBe(false)
+      // …but the info payload itself still updated (model changed).
+      expect(getUiState().info?.model).toBe('sonnet')
+    })
+
+    it('ignores an empty/missing session_key (never blanks a good storedSid)', () => {
+      patchUiState({ sid: 'sid-A', storedSid: 'sid-A' })
+      const onEvent = createGatewayEventHandler(buildCtx([]))
+
+      onEvent({ payload: { ...baseInfo }, type: 'session.info' } as any)
+      onEvent({ payload: { ...baseInfo, session_key: '' }, type: 'session.info' } as any)
+
+      expect(getUiState().storedSid).toBe('sid-A')
+      expect(existsSync(activeFile)).toBe(false)
+    })
+  })
 })

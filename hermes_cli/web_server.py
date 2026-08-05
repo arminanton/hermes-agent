@@ -7375,7 +7375,10 @@ async def get_session_messages(session_id: str, profile: Optional[str] = None):
         sid = db.resolve_session_id(session_id)
         if not sid:
             raise HTTPException(status_code=404, detail="Session not found")
-        sid = db.resolve_resume_session_id(sid)
+        # REST message reads want the CURRENT state of a chat: follow the
+        # compression tip so an auto-compressed root surfaces its latest
+        # continuation (explicit --resume/<resume> intentionally does not).
+        sid = db.resolve_resume_session_id(sid, follow_compression_tip=True)
         messages = db.get_messages(sid)
         return {"session_id": sid, "messages": messages}
     finally:

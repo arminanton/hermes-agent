@@ -219,6 +219,51 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
+    // The strongest PAINT recovery: /redraw repaints in place (resize-grade
+    // erase now), but when the terminal's own alt-screen buffer is polluted —
+    // glyphs migrated to wrong columns, two frames composited, corruption that
+    // recurs every few seconds and only a manual window resize clears — an
+    // in-buffer erase can't win. /hardreset re-enters the alternate screen
+    // (?1049h) so the terminal DISCARDS and reallocates that buffer, the one
+    // thing a manual resize does that /redraw didn't. The React tree and the
+    // gateway session are untouched (no turn teardown); only the terminal
+    // screen buffer and the renderer's diff model reset.
+    help: 'hard-reset the screen buffer (fixes garble a plain redraw cannot)',
+    name: 'hardreset',
+    run: (_arg, ctx) => {
+      hardResetScreen(process.stdout)
+      ctx.transcript.sys('screen hard-reset')
+    }
+  },
+
+  {
+    // /redraw only re-PAINTS the current (possibly drifted) rows. /resync goes
+    // deeper: it re-fetches the session from the gateway's durable state.db
+    // (history + the live in-flight turn) and rebuilds the transcript from that
+    // ground truth — the same restore /resume does, but for the CURRENT session
+    // so the running turn is NOT torn down (resumeById only closes the previous
+    // session when switching to a DIFFERENT sid; same-sid re-attaches in place).
+    // Use this when the transcript has detached from the real run: stale/looped
+    // rows, a stuck stall notice, or messages that vanished while the agent kept
+    // working. forceRedraw fixes corrupted PAINT; /resync fixes corrupted STATE.
+    help: 're-sync transcript from the gateway (fix a drifted/stuck view)',
+    name: 'resync',
+    run: (_arg, ctx) => {
+      // session.resume looks up by the DURABLE session key (stored_session_id /
+      // session_key), NOT the ephemeral renderer sid — passing ctx.sid 404s
+      // ("session not found"). Use storedSid; fall back to sid only if unset.
+      const resumeKey = ctx.ui.storedSid ?? ctx.sid
+
+      if (!resumeKey) {
+        return ctx.transcript.sys('no active session to re-sync')
+      }
+
+      ctx.transcript.sys('re-syncing transcript from gateway…')
+      ctx.session.resumeById(resumeKey)
+    }
+  },
+
+  {
     help: 'show live session info',
     name: 'status',
     run: (_arg, ctx) => {
@@ -581,19 +626,31 @@ export const coreCommands: SlashCommand[] = [
     help: 'inject a message after the next tool call (no interrupt)',
     name: 'steer',
     run: (arg, ctx) => {
-      const payload = arg?.trim() ?? ''
+      const payload = ctx.composer.expandPaste(arg?.trim() ?? '')
 
       if (!payload) {
         return ctx.transcript.sys('usage: /steer <prompt>')
       }
 
       // If the agent isn't running, fall back to the queue so the user's
-      // message isn't lost — identical semantics to the gateway handler.
+      // message isn't lost — identical semantics to the gateway handler. But
+      // when the renderer thinks it's idle only because a stream/WS drop marked
+      // the turn stalled (the wedge-watchdog path), the durable session may
+      // still be live in the gateway. Re-attach to it first so the queued
+      // message actually lands on a real turn instead of a client-side queue
+      // that never drains — the "steer queued / no active turn" dead end.
       if (!ctx.ui.busy || !ctx.sid) {
         ctx.composer.enqueue(payload)
         ctx.transcript.sys(
           `no active turn — queued for next: "${payload.slice(0, 50)}${payload.length > 50 ? '…' : ''}"`
         )
+
+        const resumeKey = ctx.ui.storedSid ?? ctx.sid
+
+        if (resumeKey) {
+          ctx.transcript.sys('re-attaching to your session so the queued message can land…')
+          ctx.session.resumeById(resumeKey)
+        }
 
         return
       }
@@ -611,7 +668,97 @@ export const coreCommands: SlashCommand[] = [
             }
           })
         )
-        .catch(ctx.guardedErr)
+        .catch((e: unknown) => {
+          // The gateway reaped the in-memory session on a transient drop while
+          // the renderer still shows it busy. Recover the durable session and
+          // queue the steer so it lands on the reconnected turn instead of
+          // surfacing a bare "session not found".
+          const message = e instanceof Error ? e.message : String(e)
+
+          if (/session not found/i.test(message)) {
+            const resumeKey = ctx.ui.storedSid ?? ctx.sid
+
+            if (resumeKey) {
+              ctx.composer.enqueue(payload)
+              ctx.transcript.sys('reconnecting to your session — your steer is queued to land on it')
+              ctx.session.resumeById(resumeKey)
+
+              return
+            }
+          }
+
+          ctx.guardedErr(e)
+        })
+    }
+  },
+
+  {
+    help: 'open a tool call\'s full content in the pager (default: latest)',
+    name: 'inspect',
+    usage: '/inspect [n]',
+    run: (arg, ctx) => {
+      // Mouse-off / Option-drag fallback for the click-to-inspect affordance
+      // on tool-call rows. Collects the tool-call trail lines currently on
+      // screen — the live turn first (turnStore: completed trail + any
+      // in-flight tools), then the most recent persisted trail message from
+      // the transcript — and opens the Nth (1-based, default = latest) in the
+      // shared pager. Each line already carries the captured Args/Result block
+      // (capped at VERBOSE_TRAIL_MAX_CHARS by the OOM guard); the pager shows
+      // it in full, scrollable.
+      const turn = getTurnState()
+      const liveTools = turn.tools.map(tool => {
+        const fullCtx = tool.contextFull || tool.context || ''
+        const ctxPart = fullCtx ? `(${fullCtx})` : ''
+        const argsPart = tool.verboseArgs ? `\nArgs:\n${tool.verboseArgs}` : ''
+
+        return `${tool.name}${ctxPart}${argsPart}`.trim()
+      })
+
+      // Completed tool lines this turn live in streamSegments[*].tools and
+      // streamPendingTools (not turnTrail, which only holds active/transient
+      // rows). Gather every source the renderer shows, in visual order:
+      // finished segments → pending → active-turn trail → in-flight tools.
+      const segmentTools = turn.streamSegments.flatMap(seg => seg.tools ?? [])
+      let lines: string[] = [
+        ...segmentTools,
+        ...turn.streamPendingTools,
+        ...turn.turnTrail,
+        ...liveTools
+      ].filter(line => line && line !== 'analyzing tool output…' && !line.startsWith('drafting '))
+
+      // Idle between turns: turnStore is reset, so fall back to the newest
+      // transcript message that carries a tool trail.
+      if (!lines.length) {
+        const history = ctx.local.getHistoryItems()
+
+        for (let i = history.length - 1; i >= 0; i--) {
+          const msgTools = history[i]?.tools
+
+          if (msgTools?.length) {
+            lines = [...msgTools]
+            break
+          }
+        }
+      }
+
+      if (!lines.length) {
+        return ctx.transcript.sys('no tool calls to inspect yet')
+      }
+
+      const raw = arg.trim()
+      const n = raw ? parseInt(raw, 10) : lines.length
+
+      if (raw && (!Number.isInteger(n) || n < 1 || n > lines.length)) {
+        return ctx.transcript.sys(`/inspect: pick 1–${lines.length} (found ${lines.length} tool call(s))`)
+      }
+
+      const chosen = lines[n - 1] ?? lines[lines.length - 1]!
+      // Title = a SIMPLE tool label (e.g. "Terminal tool call") so the pager
+      // header does NOT duplicate the full command that the body already shows.
+      const firstLine = chosen.split('\n')[0] ?? 'Tool call'
+      const title = toolCallInspectTitle(firstLine)
+
+      inspectToolCall(`${title}  (${n}/${lines.length})`, chosen)
     }
   },
 

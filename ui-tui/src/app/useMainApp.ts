@@ -1051,7 +1051,7 @@ export function useMainApp(gw: GatewayClient) {
       gw.off('event', handler)
       gw.off('exit', exitHandler)
     }
-  }, [gw, sys])
+  }, [gw, sys, session])
 
   useLongRunToolCharms()
 

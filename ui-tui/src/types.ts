@@ -1,5 +1,6 @@
 export interface ActiveTool {
   context?: string
+  contextFull?: string
   id: string
   name: string
   verboseArgs?: string
@@ -37,7 +38,9 @@ export interface SubagentProgress {
   outputTail?: SubagentOutputEntry[]
   outputTokens?: number
   parentId: null | string
+  paused?: boolean
   reasoningTokens?: number
+  sessionId?: string
   startedAt?: number
   status: SubagentStatus
   summary?: string
@@ -157,6 +160,13 @@ export interface SessionInfo {
   profile_name?: string
   reasoning_effort?: string
   release_date?: string
+  // Canonical persisted SessionDB id for the live conversation lineage. The
+  // gateway rotates this when auto/manual compaction ends the current session
+  // and forks a continuation, so it is the source of truth for "which session
+  // id will --resume land on". The renderer re-pins storedSid + the
+  // active-session file to this on every session.info (see createGatewayEventHandler),
+  // and the status bar surfaces it so the shown id tracks compaction rotations.
+  session_key?: string
   service_tier?: string
   skills: Record<string, string[]>
   system_prompt?: string

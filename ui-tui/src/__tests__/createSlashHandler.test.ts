@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createSlashHandler } from '../app/createSlashHandler.js'
 import { getOverlayState, resetOverlayState } from '../app/overlayStore.js'
 import { DASHBOARD_EXIT_DISABLED_MESSAGE, DASHBOARD_UPDATE_DISABLED_MESSAGE } from '../app/slash/commands/core.js'
+import { patchTurnState, resetTurnState } from '../app/turnStore.js'
 import { getUiState, patchUiState, resetUiState } from '../app/uiStore.js'
 import { TUI_SESSION_MODEL_FLAG } from '../domain/slash.js'
 
@@ -25,6 +26,7 @@ describe('createSlashHandler', () => {
   beforeEach(() => {
     resetOverlayState()
     resetUiState()
+    resetTurnState()
     envState.dashboardTuiMode = false
   })
 
@@ -823,6 +825,114 @@ describe('createSlashHandler', () => {
       expect(ctx.transcript.sys).toHaveBeenCalledWith('title: demo title')
     })
   })
+
+  it('/steer with no active turn re-attaches to the durable session', () => {
+    // After a stream/WS drop the wedge watchdog marks the turn idle, but the
+    // durable session may still be live. The steer must re-attach (resumeById)
+    // so the queued message lands on a real turn instead of a dead client queue.
+    patchUiState({ busy: false, sid: null, storedSid: 'stored-123' })
+    const ctx = buildCtx()
+
+    createSlashHandler(ctx)('/steer keep going')
+
+    expect(ctx.composer.enqueue).toHaveBeenCalledWith('keep going')
+    expect(ctx.session.resumeById).toHaveBeenCalledWith('stored-123')
+  })
+
+  it('/steer recovers from "session not found" by resuming + queueing', async () => {
+    // The gateway reaped the in-memory session on a transient drop while the
+    // renderer still shows it busy. Recover the durable session and queue the
+    // steer instead of surfacing a bare "session not found".
+    patchUiState({ busy: true, sid: 'sid-live', storedSid: 'stored-123' })
+    const rpc = vi.fn(() => Promise.reject(new Error('session not found')))
+    const ctx = buildCtx({ gateway: { ...buildGateway(), rpc } })
+
+    createSlashHandler(ctx)('/steer keep going')
+
+    expect(rpc).toHaveBeenCalledWith('session.steer', { session_id: 'sid-live', text: 'keep going' })
+    await vi.waitFor(() => {
+      expect(ctx.composer.enqueue).toHaveBeenCalledWith('keep going')
+      expect(ctx.session.resumeById).toHaveBeenCalledWith('stored-123')
+    })
+  })
+
+  it('/steer on a healthy busy turn still queues via session.steer (no regression)', async () => {
+    patchUiState({ busy: true, sid: 'sid-live', storedSid: 'stored-123' })
+    const rpc = vi.fn(() => Promise.resolve({ status: 'queued' }))
+    const ctx = buildCtx({ gateway: { ...buildGateway(), rpc } })
+
+    createSlashHandler(ctx)('/steer keep going')
+
+    expect(rpc).toHaveBeenCalledWith('session.steer', { session_id: 'sid-live', text: 'keep going' })
+    expect(ctx.session.resumeById).not.toHaveBeenCalled()
+    await vi.waitFor(() => {
+      expect(ctx.transcript.sys).toHaveBeenCalledWith(expect.stringContaining('steer queued'))
+    })
+  })
+
+  it('/inspect opens the latest live tool call in the pager with full content', () => {
+    patchTurnState({
+      turnTrail: [
+        'Read File("/mnt/a/short…") ✓',
+        'Terminal("cd /very/long/path/that/gets/truncated/in/the/row…") (2.1s) :: Args:\ncd /very/long/path && ls -la ✓'
+      ]
+    })
+    const ctx = buildCtx()
+
+    expect(createSlashHandler(ctx)('/inspect')).toBe(true)
+
+    const pager = getOverlayState().pager
+    expect(pager).not.toBeNull()
+    // Default = latest (2nd) tool call; body carries the full untruncated command.
+    expect(pager!.title).toContain('Terminal')
+    expect(pager!.title).toContain('(2/2)')
+    expect(pager!.lines.join('\n')).toContain('cd /very/long/path && ls -la')
+  })
+
+  it('/inspect <n> opens the Nth tool call and rejects out-of-range', () => {
+    patchTurnState({
+      turnTrail: ['Read File("/a…") ✓', 'Patch("/b…") ✓', 'Terminal("/c…") ✓']
+    })
+
+    const ctx1 = buildCtx()
+    expect(createSlashHandler(ctx1)('/inspect 1')).toBe(true)
+    expect(getOverlayState().pager!.title).toContain('Read File')
+    expect(getOverlayState().pager!.title).toContain('(1/3)')
+
+    resetOverlayState()
+    const ctx2 = buildCtx()
+    expect(createSlashHandler(ctx2)('/inspect 9')).toBe(true)
+    // Out of range: no pager, a helpful message instead.
+    expect(getOverlayState().pager).toBeNull()
+    expect(ctx2.transcript.sys).toHaveBeenCalledWith(expect.stringContaining('pick 1'))
+  })
+
+  it('/inspect falls back to the newest transcript trail message when the turn is idle', () => {
+    // turnStore empty (idle between turns); the command scans history backwards.
+    const ctx = buildCtx({
+      local: {
+        ...buildLocal(),
+        getHistoryItems: vi.fn(() => [
+          { role: 'system', kind: 'trail', text: '', tools: ['Read File("/old…") ✓'] },
+          { role: 'assistant', text: 'hi' },
+          { role: 'system', kind: 'trail', text: '', tools: ['Terminal("/newest…") ✓'] }
+        ]) as any
+      }
+    })
+
+    expect(createSlashHandler(ctx)('/inspect')).toBe(true)
+    const pager = getOverlayState().pager
+    expect(pager).not.toBeNull()
+    expect(pager!.title).toContain('Terminal')
+  })
+
+  it('/inspect with no tool calls anywhere reports nothing to inspect', () => {
+    const ctx = buildCtx()
+
+    expect(createSlashHandler(ctx)('/inspect')).toBe(true)
+    expect(getOverlayState().pager).toBeNull()
+    expect(ctx.transcript.sys).toHaveBeenCalledWith(expect.stringContaining('no tool calls'))
+  })
 })
 
 const buildCtx = (overrides: Partial<Ctx> = {}): Ctx => ({
@@ -838,6 +948,7 @@ const buildCtx = (overrides: Partial<Ctx> = {}): Ctx => ({
 
 const buildComposer = () => ({
   enqueue: vi.fn(),
+  expandPaste: (text: string) => text,
   hasSelection: false,
   paste: vi.fn(),
   queueRef: { current: [] as string[] },

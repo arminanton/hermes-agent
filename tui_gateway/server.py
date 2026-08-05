@@ -2439,8 +2439,12 @@ def _sync_session_key_after_compress(
     *,
     clear_pending_title: bool = True,
     restart_slash_worker: bool = True,
-) -> None:
+) -> bool:
     """Re-anchor session_key when AIAgent._compress_context rotates session_id.
+
+    Returns ``True`` when the session id actually rotated (so callers can emit a
+    ``session.info`` telling the renderer to re-pin its durable session id /
+    active-session file to the continuation), ``False`` when nothing changed.
 
     AIAgent._compress_context ends the current SessionDB session and creates
     a new continuation session, rotating ``agent.session_id``.  The TUI
@@ -4492,6 +4496,18 @@ def _(rid, params: dict) -> dict:
             # so proceed into the lazy branch with empty history; the live mirror
             # streams the whole turn anyway and the row exists by upgrade time.
             found = {}
+        elif _find_live_session_by_key(target) is not None:
+            # No DB row yet, but the gateway is STILL HOLDING this session live
+            # in memory. This is the orchestrator renderer-recycle case: a brand
+            # new TUI (composer up, no prompt typed yet) defers its DB row until
+            # the first turn, so a renderer that dies before any prompt has a
+            # live in-memory session but no persisted row. Without this branch
+            # the resume hard-failed "session not found" and the respawned
+            # renderer cold-started a blank session — losing the live session the
+            # gateway was still anchoring. Fall through with empty `found`; the
+            # fast path below (_find_live_session_by_key) reuses the live session
+            # and rebinds its transport to the reconnecting renderer.
+            found = {}
         else:
             return _err(rid, 4007, "session not found")
 
@@ -4507,13 +4523,62 @@ def _(rid, params: dict) -> dict:
     # stale parent. Skipped for lazy watch windows, which intentionally attach
     # to the exact child branch they were opened on.
     if found and not is_truthy_value(params.get("lazy", False)):
+        requested_id = target
+        # Empty-head redirect ONLY (follow_compression_tip defaults False): if
+        # the requested id is the rotated-out head of a compression chain whose
+        # own message rows moved to a continuation, land on the descendant that
+        # holds the transcript. A requested id that has its OWN messages stays
+        # put. This is the fix for the resume-lands-on-wrong-segment report: an
+        # explicit --resume/<resume> of a specific historical segment must load
+        # THAT segment, not be teleported to the newest leaf of the whole
+        # lineage (potentially days and several unrelated topics downstream).
         try:
-            tip = db.resolve_resume_session_id(target)
+            resolved = db.resolve_resume_session_id(target)
         except Exception:
-            tip = target
-        if tip and tip != target:
-            target = tip
+            resolved = target
+        if resolved and resolved != target:
+            target = resolved
             found = db.get_session(target) or found
+        # Live-session reuse still needs the COMPRESSION TIP, but only to locate
+        # a session that is STILL HELD LIVE in gateway memory under a rotated
+        # key. Auto-compression can end the live session mid-conversation and
+        # re-anchor the in-memory session on a fresh continuation id; a resume
+        # on the pre-rotation id must reattach to that live session (the desktop
+        # "I came back and the reply isn't there" case) instead of cold-loading
+        # a stale sibling. Compute the tip for the live lookup below WITHOUT
+        # moving the cold-load target onto it: an offline chain never reuses a
+        # live session, so it correctly stays on the requested/empty-head id.
+        try:
+            live_tip = db.get_compression_tip(target)
+        except Exception:
+            live_tip = target
+        # Resume diagnostics: a parent id in a compaction chain redirects to the
+        # descendant leaf that actually holds the post-compression turns. When a
+        # user reports "resume loaded blank", the question is always "which leaf
+        # did it resolve to, and did that leaf have any messages?" That answer
+        # used to require manual state.db archaeology. Log it once at resolution
+        # time so the next incident is a one-line grep, not a DB dig. Best-effort
+        # and never allowed to break resume.
+        try:
+            resolved_count = db.message_count(target)
+        except Exception:
+            resolved_count = None
+        if target != requested_id:
+            logger.info(
+                "resume: %s redirected to compaction descendant %s (%s messages)",
+                requested_id,
+                target,
+                resolved_count if resolved_count is not None else "?",
+            )
+        if resolved_count == 0:
+            logger.warning(
+                "resume: resolved session %s has zero message rows, transcript "
+                "will render empty (requested=%s)",
+                target,
+                requested_id,
+            )
+    else:
+        live_tip = target
 
     profile_resume_cwd = str(found.get("cwd") or "").strip() or _profile_configured_cwd(
         profile_home
@@ -4537,8 +4602,14 @@ def _(rid, params: dict) -> dict:
         return payload
 
     # Fast path: if the session is already live, reuse it under the lock.
+    # Check both the resolved target AND the compression tip (live_tip): a
+    # session that auto-compressed mid-conversation is held live under the
+    # rotated continuation key, so a resume on the pre-rotation id finds it by
+    # tip even though the cold-load target stayed on the requested segment.
     with _session_resume_lock:
         live = _find_live_session_by_key(target)
+        if live is None and live_tip and live_tip != target:
+            live = _find_live_session_by_key(live_tip)
         if live is not None:
             return _ok(rid, _reuse_live_payload(*live))
 
@@ -6587,9 +6658,23 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 # applied to the continuation. Restart slash worker so subsequent
                 # worker-backed commands (/title etc.) target the live session.
                 # Fix for #20001.
-                _sync_session_key_after_compress(
+                _rotated = _sync_session_key_after_compress(
                     sid, session, clear_pending_title=False, restart_slash_worker=True,
                 )
+                # When the id rotated, push a session.info so the renderer re-pins
+                # its durable session id (storedSid) and the active-session file to
+                # the continuation. Without this the TUI keeps reporting/resuming the
+                # pre-compaction id: the status bar shows a stale session and the
+                # shell exit summary prints a `--resume <id>` that lands on the OLD
+                # segment's tail instead of the latest message the user just saw.
+                # The manual /compress paths already emit this; the post-turn
+                # auto-compression path (the one that fires during long autopilot
+                # runs) previously did not, which is the root of the resume mismatch.
+                if _rotated:
+                    try:
+                        _emit("session.info", sid, _session_info(agent, session))
+                    except Exception:
+                        pass
 
                 raw = result.get("final_response", "")
                 status = (
@@ -6767,6 +6852,25 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 session["running"] = False
                 session["last_active"] = time.time()
                 _clear_inflight_turn(session)
+            # Belt-and-suspenders session_key re-anchor: the in-try sync at the
+            # top of the isinstance(result, dict) block only runs when the turn
+            # returned a dict. If run_conversation rotated agent.session_id via
+            # auto-compaction and then raised (or returned a non-dict), the
+            # gateway-side session["session_key"] would otherwise stay pinned to
+            # the ended parent, sending approval routing / slash-worker / title
+            # lookups at a dead session until the next good turn. Re-syncing here
+            # is idempotent (returns False and no-ops when the id already matches
+            # the sync the dict path already did), so it costs nothing on the
+            # normal path and closes the exception/non-dict rotation seam. The
+            # session.info emit below then always carries the live rotated id,
+            # keeping the renderer's storedSid + active-session file (and thus the
+            # exit-summary resume id + status bar) pinned to the newest leaf.
+            try:
+                _sync_session_key_after_compress(
+                    sid, session, clear_pending_title=False, restart_slash_worker=True,
+                )
+            except Exception:
+                pass
             _emit("session.info", sid, _session_info(agent, session))
 
         # Chain a goal-continuation turn if the judge said so. We do

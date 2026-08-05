@@ -954,25 +954,26 @@ def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
     assert captured["history_calls"] == [("tip", False), ("tip", True)]
 
 
-def test_session_resume_follows_compression_tip(monkeypatch, tmp_path):
-    """Resuming a rotated-out parent id must load the continuation's messages.
+def test_session_resume_cold_load_stays_on_requested_segment(monkeypatch, tmp_path):
+    """A cold --resume/<resume> of a named non-empty segment must load THAT segment.
 
-    Regression for the desktop "I came back and the reply isn't there" report:
-    auto-compression ends the live session and forks a continuation child, so a
-    resume on the parent id (the desktop's routed id when the chat was opened
-    before it rotated) used to reload the pre-compression transcript and drop
-    the response generated after compression. session.resume must follow the
-    compression tip via resolve_resume_session_id.
+    Regression for the resume-lands-on-wrong-segment report: a long thread is a
+    chain of compression segments linked by parent_session_id. Resuming an
+    interior segment id used to be teleported forward to the newest leaf of the
+    whole lineage (via an unconditional compression-tip jump), landing the user
+    days later in an unrelated conversation. A cold resume (no live session in
+    memory) of a segment that has its OWN messages must bind the agent to that
+    segment, not the tip.
     """
     from hermes_state import SessionDB
 
     db = SessionDB(db_path=tmp_path / "state.db")
     base = int(time.time()) - 10_000
     db.create_session("parent_root", source="tui")
-    db.append_message("parent_root", role="user", content="pre-compression turn")
+    db.append_message("parent_root", role="user", content="the segment I asked for")
     db.end_session("parent_root", "compression")
     db.create_session("cont_tip", source="tui", parent_session_id="parent_root")
-    db.append_message("cont_tip", role="assistant", content="post-compression reply")
+    db.append_message("cont_tip", role="assistant", content="unrelated later topic")
     conn = db._conn
     assert conn is not None
     conn.execute(
@@ -1007,12 +1008,80 @@ def test_session_resume_follows_compression_tip(monkeypatch, tmp_path):
     finally:
         db.close()
 
-    # The agent must bind to the continuation tip, and the returned transcript
-    # must include the post-compression reply (which lives only in the tip).
-    assert resp["result"]["session_key"] == "cont_tip"
-    assert captured["agent_session_id"] == "cont_tip"
+    # The agent binds to the requested segment, NOT the downstream tip, and the
+    # transcript is the segment's own messages (no teleport into the later topic).
+    assert resp["result"]["session_key"] == "parent_root"
+    assert captured["agent_session_id"] == "parent_root"
     texts = [m.get("text") for m in resp["result"]["messages"]]
-    assert "post-compression reply" in texts
+    assert "the segment I asked for" in texts
+    assert "unrelated later topic" not in texts
+
+
+def test_session_resume_reuses_live_session_rotated_to_tip(monkeypatch, tmp_path):
+    """Resuming a pre-rotation id reattaches to a still-live session under the tip.
+
+    The desktop "I came back and the reply isn't there" case: auto-compression
+    ended the live session mid-conversation and re-anchored the in-memory session
+    on the continuation id (cont_tip). A resume on the pre-rotation id
+    (parent_root) must reuse that LIVE session by its compression tip, not
+    cold-load a stale sibling. This is the live-reuse half of the resume fix that
+    survives making the cold-load path stay on the requested segment.
+    """
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    base = int(time.time()) - 10_000
+    db.create_session("parent_root", source="tui")
+    db.append_message("parent_root", role="user", content="pre-compression turn")
+    db.end_session("parent_root", "compression")
+    db.create_session("cont_tip", source="tui", parent_session_id="parent_root")
+    db.append_message("cont_tip", role="assistant", content="post-compression reply")
+    conn = db._conn
+    assert conn is not None
+    conn.execute(
+        "UPDATE sessions SET started_at = ?, ended_at = ? WHERE id = 'parent_root'",
+        (base, base + 50),
+    )
+    conn.execute("UPDATE sessions SET started_at = ? WHERE id = 'cont_tip'", (base + 100,))
+    conn.commit()
+
+    # A live in-memory session anchored on the rotated continuation key.
+    live_sid = "live1234"
+    server._sessions[live_sid] = {
+        "agent": types.SimpleNamespace(model="test", provider="test"),
+        "session_key": "cont_tip",
+        "history": [{"role": "assistant", "content": "post-compression reply"}],
+        "history_lock": threading.Lock(),
+        "cols": 80,
+        "transport": None,
+        "last_active": time.time(),
+    }
+
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
+    monkeypatch.setattr(server, "_set_session_context", lambda target: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda tokens: None)
+    monkeypatch.setattr(
+        server, "_session_info", lambda agent, *a: {"model": "test", "tools": {}, "skills": {}}
+    )
+
+    def _boom(*a, **k):
+        raise AssertionError("cold build must not run: the live session should be reused")
+
+    monkeypatch.setattr(server, "_make_agent", _boom)
+
+    try:
+        resp = server.handle_request(
+            {"id": "1", "method": "session.resume", "params": {"session_id": "parent_root"}}
+        )
+    finally:
+        server._sessions.pop(live_sid, None)
+        db.close()
+
+    # Reused the live session (its runtime sid), reported under the tip key.
+    assert resp["result"]["session_id"] == live_sid
+    assert resp["result"]["session_key"] == "cont_tip"
+
 
 
 def test_session_resume_passes_stored_runtime_to_agent(monkeypatch):

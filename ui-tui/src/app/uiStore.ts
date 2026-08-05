@@ -26,6 +26,7 @@ const buildUiState = (): UiState => ({
   showCost: false,
   showReasoning: false,
   sid: null,
+  storedSid: null,
   status: 'summoning hermes…',
   statusBar: 'top',
   streaming: true,

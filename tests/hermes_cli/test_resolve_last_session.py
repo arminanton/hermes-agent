@@ -118,6 +118,65 @@ def test_resolve_last_session_falls_back_to_started_at(monkeypatch):
     assert _resolve_last_session("cli") == "newer"
 
 
+def test_search_sessions_ignores_corrupt_out_of_range_timestamp(tmp_path, monkeypatch):
+    # Regression: a single message row with a corrupt out-of-range timestamp
+    # (e.g. a malformed tool row that wrote 6.4e+170) must NOT dominate
+    # MAX(timestamp) and pin its session to the top of every MRU ordering. That
+    # bug made the TUI exit-banner "last session" fallback print the same stale,
+    # unrelated session id on every exit. The ordering aggregate now only counts
+    # timestamps inside a sane epoch window; the poisoned session falls back to
+    # its (older) started_at instead of floating to the top forever.
+    import time as _time
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    import hermes_state
+
+    from pathlib import Path
+
+    now = _time.time()
+    db = hermes_state.SessionDB(db_path=Path(tmp_path / "state.db"))
+    try:
+        # poisoned: old started_at, but one message carries a garbage timestamp
+        db.create_session("poisoned", source="tui")
+        # legit MRU: newer real activity, well within the sane window
+        db.create_session("real_recent", source="tui")
+        with db._lock:
+            db._conn.execute(
+                "UPDATE sessions SET started_at=? WHERE id=?", (now - 10_000, "poisoned")
+            )
+            db._conn.execute(
+                "UPDATE sessions SET started_at=? WHERE id=?", (now - 5_000, "real_recent")
+            )
+            db._conn.commit()
+
+        db.append_message("poisoned", role="tool", content="garbage ts")
+        db.append_message("real_recent", role="user", content="real recent activity")
+        with db._lock:
+            # 6.4e+170 is far above the sane upper bound, must be ignored
+            db._conn.execute(
+                "UPDATE messages SET timestamp=? WHERE session_id=?",
+                (6.476414181495499e170, "poisoned"),
+            )
+            db._conn.execute(
+                "UPDATE messages SET timestamp=? WHERE session_id=?",
+                (now - 100, "real_recent"),
+            )
+            db._conn.commit()
+
+        rows = db.search_sessions(source="tui", limit=5)
+        assert rows, "expected at least the two tui sessions"
+        # The poisoned session must NOT be first despite its huge raw MAX(ts).
+        assert rows[0]["id"] == "real_recent"
+        # And its computed last_active must have fallen back to started_at,
+        # not the corrupt value.
+        poisoned = next(r for r in rows if r["id"] == "poisoned")
+        assert poisoned["last_active"] <= now
+    finally:
+        db.close()
+
+
 def test_resolve_last_session_not_limited_to_newest_started_20(tmp_path, monkeypatch):
     # Regression: when sampling by started_at, -c could miss the true MRU if
     # it was older than the newest 20 started sessions.

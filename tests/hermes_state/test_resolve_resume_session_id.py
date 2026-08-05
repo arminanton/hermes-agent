@@ -83,15 +83,18 @@ def test_walks_from_middle_of_chain(db):
     assert db.resolve_resume_session_id("c") == "d"
 
 
-def test_follows_compression_tip_when_parent_retains_messages(db):
-    # The bug behind the desktop "I came back and the reply isn't there" report
-    # on large sessions: auto-compression ends the live session and forks a
-    # continuation child, but a long parent keeps its own flushed message rows.
-    # The empty-head walk below never redirects a non-empty head, so resuming
-    # the parent id reloaded the pre-compression transcript and the response
-    # generated *after* compression (which lives in the continuation) was
-    # missing. resolve_resume_session_id must follow the compression-tip chain
-    # forward even when the parent still has messages.
+def test_compression_tip_following_is_opt_in_for_nonempty_head(db):
+    # Contract split (resume-lands-on-wrong-segment fix): when a session has its
+    # OWN messages, resolve_resume_session_id must NOT project it forward to the
+    # compression tip by default. An explicit --resume/<resume> of a specific
+    # historical segment has to land on THAT segment, not be teleported to the
+    # newest leaf of the whole lineage (potentially days and several unrelated
+    # topics downstream).
+    #
+    # The desktop "I came back and the reply isn't there" case (auto-compression
+    # rotated the live session's key mid-conversation, and a REST read of the
+    # routed root should surface the continuation) is still served, but only for
+    # callers that opt in with follow_compression_tip=True.
     base = int(time.time()) - 10_000
     db.create_session("root", source="cli")
     db.append_message("root", role="user", content="pre-compression turn")
@@ -106,7 +109,28 @@ def test_follows_compression_tip_when_parent_retains_messages(db):
     conn.execute("UPDATE sessions SET started_at = ? WHERE id = 'cont'", (base + 100,))
     conn.commit()
 
-    assert db.resolve_resume_session_id("root") == "cont"
+    # Default: a non-empty head stays put (explicit resume of a named segment).
+    assert db.resolve_resume_session_id("root") == "root"
+    # Opt-in: REST "current state of this chat" reads follow the tip.
+    assert (
+        db.resolve_resume_session_id("root", follow_compression_tip=True) == "cont"
+    )
+
+
+def test_empty_head_redirect_ignores_follow_flag(db):
+    # The #15000 empty-head redirect is independent of follow_compression_tip:
+    # a rotated-out head whose own rows moved to a continuation must always find
+    # the descendant that holds the transcript, whether or not tip-following is
+    # requested. (Without this, an explicit --resume of a truly-empty parent id
+    # would render a blank chat.)
+    _make_chain(db, [("head", None), ("mid", "head"), ("bulk", "mid")])
+    for i in range(3):
+        db.append_message("bulk", role="user", content=f"msg {i}")
+
+    assert db.resolve_resume_session_id("head") == "bulk"
+    assert (
+        db.resolve_resume_session_id("head", follow_compression_tip=True) == "bulk"
+    )
 
 
 def test_compression_tip_not_confused_with_delegation_child(db):

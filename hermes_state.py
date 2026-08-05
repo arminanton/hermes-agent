@@ -3074,12 +3074,14 @@ class SessionDB:
             "bookend_end": [_hydrate(r) for r in bookend_end_rows],
         }
 
-    def resolve_resume_session_id(self, session_id: str) -> str:
+    def resolve_resume_session_id(
+        self, session_id: str, follow_compression_tip: bool = False
+    ) -> str:
         """Redirect a resume target to the descendant session that holds the messages.
 
         Context compression ends the current session and forks a new child session
         (linked via ``parent_session_id``). The flush cursor is reset, so the
-        child is where new messages actually land — the parent ends up with
+        child is where new messages actually land, the parent ends up with
         ``message_count = 0`` rows unless messages had already been flushed to
         it before compression. See #15000.
 
@@ -3091,27 +3093,39 @@ class SessionDB:
         The chain is always walked via the child whose ``started_at`` is
         latest; that matches the single-chain shape that compression creates.
         A depth cap (32) guards against accidental loops in malformed data.
+
+        ``follow_compression_tip`` (default False): when True, additionally
+        project a session that DOES have its own messages forward to the live
+        tip of its compression chain via :meth:`get_compression_tip`. This is
+        the "show me the current state of this chat" semantic the desktop's
+        REST reads want (a routed/root id that has since auto-compressed should
+        surface the latest continuation). It is deliberately OFF for explicit
+        ``--resume <id>`` / ``/resume <id>`` because a user who names a specific
+        interior segment wants to return to THAT segment, not be teleported to
+        the newest leaf of the whole lineage, potentially days and several
+        unrelated topics later. See #15000 (empty-head redirect, always on) vs.
+        the resume-lands-on-wrong-segment report (tip chasing, opt-in only).
         """
         if not session_id:
             return session_id
 
-        # Follow the compression-continuation chain forward to the live tip
-        # FIRST. Auto-compression ends the current session and forks a
+        # Optionally follow the compression-continuation chain forward to the
+        # live tip. Auto-compression ends the current session and forks a
         # continuation child, but a long-lived parent keeps its own flushed
-        # message rows — so the empty-head walk below never redirects it, and
-        # resuming the parent id reloads the pre-compression transcript while
-        # the turns generated *after* compression (and their responses) sit in
-        # the continuation. ``get_compression_tip`` is lineage-aware: it only
-        # follows children whose parent ended with ``end_reason='compression'``
-        # (created after the parent was ended), so delegation / branch children
-        # never hijack the resume. This is the fix for the desktop "I came back
-        # and the reply isn't there" report on large sessions.
-        try:
-            tip = self.get_compression_tip(session_id)
-        except Exception:
-            tip = session_id
-        if tip and tip != session_id:
-            session_id = tip
+        # message rows, so the empty-head walk below never redirects it. Only
+        # callers that explicitly want the live conversation state (not a named
+        # historical segment) opt into this via ``follow_compression_tip=True``.
+        # ``get_compression_tip`` is lineage-aware: it only follows children
+        # whose parent ended with ``end_reason='compression'`` (created after
+        # the parent was ended), so delegation / branch children never hijack
+        # the resume.
+        if follow_compression_tip:
+            try:
+                tip = self.get_compression_tip(session_id)
+            except Exception:
+                tip = session_id
+            if tip and tip != session_id:
+                session_id = tip
 
         with self._lock:
             # If this session already has messages, nothing to redirect.
@@ -3928,13 +3942,30 @@ class SessionDB:
         Returns rows enriched with a computed ``last_active`` column (latest
         message timestamp for the session, falling back to ``started_at``),
         ordered by most-recently-used first.
+
+        A single message row with a corrupt out-of-range ``timestamp`` (e.g. a
+        bad float like ``6.4e+170`` written by a malformed tool row) would
+        otherwise dominate ``MAX(timestamp)`` and pin that session to the top of
+        every ordering forever, poisoning the ``/resume`` picker and the TUI
+        exit-banner "last session" fallback. Guard the aggregate: only messages
+        whose timestamp is at or below a sane upper bound (now + ~1yr)
+        contribute to ``last_active``; an absurdly-large corrupt value is
+        ignored and the row falls back to ``started_at``. This is ordering-only;
+        it never mutates the stored value. The lower end is deliberately NOT
+        clamped so legacy/synthetic small epochs still sort normally, only the
+        impossible-future poison is excluded.
         """
+        # Sane upper bound: now + ~1 year. A timestamp beyond this is corrupt
+        # (real activity can't be a year in the future) and must not steer
+        # ordering. No lower bound: tiny/legacy epochs are harmless for MRU.
+        _ts_hi = time.time() + 31_536_000.0
         select_with_last_active = (
             "SELECT s.*, COALESCE(m.last_active, s.started_at) AS last_active "
             "FROM sessions s "
             "LEFT JOIN ("
             "SELECT session_id, MAX(timestamp) AS last_active "
-            "FROM messages GROUP BY session_id"
+            "FROM messages WHERE timestamp <= ? "
+            "GROUP BY session_id"
             ") m ON m.session_id = s.id "
         )
         with self._lock:
@@ -3943,13 +3974,13 @@ class SessionDB:
                     f"{select_with_last_active}"
                     "WHERE s.source = ? "
                     "ORDER BY last_active DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
-                    (source, limit, offset),
+                    (_ts_hi, source, limit, offset),
                 )
             else:
                 cursor = self._conn.execute(
                     f"{select_with_last_active}"
                     "ORDER BY last_active DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
-                    (limit, offset),
+                    (_ts_hi, limit, offset),
                 )
             return [dict(row) for row in cursor.fetchall()]
 

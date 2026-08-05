@@ -200,6 +200,163 @@ class TestSyncSessionKeyAfterAutoCompress:
         finally:
             server._sessions.pop("test-sid", None)
 
+    def test_sync_returns_true_on_rotation_false_when_unchanged(self, monkeypatch):
+        """_sync_session_key_after_compress must report whether the id rotated.
+
+        The post-turn auto-compression path gates a `session.info` emit on this
+        return value so the renderer re-pins its durable session id (and the
+        shell exit summary / status-bar id) to the continuation. Regression for
+        the long-standing "close prints id A, --resume A lands on an older tail"
+        bug: without the emit, the TUI kept reporting the pre-compaction id.
+        """
+        from tui_gateway import server
+
+        # Avoid slash-worker restart side effects in this unit test.
+        monkeypatch.setattr(server, "_restart_slash_worker", lambda *a, **kw: None)
+
+        agent = types.SimpleNamespace(session_id="rotated-continuation-id")
+        session = _tui_session(agent=agent, session_key="original-launch-id")
+
+        rotated = server._sync_session_key_after_compress(
+            "sid", session, clear_pending_title=False, restart_slash_worker=False
+        )
+        assert rotated is True, "must report True when agent.session_id rotated"
+        assert session["session_key"] == "rotated-continuation-id"
+
+        # A second call with no further rotation must report False (no spurious
+        # session.info emit / active-session-file rewrite on every idle turn).
+        rotated_again = server._sync_session_key_after_compress(
+            "sid", session, clear_pending_title=False, restart_slash_worker=False
+        )
+        assert rotated_again is False, "must report False when id did not change"
+
+    def test_post_turn_autocompression_emits_session_info_with_new_id(self, monkeypatch):
+        """End-to-end: when run_conversation() rotates the id via auto-compression,
+        _run_prompt_submit must emit a session.info carrying the NEW session_key
+        so the renderer can re-pin storedSid + the active-session file."""
+        from tui_gateway import server
+
+        class _CompressingAgent:
+            def __init__(self):
+                self.session_id = "pre-compress-key"
+                self._cached_system_prompt = ""
+
+            def run_conversation(self, prompt, conversation_history=None, stream_callback=None):
+                self.session_id = "post-compress-key"
+                return {
+                    "final_response": "done",
+                    "messages": [
+                        {"role": "user", "content": prompt},
+                        {"role": "assistant", "content": "done"},
+                    ],
+                }
+
+        agent = _CompressingAgent()
+        session = _tui_session(agent=agent, session_key="pre-compress-key")
+
+        emits: list = []
+        monkeypatch.setattr(server, "_emit", lambda ev, sid, payload=None: emits.append((ev, sid, payload)))
+        monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+        monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+        monkeypatch.setattr(server, "_restart_slash_worker", lambda *a, **kw: None)
+        # Use the REAL _sync_session_key_after_compress + _session_info so the
+        # emit path is exercised for real (this is what the fix wires together).
+
+        class _ImmediateThread:
+            def __init__(self, target=None, daemon=None, **kw):
+                self._target = target
+
+            def start(self):
+                if self._target:
+                    self._target()
+
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        server._sessions["test-sid2"] = session
+        try:
+            server.handle_request({
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {"session_id": "test-sid2", "text": "hello"},
+            })
+
+            info_emits = [
+                p for (ev, _sid, p) in emits
+                if ev == "session.info" and isinstance(p, dict)
+                and p.get("session_key") == "post-compress-key"
+            ]
+            assert info_emits, (
+                "post-turn auto-compression must emit a session.info carrying the "
+                "rotated session_key so the TUI re-pins its resume id to the "
+                f"continuation; emits seen: {[(e, (p or {}).get('session_key')) for e, _s, p in emits if e == 'session.info']}"
+            )
+        finally:
+            server._sessions.pop("test-sid2", None)
+
+    def test_session_key_reanchored_even_when_turn_raises_after_rotation(self, monkeypatch):
+        """Gap found by independent review: the in-try _sync sits inside
+        `if isinstance(result, dict)`. If run_conversation rotates the id and
+        THEN raises (or returns a non-dict), session_key must STILL be
+        re-anchored to the continuation via the finally-block belt-and-suspenders
+        sync — otherwise approval routing / slash worker / title lookups target
+        the ended parent, and the final session.info carries a stale id."""
+        from tui_gateway import server
+
+        class _RotateThenRaiseAgent:
+            def __init__(self):
+                self.session_id = "pre-compress-key"
+                self._cached_system_prompt = ""
+
+            def run_conversation(self, prompt, conversation_history=None, stream_callback=None, **kw):
+                # Auto-compaction rotates the id mid-turn, THEN the turn blows up
+                # (e.g. provider error after the compaction summary call).
+                self.session_id = "post-compress-key"
+                raise RuntimeError("provider exploded after compaction")
+
+        agent = _RotateThenRaiseAgent()
+        session = _tui_session(agent=agent, session_key="pre-compress-key")
+
+        emits = []
+        monkeypatch.setattr(server, "_emit", lambda ev, sid, payload=None: emits.append((ev, sid, payload)))
+        monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+        monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+        monkeypatch.setattr(server, "_restart_slash_worker", lambda *a, **kw: None)
+
+        class _ImmediateThread:
+            def __init__(self, target=None, daemon=None, **kw):
+                self._target = target
+
+            def start(self):
+                if self._target:
+                    self._target()
+
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        server._sessions["test-sid3"] = session
+        try:
+            server.handle_request({
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {"session_id": "test-sid3", "text": "hello"},
+            })
+
+            # Even though the turn raised, session_key must be re-anchored to the
+            # rotated continuation (via the finally-block sync).
+            assert session["session_key"] == "post-compress-key", (
+                "session_key must be re-anchored to the rotated id even when the "
+                f"turn raised after rotation; got {session['session_key']!r}"
+            )
+            # And the finally session.info must carry the live rotated id.
+            info_emits = [
+                p for (ev, _sid, p) in emits
+                if ev == "session.info" and isinstance(p, dict)
+                and p.get("session_key") == "post-compress-key"
+            ]
+            assert info_emits, (
+                "the finally session.info must carry the rotated id even on the "
+                f"exception path; emits: {[(e,(p or {}).get('session_key')) for e,_s,p in emits if e=='session.info']}"
+            )
+        finally:
+            server._sessions.pop("test-sid3", None)
+
 
 # ===========================================================================
 # Bug #19029: pending_title ValueError wedge

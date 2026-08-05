@@ -1286,10 +1286,17 @@ def _resolve_session_by_name_or_id(name_or_id: str) -> Optional[str]:
             resolved_id = db.resolve_session_by_title(name_or_id)
 
         if resolved_id:
-            # Project forward through compression chain so resumes land on
-            # the live tip instead of a dead compressed parent.
+            # If the resolved id is the EMPTY head of a compression chain
+            # (its own message rows moved to a continuation when the flush
+            # cursor reset), redirect to the descendant that actually holds
+            # the transcript. A resolved id that has its OWN messages stays
+            # put: an explicit --resume/--continue of a specific segment must
+            # land on THAT segment, not be teleported to the newest leaf of
+            # the whole lineage (which may be days and several unrelated
+            # topics downstream). See #15000 and the resume-lands-on-wrong-
+            # segment fix in resolve_resume_session_id.
             try:
-                resolved_id = db.get_compression_tip(resolved_id) or resolved_id
+                resolved_id = db.resolve_resume_session_id(resolved_id) or resolved_id
             except Exception:
                 pass
 
