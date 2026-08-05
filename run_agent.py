@@ -4173,8 +4173,27 @@ class AIAgent:
 
     # ── Unified streaming API call ─────────────────────────────────────────
 
-    def _reset_stream_delivery_tracking(self) -> None:
-        """Reset tracking for text delivered during the current model response."""
+    def _flush_stream_normalizer_tails(self) -> None:
+        """Flush any buffered tail text held by the streaming scrubbers/normalizers.
+
+        The think scrubber, context scrubber, and sentence-boundary
+        normalizers (dash/honesty plugins) all buffer a held-back tail
+        until a resolving boundary arrives (a closing tag, a sentence
+        terminator, etc.). A stream that ends mid-buffer — e.g. a short
+        reply like "Hello World" with no terminal punctuation — leaves
+        that tail sitting in the buffer forever unless something flushes
+        it. This must be called once after EVERY streaming attempt
+        completes (success or partial), not only when the next attempt
+        resets state, otherwise the tail is silently dropped from the
+        live display/TTS callbacks (the persisted message content is
+        built from raw deltas and is unaffected, so only the streamed
+        UI misses this trailing text).
+
+        Deliberately does NOT touch ``_current_streamed_assistant_text``
+        beyond appending the flushed tail — callers that need a fresh
+        buffer for the *next* stream should reset that separately (see
+        ``_reset_stream_delivery_tracking``).
+        """
         # Flush any benign partial-tag tail held by the think scrubber
         # first (#17924): an innocent '<' at the end of the stream that
         # turned out not to be a tag prefix should reach the UI.  Then
@@ -4239,6 +4258,19 @@ class AIAgent:
                     self.reasoning_callback(reasoning_tail)
                 except Exception:
                     pass
+
+    def _reset_stream_delivery_tracking(self) -> None:
+        """Flush buffered scrubber/normalizer tails, then reset tracking state.
+
+        Call at the START of a new streaming attempt (a fresh retry or a
+        fresh turn) so any tail left over from a PRIOR attempt reaches the
+        UI before the buffer is cleared for the upcoming one. For flushing
+        after a stream's own natural completion (no new attempt about to
+        start), use ``_flush_stream_normalizer_tails()`` instead — it does
+        not clear ``_current_streamed_assistant_text``, which downstream
+        partial-stream-recovery logic still needs to read.
+        """
+        self._flush_stream_normalizer_tails()
         self._current_streamed_assistant_text = ""
 
     def _record_streamed_assistant_text(self, text: str) -> None:
@@ -4318,9 +4350,14 @@ class AIAgent:
             # REBORN-fix (2026-06-29): apply per-chunk plugin normalizer
             # (e.g. dash, honesty) AFTER think/context scrubbing but BEFORE
             # callbacks fire. Buffers a small tail across chunks so a token
-            # split across deltas still matches.
+            # split across deltas still matches. Gated on has_hook() so
+            # streams are delivered immediately, delta-by-delta, when no
+            # transform_llm_output plugin is installed — the sentence-
+            # boundary buffering exists to let a real hook see complete
+            # text, and is pure unwanted latency/granularity change when
+            # there is no hook to feed.
             stream_text_normalizer = getattr(self, "_stream_text_normalizer", None)
-            if stream_text_normalizer is not None and text:
+            if stream_text_normalizer is not None and text and self._transform_llm_output_hook_active():
                 text = stream_text_normalizer.feed(text)
                 if not text:
                     return  # everything held back for next chunk
@@ -4342,13 +4379,38 @@ class AIAgent:
         if delivered:
             self._record_streamed_assistant_text(text)
 
+    @staticmethod
+    def _transform_llm_output_hook_active() -> bool:
+        """Whether any ``transform_llm_output`` plugin hook is registered.
+
+        The sentence-boundary streaming normalizers exist purely to give
+        a real ``transform_llm_output`` hook (dash-normalizer,
+        honesty-stripper) a complete unit of text to rewrite instead of
+        arbitrary provider-chosen chunk boundaries. When no such hook is
+        registered — the common case; those are optional plugins, not
+        bundled by default — buffering by sentence boundary only adds
+        latency and coarsens streaming granularity for no benefit, so
+        callers should skip the normalizer entirely in that case.
+        """
+        try:
+            from hermes_cli.plugins import has_hook
+            return has_hook("transform_llm_output")
+        except Exception:
+            return False
+
     def _fire_reasoning_delta(self, text: str) -> None:
         """Fire reasoning callback if registered."""
         # REBORN-fix (2026-06-29): same per-chunk normalization as
         # _fire_stream_delta, but routed through a sibling buffer so
         # content and reasoning streams don't pollute each other's tail.
+        # Gated on has_hook() — see _transform_llm_output_hook_active().
         stream_reasoning_normalizer = getattr(self, "_stream_reasoning_normalizer", None)
-        if stream_reasoning_normalizer is not None and isinstance(text, str) and text:
+        if (
+            stream_reasoning_normalizer is not None
+            and isinstance(text, str)
+            and text
+            and self._transform_llm_output_hook_active()
+        ):
             text = stream_reasoning_normalizer.feed(text)
             if not text:
                 return
@@ -4384,9 +4446,22 @@ class AIAgent:
     def _interruptible_streaming_api_call(
         self, api_kwargs: dict, *, on_first_delta: callable = None
     ):
-        """Forwarder — see ``agent.chat_completion_helpers.interruptible_streaming_api_call``."""
+        """Forwarder — see ``agent.chat_completion_helpers.interruptible_streaming_api_call``.
+
+        Wrapped in try/finally so any tail still buffered in the think/
+        context scrubbers or the sentence-boundary normalizers reaches the
+        UI once this streaming attempt ends — success, interrupt, or
+        error alike. Without this, a short reply with no terminal
+        sentence punctuation (e.g. "Hello World") could sit in the
+        normalizer's buffer forever and never reach the live display/TTS
+        callbacks, even though the persisted message content (built from
+        raw deltas) is unaffected. See ``_flush_stream_normalizer_tails``.
+        """
         from agent.chat_completion_helpers import interruptible_streaming_api_call
-        return interruptible_streaming_api_call(self, api_kwargs, on_first_delta=on_first_delta)
+        try:
+            return interruptible_streaming_api_call(self, api_kwargs, on_first_delta=on_first_delta)
+        finally:
+            self._flush_stream_normalizer_tails()
 
     def _try_activate_fallback(self, reason: "FailoverReason | None" = None) -> bool:
         """Forwarder — see ``agent.chat_completion_helpers.try_activate_fallback``."""
