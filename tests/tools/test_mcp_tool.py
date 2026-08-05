@@ -1395,6 +1395,40 @@ class TestBuildSafeEnv:
 
         assert result["PATH"] == "/custom/bin"
 
+    def test_user_env_non_string_values_coerced_to_str(self):
+        """Non-string scalars in user_env are coerced to str.
+
+        Regression: the MCP SDK's StdioServerParameters.env is typed
+        dict[str, str]. A bare int/bool/float in config.yaml (e.g.
+        ``COUNCIL_GATE_PEER_REVIEW: 1`` instead of ``"1"``) previously
+        propagated as a Python int and failed Pydantic validation at
+        connect time, so the WHOLE server failed to connect and NONE of its
+        tools registered — a silent, whole-server outage from one unquoted
+        YAML scalar (observed live on the 'council' server, 2026-07). Every
+        value must come back a str.
+        """
+        from tools.mcp_tool import _build_safe_env
+
+        with patch.dict("os.environ", {"PATH": "/usr/bin"}, clear=True):
+            result = _build_safe_env(
+                {
+                    "COUNCIL_GATE_PEER_REVIEW": 1,      # int
+                    "SOME_FLAG": True,                   # bool
+                    "SOME_RATIO": 0.5,                   # float
+                    "ALREADY_STR": "keep",               # str stays str
+                    "DROP_ME": None,                     # None is dropped
+                }
+            )
+
+        assert result["COUNCIL_GATE_PEER_REVIEW"] == "1"
+        assert isinstance(result["COUNCIL_GATE_PEER_REVIEW"], str)
+        assert result["SOME_FLAG"] == "True"
+        assert result["SOME_RATIO"] == "0.5"
+        assert result["ALREADY_STR"] == "keep"
+        assert "DROP_ME" not in result
+        # Every value StdioServerParameters will see must be a str.
+        assert all(isinstance(v, str) for v in result.values())
+
     def test_none_user_env(self):
         """None user_env still returns safe vars from os.environ."""
         from tools.mcp_tool import _build_safe_env
