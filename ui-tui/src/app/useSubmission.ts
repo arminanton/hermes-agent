@@ -278,12 +278,22 @@ export function useSubmission(opts: UseSubmissionOptions) {
       const live = getUiState()
       const mode = live.busyInputMode
 
+      // Expand collapsed paste placeholders NOW, synchronously, while the snips
+      // are still present. dispatchSubmission calls clearIn() (which fires
+      // setPasteSnips([])) BEFORE this runs, but that state reset only lands on
+      // the next render — the closure value here is still the populated array.
+      // Every branch below (queue / steer / interrupt) must enqueue/send the
+      // EXPANDED body: a queued placeholder would otherwise drain later via
+      // send() when pasteSnips is already [], leaking `[[ … [N lines] … ]]` to
+      // the agent. This is the queue-path sibling of the steer-path leak.
+      const expanded = buildSnipExpander(composerState.pasteSnips)(full)
+
       const enqueueText = () => {
         if (opts.fallbackToFront) {
-          composerRefs.queueRef.current.unshift(full)
+          composerRefs.queueRef.current.unshift(expanded)
           composerActions.syncQueue()
         } else {
-          composerActions.enqueue(full)
+          composerActions.enqueue(expanded)
         }
       }
 
@@ -293,11 +303,11 @@ export function useSubmission(opts: UseSubmissionOptions) {
       }
 
       if (mode === 'queue') {
-        return composerActions.enqueue(full)
+        return composerActions.enqueue(expanded)
       }
 
       if (mode === 'steer' && live.sid) {
-        gw.request<SessionSteerResponse>('session.steer', { session_id: live.sid, text: full })
+        gw.request<SessionSteerResponse>('session.steer', { session_id: live.sid, text: expanded })
           .then(raw => {
             const r = asRpcResult<SessionSteerResponse>(raw)
 
@@ -317,7 +327,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
         turnController.interruptTurn({ appendMessage, gw, sid: live.sid, sys }, { keepBusy: true })
       }
     },
-    [appendMessage, composerActions, composerRefs, gw, sys]
+    [appendMessage, composerActions, composerRefs, composerState.pasteSnips, gw, sys]
   )
 
   const dispatchSubmission = useCallback(
@@ -344,8 +354,12 @@ export function useSubmission(opts: UseSubmissionOptions) {
       const live = getUiState()
 
       if (!live.sid) {
+        // No session yet: queue for when it comes up. Expand snips first — the
+        // clearIn() below wipes pasteSnips, so a later drain via send() would
+        // otherwise leak the `[[ … ]]` placeholder (same race as handleBusyInput).
+        const expanded = buildSnipExpander(composerState.pasteSnips)(full)
         composerActions.pushHistory(full)
-        composerActions.enqueue(full)
+        composerActions.enqueue(expanded)
         composerActions.clearIn()
 
         return
@@ -394,7 +408,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
 
       send(full)
     },
-    [appendMessage, composerActions, composerRefs, handleBusyInput, interpolate, send, sendQueued, shellExec, slashRef]
+    [appendMessage, composerActions, composerRefs, composerState.pasteSnips, handleBusyInput, interpolate, send, sendQueued, shellExec, slashRef]
   )
 
   const submit = useCallback(

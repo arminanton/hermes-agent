@@ -20,8 +20,17 @@ describe('virtual height estimates', () => {
   it('uses compound user prompt width when estimating user message wrapping', () => {
     const msg: Msg = { role: 'user', text: 'x'.repeat(21) }
 
-    expect(estimatedMsgHeight(msg, 26, { compact: false, details: false, userPrompt: '❯' })).toBe(3)
-    expect(estimatedMsgHeight(msg, 26, { compact: false, details: false, userPrompt: 'Ψ >' })).toBe(4)
+    // A 1-col prompt ('❯') and a 3-col compound prompt ('Ψ >') reserve
+    // different gutter widths, so the same 21-char body wraps to a different
+    // number of rows. At cols=28 the narrow prompt leaves a 22-col body (21
+    // chars fit on one line → height 3) while the compound prompt drops the
+    // body to the 20-col floor (21 chars wrap to two lines → height 4). This
+    // straddles the wrap boundary under the current transcript geometry
+    // (horizontalReserve=4 + Math.max(20, …) floor); at the old cols=26 the
+    // floor swallowed the difference and both collapsed to 4, so the case no
+    // longer demonstrated that the compound prompt width matters.
+    expect(estimatedMsgHeight(msg, 28, { compact: false, details: false, userPrompt: '❯' })).toBe(3)
+    expect(estimatedMsgHeight(msg, 28, { compact: false, details: false, userPrompt: 'Ψ >' })).toBe(4)
   })
 
   it('adds one row for a group-boundary lead gap', () => {

@@ -1099,6 +1099,7 @@ export function useMainApp(gw: GatewayClient) {
       createSlashHandler({
         composer: {
           enqueue: composerActions.enqueue,
+          expandPaste: (text: string) => buildSnipExpander(composerState.pasteSnips)(text),
           hasSelection,
           paste,
           queueRef: composerRefs.queueRef,
@@ -1132,6 +1133,7 @@ export function useMainApp(gw: GatewayClient) {
       catalog,
       composerActions,
       composerRefs,
+      composerState.pasteSnips,
       die,
       gateway,
       hasSelection,

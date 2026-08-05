@@ -413,16 +413,29 @@ export interface ClipboardPasteResponse {
   attached?: boolean
   count?: number
   height?: number
+  // 'image' (vision attachment) or 'file' (arbitrary file transferred verbatim).
+  kind?: string
   message?: string
+  // Basename of the saved file (e.g. clip-1782671798.png).
+  name?: string
+  // Absolute on-host path where the pasted image/file was saved. Surfaced in the
+  // attachment notice so the user can locate/copy it AND the model has an explicit
+  // string handle to re-read the image with its file/vision tools after compaction.
+  path?: string
+  // Home-abbreviated, non-truncated form of `path` (e.g. ~/.hermes/images/clip-….png)
+  // computed backend-side against the real HERMES_HOME symlink. Preferred for display.
+  display_path?: string
   token_estimate?: number
   width?: number
 }
 
 export interface InputDetectDropResponse {
+  display_path?: string
   height?: number
   is_image?: boolean
   matched?: boolean
   name?: string
+  path?: string
   text?: string
   token_estimate?: number
   width?: number

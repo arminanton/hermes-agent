@@ -346,6 +346,7 @@ export interface GatewayEventHandlerContext {
 export interface SlashHandlerContext {
   composer: {
     enqueue: (text: string) => void
+    expandPaste: (text: string) => string
     hasSelection: boolean
     paste: (quiet?: boolean) => void
     queueRef: MutableRefObject<string[]>
