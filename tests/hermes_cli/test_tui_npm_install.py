@@ -165,7 +165,14 @@ def test_make_tui_argv_skips_build_only_on_termux_when_fresh(
     monkeypatch.setenv("TERMUX_VERSION", "1")
     monkeypatch.setattr(main_mod, "_tui_need_npm_install", lambda _root: False)
     monkeypatch.setattr(main_mod, "_tui_need_rebuild", lambda _root: False)
-    monkeypatch.setattr(main_mod.shutil, "which", lambda name: f"/bin/{name}")
+    # Bun ships no Termux/Android build, so a real Termux install only has
+    # node/npm on PATH. Reflect that here — a `which` stub that also
+    # resolves "bun" would make runtime auto-detection prefer Bun over
+    # Node, which never happens on real Termux and isn't what this test
+    # is checking.
+    monkeypatch.setattr(
+        main_mod.shutil, "which", lambda name: None if name == "bun" else f"/bin/{name}"
+    )
 
     def fail_run(*_args, **_kwargs):
         raise AssertionError("fresh Termux TUI launch must not rebuild")
@@ -185,7 +192,10 @@ def test_make_tui_argv_skips_install_on_termux_when_bundle_fresh(
     monkeypatch.setenv("TERMUX_VERSION", "1")
     monkeypatch.setattr(main_mod, "_tui_need_npm_install", lambda _root: True)
     monkeypatch.setattr(main_mod, "_tui_need_rebuild", lambda _root: False)
-    monkeypatch.setattr(main_mod.shutil, "which", lambda name: f"/bin/{name}")
+    # Same rationale as the sibling test above: no Bun on real Termux.
+    monkeypatch.setattr(
+        main_mod.shutil, "which", lambda name: None if name == "bun" else f"/bin/{name}"
+    )
 
     def fail_run(*_args, **_kwargs):
         raise AssertionError("fresh Termux TUI launch must not run npm")
