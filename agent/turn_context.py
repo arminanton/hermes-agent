@@ -223,6 +223,15 @@ def build_turn_context(
     think_scrubber = getattr(agent, "_stream_think_scrubber", None)
     if think_scrubber is not None:
         think_scrubber.reset()
+    # Reset the sentence-boundary normalizers so a partial sentence buffered
+    # at the end of the previous turn does not leak into the start of this
+    # turn (the "tance role flow" / "hese two values" cross-block leak).
+    text_norm = getattr(agent, "_stream_text_normalizer", None)
+    if text_norm is not None:
+        text_norm.reset()
+    reasoning_norm = getattr(agent, "_stream_reasoning_normalizer", None)
+    if reasoning_norm is not None:
+        reasoning_norm.reset()
 
     # Preserve the original user message (no nudge injection).
     original_user_message = persist_user_message if persist_user_message is not None else user_message

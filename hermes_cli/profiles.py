@@ -530,6 +530,53 @@ def find_alias_for_profile(profile_name: str) -> Optional[str]:
     return custom if custom is not None else profile_named
 
 
+def build_profile_alias_map() -> dict[str, str]:
+    """Return a ``{profile_id: alias_name}`` map by scanning the wrapper dir ONCE.
+
+    ``find_alias_for_profile`` reads every wrapper file on each call, so calling
+    it once per profile (as ``list_profiles`` did) is O(profiles × wrapper_files)
+    — e.g. 80 profiles × 112 wrappers ≈ 9,000 synchronous ``read_text`` calls per
+    ``list_profiles``/``list_cron_jobs`` request, which GIL-pins the dashboard's
+    async event loop and starves every other endpoint (the desktop app then can't
+    connect). This batch builds the same mapping in a SINGLE pass over the wrapper
+    dir: read each file once, parse its ``hermes -p <profile>`` needle, and assign
+    it to that profile. Same custom-alias-preferred-over-profile-named semantics
+    as ``find_alias_for_profile``; deterministic via sorted iteration.
+    """
+    wrapper_dir = _get_wrapper_dir()
+    out: dict[str, str] = {}
+    if not wrapper_dir.is_dir():
+        return out
+    is_windows = sys.platform == "win32"
+    # profile -> (custom_alias, profile_named_alias); custom wins.
+    custom: dict[str, str] = {}
+    profile_named: dict[str, str] = {}
+    needle_re = re.compile(r"hermes -p (\S+)")
+    for entry in sorted(wrapper_dir.iterdir()):
+        if not entry.is_file():
+            continue
+        if is_windows and entry.suffix != ".bat":
+            continue
+        if not is_windows and entry.suffix:
+            continue
+        try:
+            content = entry.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        m = needle_re.search(content)
+        if not m:
+            continue
+        profile = m.group(1)
+        alias = entry.stem if is_windows else entry.name
+        if alias == profile:
+            profile_named.setdefault(profile, alias)
+        else:
+            custom.setdefault(profile, alias)
+    for profile in set(custom) | set(profile_named):
+        out[profile] = custom.get(profile) or profile_named.get(profile)  # type: ignore[assignment]
+    return out
+
+
 # ---------------------------------------------------------------------------
 # ProfileInfo
 # ---------------------------------------------------------------------------
@@ -717,6 +764,11 @@ def list_profiles() -> List[ProfileInfo]:
     """Return info for all profiles, including the default."""
     profiles = []
     wrapper_dir = _get_wrapper_dir()
+    # Scan the wrapper dir ONCE up front instead of calling
+    # find_alias_for_profile per profile (O(profiles × wrapper_files) of
+    # synchronous read_text on the dashboard's event-loop thread — the wedge
+    # that starved every endpoint and broke the desktop app's connection).
+    alias_map = build_profile_alias_map()
 
     # Default profile
     default_home = _get_default_hermes_home()
@@ -752,7 +804,7 @@ def list_profiles() -> List[ProfileInfo]:
             if not _PROFILE_ID_RE.match(name):
                 continue
             model, provider = _read_config_model(entry)
-            alias_name = find_alias_for_profile(name)
+            alias_name = alias_map.get(name)
             if alias_name:
                 is_windows = sys.platform == "win32"
                 alias_path = wrapper_dir / (f"{alias_name}.bat" if is_windows else alias_name)

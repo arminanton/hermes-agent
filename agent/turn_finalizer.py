@@ -268,19 +268,48 @@ def finalize_turn(
     # First hook to return a string wins; None/empty return leaves text unchanged.
     if final_response and not interrupted:
         try:
-            from hermes_cli.plugins import invoke_hook as _invoke_hook
-            _transform_results = _invoke_hook(
-                "transform_llm_output",
-                response_text=final_response,
-                session_id=agent.session_id or "",
-                model=agent.model,
-                platform=getattr(agent, "platform", None) or "",
-            )
-            for _hook_result in _transform_results:
+            from hermes_cli.plugins import get_plugin_manager
+            # Serial chain: walk the registered transform_llm_output hooks one
+            # at a time, feeding each the PREVIOUS hook's output. Bypassing
+            # invoke_hook because it calls every hook with the SAME input and
+            # returns a list, which forces last-write-wins composition. With
+            # multiple plugins (dash + honesty) bulk invocation would only
+            # apply one transform; the others' work would be discarded. The
+            # serial walk composes the transforms the way the user-facing
+            # contract implies. Per-hook errors are isolated.
+            _callbacks = get_plugin_manager()._hooks.get("transform_llm_output", [])
+            for _hook in _callbacks:
+                try:
+                    _hook_result = _hook(
+                        response_text=final_response,
+                        session_id=agent.session_id or "",
+                        model=agent.model,
+                        platform=getattr(agent, "platform", None) or "",
+                    )
+                except Exception as _hook_exc:
+                    logger.debug("transform_llm_output hook %s raised: %s",
+                                 getattr(_hook, "__name__", repr(_hook)), _hook_exc)
+                    continue
                 if isinstance(_hook_result, str) and _hook_result:
                     final_response = _hook_result
                     _response_transformed = True
-                    break  # First non-empty string wins
+            # REBORN-fix (2026-06-29): if a transform_llm_output hook rewrote
+            # the text, propagate the rewrite back into messages[-1] so CMX,
+            # session DB, future-turn context, and anything else that reads
+            # the conversation history sees the cleaned text, not the raw
+            # pre-hook output the model emitted. Without this, the hook only
+            # affects the return value, and the rewritten text never reaches
+            # any persistence layer. Walk backwards to the last assistant
+            # message in case tool messages were appended after it.
+            if _response_transformed:
+                for _i in range(len(messages) - 1, -1, -1):
+                    _msg = messages[_i]
+                    if _msg.get("role") == "assistant":
+                        # Only touch string content; multimodal blocks are
+                        # left as-is (the hook contract is text-only).
+                        if isinstance(_msg.get("content"), str):
+                            _msg["content"] = final_response
+                        break
         except Exception as exc:
             logger.warning("transform_llm_output hook failed: %s", exc)
 

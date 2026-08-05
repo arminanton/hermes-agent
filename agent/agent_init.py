@@ -639,12 +639,53 @@ def init_agent(
     # boundaries because the block regex needs both tags in one string.
     agent._stream_context_scrubber = StreamingContextScrubber()
     # Stateful scrubber for reasoning/thinking tags in streamed deltas
-    # (#17924).  Replaces the per-delta _strip_think_blocks regex that
+    # (#17924). Replaces the per-delta _strip_think_blocks regex that
     # destroyed downstream state (e.g. MiniMax-M2.7 streaming
-    # '<think>' as delta1 and 'Let me check' as delta2 — the regex
+    # '<think>' as delta1 and 'Let me check' as delta2, the regex
     # erased delta1, so downstream state machines never learned a
     # block was open and leaked delta2 as content).
     agent._stream_think_scrubber = StreamingThinkScrubber()
+    # REBORN-fix (2026-06-29): per-chunk plugin-driven text normalizer.
+    # Mirrors the think/context scrubbers but routes through every
+    # transform_llm_output hook (dash-normalizer, honesty-stripper).
+    # Without this, the hook fired only on the final whole response
+    # AFTER the stream had already painted dashes/honesty tokens into
+    # the UI. The streaming variant buffers a small tail across chunks
+    # so cross-boundary patterns still match.
+    _stream_text_normalizer, _stream_reasoning_normalizer = None, None
+    try:
+        from agent.stream_text_normalizer import StreamNormalizer
+        from hermes_cli.plugins import invoke_hook as _invoke
+
+        def _apply_chain(text):
+            # Serial chain: walk the registered transform_llm_output hooks
+            # one at a time, feeding each the PREVIOUS hook's output.
+            # The bulk invoke_hook calls every hook with the SAME input,
+            # which is last-write-wins for multi-plugin chains (dash +
+            # honesty would each see the original; the second to run would
+            # overwrite the first). Going through the plugin manager
+            # directly composes the transforms correctly. Per-hook errors
+            # are isolated so a buggy plugin cannot stall streaming.
+            try:
+                from hermes_cli.plugins import get_plugin_manager as _gpm
+                _cbs = _gpm()._hooks.get("transform_llm_output", [])
+            except Exception:
+                return text
+            for _cb in _cbs:
+                try:
+                    _r = _cb(response_text=text)
+                except Exception:
+                    continue
+                if isinstance(_r, str) and _r:
+                    text = _r
+            return text
+
+        _stream_text_normalizer = StreamNormalizer(_apply_chain)
+        _stream_reasoning_normalizer = StreamNormalizer(_apply_chain)
+    except Exception:
+        pass
+    agent._stream_text_normalizer = _stream_text_normalizer
+    agent._stream_reasoning_normalizer = _stream_reasoning_normalizer
     # Visible assistant text already delivered through live token callbacks
     # during the current model response. Used to avoid re-sending the same
     # commentary when the provider later returns it as a completed interim

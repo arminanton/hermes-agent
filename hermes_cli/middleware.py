@@ -139,13 +139,39 @@ def apply_tool_request_middleware(
     current_args = _safe_copy(original_args)
     trace: List[Dict[str, Any]] = []
 
-    for result in _invoke_middleware(
-        TOOL_REQUEST_MIDDLEWARE,
+    # Serial chained invocation: walk the plugin manager's registered
+    # tool_request callbacks one at a time and feed each the OUTPUT of the
+    # previous one as its input. Bypassing the bulk invoke_middleware helper
+    # because it calls every callback with the SAME args snapshot, which is
+    # last-write-wins (dash and honesty middlewares would both see the
+    # original args and the last one's output would overwrite the first's
+    # work; reordering the plugin registration would just flip which side
+    # leaked). Iterating the callbacks directly with a rolling current_args
+    # composes the transforms exactly the way the user-facing contract
+    # implies. Errors in any single callback are isolated and tracked so a
+    # buggy plugin cannot break tool dispatch entirely.
+    from hermes_cli.plugins import get_plugin_manager
+    payload = middleware_payload(
         tool_name=tool_name,
         args=current_args,
         original_args=original_args,
         **context,
-    ):
+    )
+    callbacks = get_plugin_manager()._middleware.get(TOOL_REQUEST_MIDDLEWARE, [])
+    for cb in callbacks:
+        # Build per-callback kwargs with the rolling current_args so this
+        # middleware sees the previous middleware's output, not the
+        # original snapshot.
+        cb_kwargs = dict(payload)
+        cb_kwargs["args"] = current_args
+        try:
+            result = cb(**cb_kwargs)
+        except Exception as exc:
+            logger.warning(
+                "tool_request middleware %s raised: %s",
+                getattr(cb, "__name__", repr(cb)), exc,
+            )
+            continue
         if not isinstance(result, dict):
             continue
         next_args = result.get("args")

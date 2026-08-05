@@ -2296,6 +2296,19 @@ DEFAULT_CONFIG = {
         "allow_lazy_installs": True,
     },
 
+    # Humanizer plugins (dash normalizer + sincerity-word stripper). These run
+    # as tool_request middleware and rewrite prose the agent emits. By default
+    # they now EXEMPT the file/source-edit tools (write_file, patch,
+    # skill_manage) because their fields are literal file bytes: rewriting a
+    # dash to a comma or deleting a word inside real source code silently
+    # corrupts the file and forced base64 round-trips to bypass. Genuine
+    # user-voice prose (memory, cron prompts, subagent goals, send_message,
+    # tts) is still normalized. Flip normalize_file_edits to true to restore
+    # the old behavior of scrubbing file content too.
+    "humanizer": {
+        "normalize_file_edits": False,
+    },
+
     "cron": {
         # Active cron SCHEDULER provider (Axis B — the trigger that decides
         # WHEN a due job fires). Empty string = the built-in in-process 60s

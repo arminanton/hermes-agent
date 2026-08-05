@@ -372,7 +372,19 @@ def _build_safe_env(user_env: Optional[dict]) -> dict:
         ):
             env[key] = value
     if user_env:
-        env.update(user_env)
+        # Coerce every user-supplied value to str. The MCP SDK's
+        # StdioServerParameters.env is typed dict[str, str]; a bare int/bool/
+        # float in config.yaml (e.g. `COUNCIL_GATE_PEER_REVIEW: 1` instead of
+        # "1") otherwise fails Pydantic validation at connect time, so the
+        # ENTIRE server fails to connect and NONE of its tools register — a
+        # silent, whole-server outage from one unquoted scalar. Process env
+        # values are already str; only user_env (parsed YAML) can carry a
+        # non-string scalar, so normalize here at the single merge funnel.
+        # None is dropped (can't stringify to a meaningful env value).
+        for key, value in user_env.items():
+            if value is None:
+                continue
+            env[str(key)] = value if isinstance(value, str) else str(value)
     return env
 
 

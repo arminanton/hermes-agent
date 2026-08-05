@@ -4174,6 +4174,33 @@ class AIAgent:
                     except Exception:
                         pass
                 self._record_streamed_assistant_text(tail)
+        # Flush any partial sentence held by the streaming normalizers (the
+        # sentence-boundary buffers added for the dash/honesty plugins).
+        # The normalizer holds chunks until a sentence terminator is seen so
+        # multi-word patterns like "to be honest," can be normalized as a
+        # complete unit; at end-of-stream the held partial must reach the UI
+        # or it would be silently lost. Content stream goes to the content
+        # callbacks (same path think_scrubber uses above); reasoning stream
+        # goes to the reasoning callback only.
+        text_norm = getattr(self, "_stream_text_normalizer", None)
+        if text_norm is not None:
+            text_tail = text_norm.flush()
+            if text_tail:
+                callbacks = [cb for cb in (self.stream_delta_callback, self._stream_callback) if cb is not None]
+                for cb in callbacks:
+                    try:
+                        cb(text_tail)
+                    except Exception:
+                        pass
+                self._record_streamed_assistant_text(text_tail)
+        reasoning_norm = getattr(self, "_stream_reasoning_normalizer", None)
+        if reasoning_norm is not None:
+            reasoning_tail = reasoning_norm.flush()
+            if reasoning_tail and self.reasoning_callback is not None:
+                try:
+                    self.reasoning_callback(reasoning_tail)
+                except Exception:
+                    pass
         self._current_streamed_assistant_text = ""
 
     def _record_streamed_assistant_text(self, text: str) -> None:
@@ -4250,7 +4277,16 @@ class AIAgent:
             else:
                 # Defensive: legacy callers without the scrubber attribute.
                 text = sanitize_context(text)
-            # Only strip leading newlines on the first delta — mid-stream "\n" is legitimate markdown.
+            # REBORN-fix (2026-06-29): apply per-chunk plugin normalizer
+            # (e.g. dash, honesty) AFTER think/context scrubbing but BEFORE
+            # callbacks fire. Buffers a small tail across chunks so a token
+            # split across deltas still matches.
+            stream_text_normalizer = getattr(self, "_stream_text_normalizer", None)
+            if stream_text_normalizer is not None and text:
+                text = stream_text_normalizer.feed(text)
+                if not text:
+                    return  # everything held back for next chunk
+            # Only strip leading newlines on the first delta, mid-stream "\n" is legitimate markdown.
             if not prepended_break and not getattr(
                 self, "_current_streamed_assistant_text", ""
             ):
@@ -4270,6 +4306,14 @@ class AIAgent:
 
     def _fire_reasoning_delta(self, text: str) -> None:
         """Fire reasoning callback if registered."""
+        # REBORN-fix (2026-06-29): same per-chunk normalization as
+        # _fire_stream_delta, but routed through a sibling buffer so
+        # content and reasoning streams don't pollute each other's tail.
+        stream_reasoning_normalizer = getattr(self, "_stream_reasoning_normalizer", None)
+        if stream_reasoning_normalizer is not None and isinstance(text, str) and text:
+            text = stream_reasoning_normalizer.feed(text)
+            if not text:
+                return
         cb = self.reasoning_callback
         if cb is not None:
             try:
