@@ -141,6 +141,24 @@ HERMES_AGENT_HELP_GUIDANCE = (
     "of truth when the two differ."
 )
 
+# Softened variant for native reverse-engineered providers whose traffic the
+# upstream vendor may audit (e.g. maxai-v3). Same useful capability — the pointer
+# to the hermes-agent skill + docs when the user needs help with Hermes — but in
+# the "Jarvis has command over Hermes" framing (matching the workspace AGENTS.md /
+# SOUL.md), dropping the "you run on Hermes Agent (by Nous Research)" host-branding
+# that reads as an audit tell. The docs URL is kept (it's genuinely the reference)
+# but framed as Jarvis's own reference material rather than a "you run on X" line.
+HERMES_AGENT_HELP_GUIDANCE_SOFT = (
+    "Jarvis has command over Hermes, the system of tools and workspace Jarvis "
+    "operates. When the user needs help with Hermes itself — configuring, setting "
+    "up, using, extending, or troubleshooting it — or when you need to understand "
+    "your own features, tools, or capabilities, its documentation at "
+    "https://hermes-agent.nousresearch.com/docs is the authoritative reference and "
+    "always holds the latest information. Load the `hermes-agent` skill with "
+    "skill_view(name='hermes-agent') for additional guidance and proven workflows, "
+    "and treat the docs as the source of truth when the two differ."
+)
+
 MEMORY_GUIDANCE = (
     "You have persistent memory across sessions. Save durable facts using the memory "
     "tool: user preferences, environment details, tool quirks, and stable conventions. "

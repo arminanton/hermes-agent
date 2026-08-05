@@ -146,19 +146,39 @@ def _load_prelude_config() -> dict:
         return {}
 
 
-def _candidate_ids(model: Optional[str]) -> List[str]:
+def _candidate_ids(model: Optional[str], provider: Optional[str] = None) -> List[str]:
     """Lower-cased forms of the model id to match globs against.
 
     Includes the full id (which may be ``provider/model``) and the bare tail
     after the last ``/`` so a rule can match either ``anthropic/claude-opus-4-6``
     or just ``claude-opus-4-6``.
+
+    When ``provider`` is given, ALSO contributes provider-scoped candidates so a
+    rule can target a provider regardless of the model's family-shaped name:
+      * the bare provider (``maxai-v3``) — for a rule ``match: "maxai-v3"``;
+      * a synthetic ``provider/model`` form (``maxai-v3/gemini-3.1-pro-preview``)
+        — for a rule ``match: "maxai-v3/*gemini*"`` that wants provider AND family.
+    This is how the MaxAI-tailored preludes are selected ahead of the generic
+    ``*gpt*`` / ``*gemini*`` / ``*claude*`` rules: MaxAI's models are *named*
+    like real frontier models, so a provider-scoped rule (placed first, with
+    ``first_match``) routes them to the softened, classifier-safe MaxAI files
+    instead of the heavy Frontier/Fable stack.
     """
     m = (model or "").strip().lower()
-    if not m:
-        return []
-    ids = [m]
-    if "/" in m:
-        ids.append(m.rsplit("/", 1)[-1])
+    p = (provider or "").strip().lower()
+    ids: List[str] = []
+    if m:
+        ids.append(m)
+        if "/" in m:
+            ids.append(m.rsplit("/", 1)[-1])
+    if p:
+        ids.append(p)
+        if m:
+            # bare model tail (post-slash) joined under the provider, so a
+            # provider/family rule matches even when the caller's model had its
+            # own provider prefix already.
+            tail = m.rsplit("/", 1)[-1]
+            ids.append(f"{p}/{tail}")
     return ids
 
 
@@ -213,7 +233,7 @@ def resolve_prelude(model: Optional[str], provider: Optional[str] = None) -> Pre
         str(cfg.get("base_dir") or "~/.hermes/system-prompts").strip()
     )
     first_match = cfg.get("first_match", True)
-    ids = _candidate_ids(model)
+    ids = _candidate_ids(model, provider)
     if not ids:
         return PreludeResolution("", [], None)
 

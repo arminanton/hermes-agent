@@ -30,6 +30,7 @@ from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
     HERMES_AGENT_HELP_GUIDANCE,
+    HERMES_AGENT_HELP_GUIDANCE_SOFT,
     KANBAN_GUIDANCE,
     MEMORY_GUIDANCE,
     OPENAI_MODEL_EXECUTION_GUIDANCE,
@@ -177,12 +178,27 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             stable_parts.append(_soul_content)
             _soul_loaded = True
 
+    # Provider-scoped identity hygiene: native reverse-engineered providers whose
+    # traffic may be audited by the upstream vendor (e.g. maxai-v3) get the SOFTENED
+    # help guidance — same useful hermes-agent skill + docs pointer, but in the
+    # "Jarvis has command over Hermes" framing (matching the workspace AGENTS.md /
+    # SOUL.md) instead of the "you run on Hermes Agent (by Nous Research)" host
+    # branding that reads as an audit tell. Everyone else keeps the standard line.
+    _prov = str(getattr(agent, "provider", "") or "").lower()
+    _base = str(getattr(agent, "base_url", "") or "").lower()
+    _soft_host_branding = (
+        _prov.startswith("maxai") or _base.startswith("maxai-v3")
+    )
+
     if not _soul_loaded:
         # Fallback to hardcoded identity
         stable_parts.append(DEFAULT_AGENT_IDENTITY)
 
     # Pointer to the hermes-agent skill + docs for user questions about Hermes itself.
-    stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)
+    stable_parts.append(
+        HERMES_AGENT_HELP_GUIDANCE_SOFT if _soft_host_branding
+        else HERMES_AGENT_HELP_GUIDANCE
+    )
 
     # Universal task-completion / no-fabrication guidance.  Applied to ALL
     # models regardless of tool_use_enforcement gating — the failure modes
