@@ -4,6 +4,7 @@ import {
   boundedLiveRenderText,
   buildToolTrailLine,
   buildVerboseToolTrailLine,
+  compactToolCallDisplay,
   edgePreview,
   estimateRows,
   estimateTokensRough,
@@ -17,7 +18,8 @@ import {
   sanitizeAnsiForRender,
   splitToolDuration,
   stripAnsi,
-  thinkingPreview
+  thinkingPreview,
+  toolCallInspectTitle
 } from '../lib/text.js'
 
 describe('isToolTrailResultLine', () => {
@@ -35,6 +37,128 @@ describe('buildToolTrailLine', () => {
     expect(line).toBe('Read File("x") (0.9s) ✓')
     expect(parseToolTrailResultLine(line)).toEqual({ call: 'Read File("x") (0.9s)', detail: '', mark: '✓' })
     expect(splitToolDuration('Read File("x") (0.9s)')).toEqual({ label: 'Read File("x")', duration: ' (0.9s)' })
+  })
+})
+
+describe('toolCallInspectTitle', () => {
+  it('returns a SIMPLE "<Label> tool call" title, NOT the full command (regression)', () => {
+    // The inspect popup body already shows the full command verbatim; the
+    // title must not duplicate it. A gnarly Terminal call with embedded quotes
+    // + a `: ` must still collapse to just "Terminal tool call".
+    const call =
+      'Terminal("cd /mnt/devvm/custom/gpt-native && echo "==== fix the stale origin/master tracking ref: point it at HEAD ===="") (1.2s)'
+
+    expect(toolCallInspectTitle(call)).toBe('Terminal tool call')
+  })
+
+  it('strips a trailing completion marker and duration', () => {
+    expect(toolCallInspectTitle('Read File("/x/y.ts") (0.9s)')).toBe('Read File tool call')
+    expect(toolCallInspectTitle('Patch("/a/b.py") ✓')).toBe('Patch tool call')
+  })
+
+  it('handles a bare label with no parenthesized context', () => {
+    expect(toolCallInspectTitle('Delegate Task')).toBe('Delegate Task tool call')
+  })
+
+  it('falls back to "Tool call" for an empty label', () => {
+    expect(toolCallInspectTitle('')).toBe('Tool call')
+  })
+})
+
+describe('parseToolTrailResultLine', () => {
+  it('does NOT split on a `: ` embedded inside a modern Label("…") command (regression)', () => {
+    // A completed shell call whose command contains an embedded `: ` — e.g.
+    // `echo "the REAL question: is my commit on the remote?"`. The legacy
+    // `Label: context` fallback used to mistake that embedded colon for the
+    // call/detail separator, splitting the row into a bogus compact header +
+    // a spilled full-command "detail" block below it. The whole command must
+    // stay in `call` with an EMPTY detail so the inline row compacts cleanly.
+    const ctx =
+      'cd /mnt/devvm/custom/gpt-native && echo "==== the REAL question: is my commit currently on the remote? ask GitHub directly ===="'
+    const line = buildToolTrailLine('terminal', ctx, false, undefined, 1.2)
+    const parsed = parseToolTrailResultLine(line)
+
+    expect(parsed?.detail).toBe('')
+    expect(parsed?.call).toContain('the REAL question: is my commit')
+    // And the inline compaction of that call is short + ellipsized.
+    const compact = compactToolCallDisplay(parsed!.call)
+    expect(compact).toContain('…")')
+    expect(compact).not.toContain('ask GitHub directly')
+  })
+
+  it('still parses genuinely-legacy `Label: context` trail lines (pre-paren format)', () => {
+    // Backward-compat: old persisted lines had no `("` and used a single
+    // `: ` separator. Those must still split correctly.
+    expect(parseToolTrailResultLine('Read File: /some/legacy/path ✓')).toEqual({
+      call: 'Read File',
+      detail: '/some/legacy/path',
+      mark: '✓'
+    })
+  })
+
+  it('still parses a modern `::` verbose-detail line', () => {
+    const line = buildToolTrailLine('read_file', 'x', false, 'note', 0.5)
+    const parsed = parseToolTrailResultLine(line)
+
+    expect(parsed?.call).toBe('Read File("x") (0.5s)')
+    expect(parsed?.detail).toBe('note')
+  })
+})
+
+describe('compactToolCallDisplay', () => {
+  const longCtx =
+    'cd /mnt/devvm/custom/gpt-native && echo ==== fix the stale origin tracking ref and verify HEAD matches upstream main exactly, then mark checkpoint complete ===='
+
+  it('shortens a long call to the compact inline form with a trailing ellipsis', () => {
+    const compact = compactToolCallDisplay(`Terminal("${longCtx}")`)
+
+    expect(compact.length).toBeLessThan(longCtx.length)
+    expect(compact.startsWith('Terminal("')).toBe(true)
+    expect(compact).toContain('…")')
+    // The tail the popup keeps must NOT leak into the compact inline form.
+    expect(compact).not.toContain('mark checkpoint complete')
+  })
+
+  it('preserves a trailing duration suffix while compacting the context', () => {
+    const compact = compactToolCallDisplay(`Terminal("${longCtx}") (1.2s)`)
+
+    expect(compact).toMatch(/…"\) \(1\.2s\)$/)
+  })
+
+  it('is a no-op for already-short calls (with or without duration)', () => {
+    expect(compactToolCallDisplay('Read File("x") (0.9s)')).toBe('Read File("x") (0.9s)')
+    expect(compactToolCallDisplay('Terminal("pwd")')).toBe('Terminal("pwd")')
+  })
+
+  it('is a no-op for a bare label with no parenthesized context', () => {
+    expect(compactToolCallDisplay('Delegate Task')).toBe('Delegate Task')
+  })
+
+  it('compacts commands with EMBEDDED double-quotes (regression: regex anchored on end)', () => {
+    // Real shell commands contain embedded quotes and heredocs, so the call
+    // string does NOT end in a clean `")`. The old end-anchored regex silently
+    // failed on exactly these, leaving the full command in the inline row.
+    const gnarly =
+      'cd /mnt/devvm/custom/gpt-native echo "==== verify remote HEAD via AUTHENTICATED ls-remote (same auth path) ====" cat > /tmp/x.sh <<\'SH\' TOK="$(gh auth token)" echo "my local HEAD: $(git rev-parse HEAD)"'
+    const call = `Terminal("${gnarly}") (1.2s)`
+
+    const compact = compactToolCallDisplay(call)
+
+    expect(compact.length).toBeLessThan(call.length)
+    expect(compact).toContain('…')
+    expect(compact).toMatch(/\) \(1\.2s\)$/)
+    expect(compact).not.toContain('git rev-parse HEAD')
+  })
+
+  it('compacts a truncation-clipped call that never closes its quote', () => {
+    // parseToolTrailResultLine can hand us a call that was clipped mid-command
+    // (no trailing `")`). Compaction must still shorten it, not pass it through.
+    const clipped = 'Terminal("cd /very/long/path && echo ' + 'x'.repeat(200)
+
+    const compact = compactToolCallDisplay(clipped)
+
+    expect(compact.length).toBeLessThan(clipped.length)
+    expect(compact).toContain('…')
   })
 })
 
@@ -184,12 +308,34 @@ describe('ANSI sanitizers', () => {
 })
 
 describe('thinkingPreview', () => {
-  it('adds paragraph breaks before markdown thinking headings', () => {
+  it('strips markdown markers but keeps heading paragraph breaks', () => {
     const raw =
       '**Considering user instructions**\nI need to answer.**Planning tool execution**\nI can run tools.**Determining weather search parameters**\nUse SF.'
 
+    // Thinking is rendered as plain text (no markdown renderer), so the `**`
+    // markers are stripped to clean prose; headings still get a blank line
+    // before them so they stand out as their own line.
     expect(thinkingPreview(raw, 'full')).toBe(
-      '**Considering user instructions**\nI need to answer.\n\n**Planning tool execution**\nI can run tools.\n\n**Determining weather search parameters**\nUse SF.'
+      'Considering user instructions\nI need to answer.\n\nPlanning tool execution\nI can run tools.\n\nDetermining weather search parameters\nUse SF.'
+    )
+  })
+
+  it('strips inline bold sizing labels to plain letters', () => {
+    // Reasoning models emit **S**/**M**/**L** inline. Since thinking is not
+    // markdown-rendered, the `**` would show literally, so we strip them.
+    const raw =
+      "requires regional deployment, so that lands at **M**. The service fronting all four is **L**. Device is the cleanest play. That's **S**, three to four sprints."
+
+    expect(thinkingPreview(raw, 'full')).toBe(
+      "requires regional deployment, so that lands at M. The service fronting all four is L. Device is the cleanest play. That's S, three to four sprints."
+    )
+  })
+
+  it('strips adjacent bold markers on one line to plain text', () => {
+    const raw = 'Sizing now. **S** is 3-4 sprints, **M** is 5-6, **L** is 7-8, larger decomposes.'
+
+    expect(thinkingPreview(raw, 'full')).toBe(
+      'Sizing now. S is 3-4 sprints, M is 5-6, L is 7-8, larger decomposes.'
     )
   })
 })

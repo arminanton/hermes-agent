@@ -4,6 +4,7 @@ import spinners, { type BrailleSpinnerName } from 'unicode-animations'
 
 import { THINKING_COT_MAX } from '../config/limits.js'
 import { sectionMode } from '../domain/details.js'
+import { inspectToolCall } from '../lib/inspectToolCall.js'
 import {
   buildSubagentTree,
   fmtCost,
@@ -18,6 +19,7 @@ import {
 import {
   boundedLiveRenderText,
   compactPreview,
+  compactToolCallDisplay,
   estimateTokensRough,
   fmtK,
   formatToolCall,
@@ -25,6 +27,7 @@ import {
   pick,
   splitToolDuration,
   thinkingPreview,
+  toolCallInspectTitle,
   toolTrailLabel
 } from '../lib/text.js'
 import type { Theme } from '../theme.js'
@@ -60,6 +63,7 @@ const treeLead = (rails: TreeRails, branch: TreeBranch) =>
 function TreeRow({
   branch,
   children,
+  onClick,
   rails = [],
   stemColor,
   stemDim = true,
@@ -67,6 +71,7 @@ function TreeRow({
 }: {
   branch: TreeBranch
   children: ReactNode
+  onClick?: () => void
   rails?: TreeRails
   stemColor?: string
   stemDim?: boolean
@@ -75,7 +80,7 @@ function TreeRow({
   const lead = treeLead(rails, branch)
 
   return (
-    <Box>
+    <Box onClick={onClick}>
       <NoSelect flexShrink={0} fromLeftEdge width={lead.length}>
         <Text color={stemColor ?? t.color.muted} dim={stemDim}>
           {lead}
@@ -93,6 +98,7 @@ function TreeTextRow({
   color,
   content,
   dimColor,
+  onClick,
   rails = [],
   t,
   wrap = 'wrap-trim'
@@ -101,6 +107,7 @@ function TreeTextRow({
   color: string
   content: ReactNode
   dimColor?: boolean
+  onClick?: () => void
   rails?: TreeRails
   t: Theme
   wrap?: 'truncate-end' | 'wrap' | 'wrap-trim'
@@ -116,7 +123,7 @@ function TreeTextRow({
   )
 
   return (
-    <TreeRow branch={branch} rails={rails} t={t}>
+    <TreeRow branch={branch} onClick={onClick} rails={rails} t={t}>
       {text}
     </TreeRow>
   )
@@ -682,6 +689,7 @@ interface Group {
   color: string
   content: ReactNode
   details: DetailRow[]
+  full?: string
   key: string
   label: string
 }
@@ -797,8 +805,9 @@ export const ToolTrail = memo(function ToolTrail({
     if (parsed) {
       groups.push({
         color: parsed.mark === '✗' ? t.color.error : t.color.text,
-        content: parsed.call,
+        content: compactToolCallDisplay(parsed.call),
         details: [],
+        full: line,
         key: `tr-${i}`,
         label: parsed.call
       })
@@ -850,12 +859,18 @@ export const ToolTrail = memo(function ToolTrail({
   }
 
   for (const tool of tools) {
-    const label = formatToolCall(tool.name, tool.context || '')
+    const label = compactToolCallDisplay(formatToolCall(tool.name, tool.context || ''))
+    const fullContext = tool.contextFull || tool.context || ''
+    const fullParts = [
+      `${toolTrailLabel(tool.name)}${fullContext ? `(${fullContext})` : ''}`,
+      tool.verboseArgs ? `\nArgs:\n${tool.verboseArgs}` : ''
+    ]
 
     groups.push({
       color: t.color.text,
       key: tool.id,
       label,
+      full: fullParts.join('').trim(),
       details: tool.verboseArgs
         ? [
             {
@@ -1083,6 +1098,11 @@ export const ToolTrail = memo(function ToolTrail({
                 <TreeTextRow
                   branch={branch}
                   color={group.color}
+                  onClick={
+                    group.full
+                      ? () => inspectToolCall(toolCallInspectTitle(String(group.label)), group.full!)
+                      : undefined
+                  }
                   content={
                     <>
                       <Text color={t.color.accent}>● </Text>
@@ -1090,6 +1110,10 @@ export const ToolTrail = memo(function ToolTrail({
                       {isDelegateGroup ? (
                         <Text color={t.color.statusFg} dim>
                           {'  (/agents to monitor)'}
+                        </Text>
+                      ) : group.full ? (
+                        <Text color={t.color.statusFg} dim>
+                          {'  (click · /inspect)'}
                         </Text>
                       ) : null}
                     </>

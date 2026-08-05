@@ -14,11 +14,14 @@ import type {
   SessionUndoResponse
 } from '../../../gatewayTypes.js'
 import { writeClipboardText } from '../../../lib/clipboard.js'
+import { inspectToolCall } from '../../../lib/inspectToolCall.js'
 import { writeOsc52Clipboard } from '../../../lib/osc52.js'
 import { configureDetectedTerminalKeybindings, configureTerminalKeybindings } from '../../../lib/terminalSetup.js'
+import { toolCallInspectTitle } from '../../../lib/text.js'
 import type { Msg, PanelSection } from '../../../types.js'
 import type { StatusBarMode } from '../../interfaces.js'
 import { patchOverlayState } from '../../overlayStore.js'
+import { getTurnState } from '../../turnStore.js'
 import { patchUiState } from '../../uiStore.js'
 import type { SlashCommand } from '../types.js'
 

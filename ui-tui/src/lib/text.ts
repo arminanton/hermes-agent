@@ -5,6 +5,7 @@ import {
   VERBOSE_TRAIL_MAX_CHARS,
   VERBOSE_TRAIL_MAX_LINES
 } from '../config/limits.js'
+import { stripInlineMarkup } from '../components/markdown.js'
 import { VERBS } from '../content/verbs.js'
 import type { ThinkingMode } from '../types.js'
 
@@ -110,11 +111,26 @@ const THINKING_STATUS_CHUNK_RE = new RegExp(`[^A-Za-z\n]+\\s*(?:${VERBS.join('|'
 
 export const cleanThinkingText = (reasoning: string) =>
   reasoning
+    // Thinking text is rendered as PLAIN text (no markdown renderer), so raw
+    // `**`/`` ` ``/`*` markers would show as literal noise. Order matters:
+    // (1) add a blank line before a bold **heading** (a `**…**` span glued to
+    //     the end of the previous line) so it stands out as its own line;
+    // (2) strip ALL inline markup to clean prose;
+    // (3) THEN run the status-verb / face-ticker filter on the already-clean
+    //     text — so a heading starting with a thinking-verb (e.g.
+    //     `**Analyzing …**`) isn't half-eaten into an orphan `**` (the verb
+    //     filter keys off a non-letter before the verb, and a leading `**`
+    //     counts — the bug the old keep-the-`**` path masked). The filter keeps
+    //     intentional blank lines (the heading spacing) while dropping
+    //     verb-only ticker lines.
+    .replace(/([^\n])(\*\*[^\n]{3,}\*\*)(\s*)$/gm, '$1\n\n$2$3')
+    .split('\n')
+    .map(line => stripInlineMarkup(line))
+    .join('\n')
     .split('\n')
     .map(line => line.replace(THINKING_STATUS_CHUNK_RE, '').trim())
-    .filter(line => line && !THINKING_STATUS_RE.test(line.replace(/\.\.\.$/, '').trim()))
+    .filter(line => !THINKING_STATUS_RE.test(line.replace(/\.\.\.$/, '').trim()))
     .join('\n')
-    .replace(/([^\n])(?=\*\*[^*\n][^\n]*?\*\*)/g, '$1\n\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
 
@@ -196,7 +212,14 @@ export const toolTrailLabel = (name: string) =>
 
 export const formatToolCall = (name: string, context = '') => {
   const label = toolTrailLabel(name)
-  const preview = compactPreview(context, 64)
+  // Keep a generous single-line cap: enough to retain a full command/path so
+  // the click-to-inspect / `/inspect` popup shows the whole thing (the inline
+  // trail row is width-clamped by Ink's wrap-trim regardless of this length,
+  // so a long value never visually overflows). The old 64-char cap discarded
+  // the tail of every long command at completion time, leaving the inspect
+  // popup showing only the truncated preview. This is still bounded so a
+  // pathological arg can't balloon the stored trail string.
+  const preview = compactPreview(context, 2000)
 
   return preview ? `${label}("${preview}")` : label
 }
@@ -260,9 +283,19 @@ export const parseToolTrailResultLine = (line: string) => {
     return { call: body.slice(0, sep), detail: body.slice(sep + 4), mark }
   }
 
+  // Legacy fallback for pre-April-2026 trail lines that used `Label: context`
+  // (single colon-space, no parens) before the `Label("…")` call shape existed.
+  // Guard against misfiring on MODERN lines: a modern call is `Label("…")`,
+  // whose context routinely contains an embedded `: ` (e.g. a shell command
+  // like `echo "the question: answer"`). That embedded colon must NOT be
+  // treated as the call/detail separator — doing so split the row into a bogus
+  // compact header + a spilled full-command "detail" block (#regression from
+  // storing full commands in the trail line). The legacy separator always
+  // preceded the first `("`, so only honour a `: ` that comes before any `("`.
   const legacy = body.indexOf(': ')
+  const paren = body.indexOf('("')
 
-  if (legacy > 0) {
+  if (legacy > 0 && (paren < 0 || legacy < paren)) {
     return { call: body.slice(0, legacy), detail: body.slice(legacy + 2), mark }
   }
 
@@ -273,6 +306,61 @@ export const splitToolDuration = (call: string) => {
   const match = call.match(/^(.*?)( \(\d+(?:\.\d)?s\))$/)
 
   return match ? { label: match[1]!, duration: match[2]! } : { label: call, duration: '' }
+}
+
+// Build a SIMPLE header title for the click / `/inspect` pager popup from a
+// tool-call string like `Terminal("cd …")`, `Read File("x") (1.2s)`, or a bare
+// `Delegate Task`. The popup BODY already shows the full command verbatim, so
+// the title must NOT duplicate it (they were rendering identical full commands
+// — one bold, one not). Extract just the tool label: strip a trailing ✓/✗
+// completion marker + a duration suffix, then take everything before the first
+// `("`, and render it as `<Label> tool call`.
+export const toolCallInspectTitle = (call: string) => {
+  const noMark = call.replace(/\s*[✓✗]\s*$/, '')
+  const { label: withoutDuration } = splitToolDuration(noMark)
+  const open = withoutDuration.match(/^(.*?)\("/)
+  const label = (open ? open[1]! : withoutDuration).trim()
+
+  return label ? `${label} tool call` : 'Tool call'
+}
+
+// Re-truncate a `Label("<context>")` call string to the COMPACT inline form for
+// display in the tool-trail row. The stored trail line keeps the full context
+// (so the click-to-inspect / `/inspect` popup shows everything), but the inline
+// row should stay short with a trailing `…` like it always did — decoupling
+// what's shown in the shell from what's available on inspect. No-op for calls
+// with no parenthesized context (e.g. a bare `Delegate Task`) or already-short
+// ones. Mirrors formatToolCall's `Label("preview")` shape.
+const INLINE_TOOL_CALL_MAX = 64
+export const compactToolCallDisplay = (call: string) => {
+  // Peel off a trailing ` (1.2s)` duration first so it survives compaction.
+  const { duration, label: withoutDuration } = splitToolDuration(call)
+
+  // Match ONLY the opening `Label("` prefix, not a clean `Label("…")` shape:
+  // real tool contexts (shell commands, heredocs) contain embedded double
+  // quotes, so the string frequently does NOT end in a clean `")`. Anchoring
+  // on the end made the old regex silently fail on exactly those commands,
+  // leaving the full command in the inline row (the reported bug). Grab the
+  // label + everything after the first `("`, then truncate that remainder.
+  const open = withoutDuration.match(/^(.*?)\("/)
+
+  if (!open) {
+    return call
+  }
+
+  const label = open[1]!
+  const rest = withoutDuration.slice(open[0].length) // everything after `Label("`
+  // Drop a trailing closing `")` if present so we truncate the context body.
+  const ctxRaw = rest.endsWith('")') ? rest.slice(0, -2) : rest
+  const oneLine = ctxRaw.replace(WS_RE, ' ').trim()
+
+  if (oneLine.length <= INLINE_TOOL_CALL_MAX) {
+    return call
+  }
+
+  const preview = oneLine.slice(0, INLINE_TOOL_CALL_MAX - 1) + '…'
+
+  return `${label}("${preview}")${duration}`
 }
 
 export const isTransientTrailLine = (line: string) => line.startsWith('drafting ') || line === 'analyzing tool output…'

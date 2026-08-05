@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, readFileSync, existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { createGatewayEventHandler } from '../app/createGatewayEventHandler.js'
 import { getOverlayState, patchOverlayState, resetOverlayState } from '../app/overlayStore.js'
@@ -555,6 +558,34 @@ describe('createGatewayEventHandler', () => {
     expect(turnController.segmentMessages[0]).toMatchObject({ kind: 'diff' })
     expect(turnController.segmentMessages[0]?.tools?.[0]).toContain('Args:\n{ "path": "foo.ts" }')
     expect(turnController.segmentMessages[0]?.tools?.[0]).toContain('Result:\npatched result')
+  })
+
+  it('retains the FULL context (context_full) in the completed tool line for inspect', () => {
+    // Regression: click-to-inspect showed only the truncated preview for
+    // COMPLETED tools because completeTool built the trail line from the
+    // 80-char context and formatToolCall truncated it further to 64. The
+    // untruncated command shipped on tool.start (context_full) must survive
+    // into the persisted tool line so the inspect popup shows the whole thing.
+    const onEvent = createGatewayEventHandler(buildCtx([]))
+    const shortCtx = 'cd /mnt/devvm/custom/gpt-native && echo ==== fix the stale origin trackin' // ~72 chars (backend 80-cap)
+    const fullCtx =
+      'cd /mnt/devvm/custom/gpt-native && echo ==== fix the stale origin tracking ref and verify HEAD matches upstream main exactly, then mark checkpoint complete ===='
+
+    onEvent({
+      payload: { context: shortCtx, context_full: fullCtx, name: 'terminal', tool_id: 'tool-1' },
+      type: 'tool.start'
+    } as any)
+    onEvent({ payload: { name: 'terminal', summary: 'done', tool_id: 'tool-1' }, type: 'tool.complete' } as any)
+
+    // The completed line lands in pendingSegmentTools (no narration segment to
+    // merge into yet) and/or a flushed trail segment. Check both, matching how
+    // the renderer sources tool rows.
+    const fromSegments = turnController.segmentMessages.flatMap(seg => seg.tools ?? [])
+    const fromPending = turnController.pendingSegmentTools
+    const line = [...fromSegments, ...fromPending].find(l => l.includes('Terminal'))
+    expect(line).toBeDefined()
+    // The whole command survived, including the tail the 64-char cap used to drop.
+    expect(line).toContain('mark checkpoint complete')
   })
 
   it('keeps full final responses from duplicating flushed pre-diff narration', () => {

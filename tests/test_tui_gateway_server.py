@@ -380,6 +380,51 @@ def test_tui_verbose_tool_events_omit_details_when_redaction_fails(monkeypatch):
     assert "result_text" not in events[1][2]
 
 
+def test_tool_start_attaches_full_context_when_arg_exceeds_inline_cap(monkeypatch):
+    """A long command/path ships context_full so the TUI inspect popup can show
+    the whole thing, even though the inline row context is capped at 80 chars.
+    Not gated on verbose mode (one line, cheap)."""
+    events: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        server, "_emit", lambda event_type, sid, payload: events.append((event_type, sid, payload))
+    )
+    monkeypatch.setitem(
+        server._sessions,
+        "ctxfull-test",
+        {"tool_progress_mode": "all", "tool_started_at": {}},
+    )
+
+    long_cmd = "cd /mnt/devvm/custom/nudata-sundown/track-b/ndcounterms/ndcounterms-modernization && ls -la"
+    server._on_tool_start("ctxfull-test", "tool-1", "terminal", {"command": long_cmd})
+
+    payload = events[0][2]
+    assert events[0][0] == "tool.start"
+    # Inline context is truncated; full context carries the whole command.
+    assert len(payload["context"]) <= 84  # 80 + a little formatting slack
+    assert "context_full" in payload
+    assert long_cmd in payload["context_full"]
+
+
+def test_tool_start_omits_full_context_when_arg_fits_inline(monkeypatch):
+    """Short args that already fit the inline context add no context_full — no
+    pipe waste on the common case."""
+    events: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        server, "_emit", lambda event_type, sid, payload: events.append((event_type, sid, payload))
+    )
+    monkeypatch.setitem(
+        server._sessions,
+        "ctxfit-test",
+        {"tool_progress_mode": "all", "tool_started_at": {}},
+    )
+
+    server._on_tool_start("ctxfit-test", "tool-1", "terminal", {"command": "pwd"})
+
+    payload = events[0][2]
+    assert payload["context"]  # short context present
+    assert "context_full" not in payload  # nothing extra to send
+
+
 def test_dispatch_rejects_non_object_request():
     resp = server.dispatch([])
 
@@ -845,6 +890,38 @@ def test_history_to_messages_preserves_tool_calls_for_resume_display():
         {"role": "assistant", "text": "first answer"},
         {"role": "user", "text": "second prompt"},
     ]
+
+
+def test_history_to_messages_uses_full_context_so_resume_can_inspect():
+    """On resume, the tool row's context must be the FULL command (not the
+    80-char inline cap), so click-to-inspect shows the whole thing. The raw
+    args are never truncated in the DB, so even a pre-existing session recovers
+    its complete command through this path."""
+    long_cmd = (
+        "cd /mnt/devvm/custom/gpt-native && echo ==== fix the stale origin "
+        "tracking ref and verify HEAD matches upstream main exactly, then mark "
+        "checkpoint complete ===="
+    )
+    history = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "function": {"name": "terminal", "arguments": json.dumps({"command": long_cmd})},
+                }
+            ],
+        },
+        {"role": "tool", "content": "ok", "tool_call_id": "call_1"},
+        {"role": "assistant", "content": "done"},
+    ]
+
+    msgs = server._history_to_messages(history)
+    tool_msg = next(m for m in msgs if m.get("role") == "tool")
+    # Full command preserved (would have been truncated at 80 chars before).
+    assert tool_msg["context"] == long_cmd
+    assert "mark checkpoint complete" in tool_msg["context"]
 
 
 def test_history_to_messages_keeps_reasoning_only_assistant_turn():

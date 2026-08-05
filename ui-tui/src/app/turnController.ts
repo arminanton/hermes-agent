@@ -761,18 +761,23 @@ class TurnController {
     const name = done?.name ?? fallbackName ?? 'tool'
     const label = toolTrailLabel(name)
     const fallbackDuration = done?.startedAt ? (Date.now() - done.startedAt) / 1000 : undefined
+    // Prefer the untruncated context (contextFull, shipped on tool.start) so the
+    // persisted trail line retains the whole command/path for the inspect popup.
+    // The inline row stays width-clamped by Ink's wrap-trim, so this only makes
+    // the OFF-SCREEN inspect content complete — it doesn't change the visible row.
+    const fullCtx = done?.contextFull || done?.context || ''
 
     const line =
       done?.verboseArgs || resultText
         ? buildVerboseToolTrailLine(
             name,
-            done?.context || '',
+            fullCtx,
             Boolean(error),
             duration ?? fallbackDuration,
             done?.verboseArgs,
             error || resultText || summary || ''
           )
-        : buildToolTrailLine(name, done?.context || '', Boolean(error), error || summary || '', duration ?? fallbackDuration)
+        : buildToolTrailLine(name, fullCtx, Boolean(error), error || summary || '', duration ?? fallbackDuration)
 
     this.activeTools = this.activeTools.filter(tool => tool.id !== toolId)
 
@@ -818,7 +823,7 @@ class TurnController {
     }, STREAM_BATCH_MS)
   }
 
-  recordToolStart(toolId: string, name: string, context: string, verboseArgs?: string) {
+  recordToolStart(toolId: string, name: string, context: string, verboseArgs?: string, contextFull?: string) {
     if (this.interrupted) {
       return
     }
@@ -831,7 +836,7 @@ class TurnController {
     const sample = `${name} ${context}`.trim()
 
     this.toolTokenAcc += sample ? estimateTokensRough(sample) : 0
-    this.activeTools = [...this.activeTools, { context, id: toolId, name, startedAt: Date.now(), verboseArgs }]
+    this.activeTools = [...this.activeTools, { context, contextFull, id: toolId, name, startedAt: Date.now(), verboseArgs }]
 
     patchTurnState({ toolTokens: this.toolTokenAcc, tools: this.activeTools })
   }
@@ -985,7 +990,9 @@ class TurnController {
         outputTail,
         outputTokens: p.output_tokens ?? base.outputTokens,
         parentId: p.parent_id ?? base.parentId,
+        paused: p.paused ?? base.paused,
         reasoningTokens: p.reasoning_tokens ?? base.reasoningTokens,
+        sessionId: p.session_id ?? base.sessionId,
         taskCount: p.task_count ?? base.taskCount,
         toolCount: p.tool_count ?? base.toolCount,
         toolsets: p.toolsets ?? base.toolsets,

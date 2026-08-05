@@ -2772,6 +2772,20 @@ def _tool_ctx(name: str, args: dict) -> str:
         return ""
 
 
+# Full (untruncated) primary-arg preview for the TUI's inspect popup. Same
+# builder as _tool_ctx but max_len=0 (unlimited), so the click-to-inspect /
+# `/inspect` view can show the complete command/path the 80-char inline
+# context elides. One line of text; cheap enough to send unconditionally (see
+# _on_tool_start, which only attaches it when it differs from the short ctx).
+def _tool_full_ctx(name: str, args: dict) -> str:
+    try:
+        from agent.display import build_tool_preview
+
+        return build_tool_preview(name, args, max_len=0) or ""
+    except Exception:
+        return ""
+
+
 # Tool Args/Result text shipped to the TUI for the verbose trail line. The TUI
 # renders only a small persisted preview (ui-tui VERBOSE_TRAIL_MAX_CHARS), kept
 # all session and expanded by default — so shipping more than that is pure pipe
@@ -2913,6 +2927,16 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
             "name": name,
             "context": _tool_ctx(name, args),
         }
+        # Ship the FULL (untruncated) primary-arg preview too, so the TUI's
+        # click-to-inspect / `/inspect` popup can show the complete command or
+        # path the inline row truncates (the "Terminal("cd /very/long/…")" the
+        # user can't read). One line, cheap — unlike args_text/result_text this
+        # is not gated on verbose mode. Only attached when it actually differs
+        # from the already-sent short context, to avoid pipe waste on the common
+        # case where the arg fits.
+        full_ctx = _tool_full_ctx(name, args)
+        if full_ctx and full_ctx != payload["context"]:
+            payload["context_full"] = full_ctx
         if _session_verbose(sid):
             args_text = _tool_args_text(args)
             if args_text:
@@ -4102,8 +4126,15 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
             tc_info = tool_call_args.get(tc_id) if tc_id else None
             name = (tc_info[0] if tc_info else None) or m.get("tool_name") or "tool"
             args = (tc_info[1] if tc_info else None) or {}
+            # Use the FULL (untruncated) primary-arg preview here, not the
+            # 80-char inline cap. On resume this is the only source of the tool
+            # row, and the TUI's click-to-inspect popup shows the whole command;
+            # the inline row stays width-clamped by Ink's wrap-trim regardless.
+            # This is what lets a RESUMED (even pre-existing) session show the
+            # complete command/path, since the raw args were never truncated in
+            # the DB — only the live display was.
             messages.append(
-                {"role": "tool", "name": name, "context": _tool_ctx(name, args)}
+                {"role": "tool", "name": name, "context": _tool_full_ctx(name, args)}
             )
             continue
         # An assistant turn may carry only reasoning/thinking content with no
