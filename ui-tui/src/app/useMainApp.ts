@@ -24,7 +24,11 @@ import { composerPromptWidth } from '../lib/inputMetrics.js'
 import { appendTranscriptMessage } from '../lib/messages.js'
 import { DEFAULT_VOICE_RECORD_KEY, isMac, type ParsedVoiceRecordKey } from '../lib/platform.js'
 import { asRpcResult, rpcErrorMessage } from '../lib/rpc.js'
+import { RECYCLE_EXIT_CODE, registerRecycleHandler } from '../lib/recycleBridge.js'
+import { persistScrollState } from '../lib/scrollPersistence.js'
+import { isRunning } from '../lib/subagentTree.js'
 import { terminalParityHints } from '../lib/terminalParity.js'
+import { getViewportSnapshot } from '../lib/viewportStore.js'
 import { buildToolTrailLine, formatAbandonedClarify, sameToolTrailGroup, toolTrailLabel } from '../lib/text.js'
 import { estimatedMsgHeight, messageHeightKey } from '../lib/virtualHeights.js'
 import type { Msg, PanelSection, SlashCatalog } from '../types.js'
@@ -484,6 +488,39 @@ export function useMainApp(gw: GatewayClient) {
     exit()
     process.exit(code)
   }, [exit, gw])
+
+  // Stage 1 SEAMLESS RECYCLE: persist the current scroll position keyed by the
+  // live sid, then exit 0. In attach mode `gw.kill()` only closes THIS
+  // renderer's ws (this.proc is null — no spawned gateway child), so the
+  // durable gateway + in-flight turn survive. The orchestrator respawns a fresh
+  // renderer with HERMES_TUI_RESUME=<sid>; it resumes the live session (adopting
+  // the running turn via the gateway's _live_session_payload) and restores the
+  // scroll position — so the recycle is invisible to the user. Guarded by
+  // canRecycle(): never fires in spawned-gateway mode where exiting would kill
+  // the session.
+  const recycle = useCallback(() => {
+    try {
+      const sid = getUiState().sid
+      const handle = scrollRef.current
+      if (sid && handle) {
+        const snap = getViewportSnapshot(handle)
+        persistScrollState(sid, { top: snap.top, atBottom: snap.atBottom })
+      }
+    } catch {
+      // best-effort: a failed persist just means the fresh renderer falls back
+      // to scrollToBottom — never blocks the recycle.
+    }
+    gw.kill('app.recycle')
+    exit()
+    // Exit with the distinct RECYCLE code (not 0): the orchestrator treats 0
+    // as a voluntary /quit and tears the session down, but a recycle must make
+    // the supervisor respawn a fresh renderer that re-attaches to the still-live
+    // gateway and resumes the session. See RECYCLE_EXIT_CODE (mirrored in the
+    // Python orchestrator).
+    process.exit(RECYCLE_EXIT_CODE)
+  }, [exit, gw])
+
+  useEffect(() => registerRecycleHandler(recycle), [recycle])
 
   const session = useSessionLifecycle({
     colsRef,

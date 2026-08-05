@@ -1506,6 +1506,44 @@ class AIAgent:
                 if timestamp is not None:
                     msg["timestamp"] = timestamp
 
+    def flush_pending_to_db(self) -> bool:
+        """Idempotently flush any un-persisted in-flight message tail to SQLite.
+
+        Between the periodic ``_persist_session`` checkpoints, a long turn (deep
+        delegation, many tool calls) accumulates assistant/tool messages that
+        live only in ``self._session_messages`` (the live reference the loop
+        keeps updating). If the in-memory session is torn down before the turn
+        finalizes cleanly — e.g. a transient WS drop lets the gateway's orphan
+        reaper close the session — those messages die with the in-process agent
+        and a later resume lands at the last checkpoint, silently rewinding the
+        transcript.
+
+        This is the durability net for that path: flush whatever the agent is
+        currently holding, reusing ``_flush_messages_to_session_db``'s
+        per-message identity tracking so already-written rows are never
+        duplicated. Safe to call from the finalize chokepoint (before
+        ``agent.close()`` drops the reference) and harmless when there is
+        nothing new to write.
+
+        Returns ``True`` when a flush was attempted (persistence enabled, DB
+        present, messages held), ``False`` when it no-oped.
+        """
+        # Never write for a persistence-isolated fork (background curator /
+        # memory review) — same hard-stop as _flush_messages_to_session_db.
+        if getattr(self, "_persist_disabled", False):
+            return False
+        if not getattr(self, "_session_db", None):
+            return False
+        messages = getattr(self, "_session_messages", None)
+        if not messages:
+            return False
+        try:
+            self._flush_messages_to_session_db(messages)
+        except Exception as exc:  # defensive: finalize must never raise
+            logger.debug("flush_pending_to_db failed: %s", exc)
+            return False
+        return True
+
     def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
         """Save session state to both JSON log and SQLite on any exit path.
 

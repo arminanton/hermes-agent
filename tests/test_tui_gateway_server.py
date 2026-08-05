@@ -1814,6 +1814,72 @@ def test_finalize_session_closes_slash_worker(monkeypatch):
     assert closed["count"] == 1
 
 
+def test_finalize_session_flushes_agent_tail_before_end(monkeypatch):
+    """_finalize_session flushes the agent's in-flight tail before ending it.
+
+    Durability net: every teardown path (session.close, idle reaper, WS-orphan
+    reaper, and the standalone-TUI gateway-child exit) funnels through
+    _finalize_session. Between the loop's periodic checkpoints, a long turn
+    holds un-persisted messages only on the in-process agent; without this
+    flush they die with the agent and a later resume rewinds the transcript
+    (the "landed in a totally different place" report). The flush MUST run
+    before end_session marks the row ended.
+    """
+    order = []
+
+    class _Agent:
+        session_id = "session-key"
+
+        def flush_pending_to_db(self):
+            order.append("flush")
+            return True
+
+        def commit_memory_session(self, history):
+            pass
+
+    class _DB:
+        def end_session(self, session_id, end_reason):
+            order.append("end_session")
+
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+
+    session = _session(agent=_Agent(), running=False)
+    server._finalize_session(session)
+
+    assert "flush" in order, "agent tail was not flushed at finalize"
+    assert order.index("flush") < order.index("end_session"), (
+        "flush must happen before end_session marks the row ended"
+    )
+
+
+def test_finalize_session_does_not_flush_a_running_turn(monkeypatch):
+    """A still-running turn owns the message list and persists on its own exit.
+
+    Flushing underneath a live turn would race the loop's own writes, so the
+    finalize-time flush is guarded on ``not session['running']``.
+    """
+    flushed = {"count": 0}
+
+    class _Agent:
+        session_id = "session-key"
+
+        def flush_pending_to_db(self):
+            flushed["count"] += 1
+            return True
+
+        def commit_memory_session(self, history):
+            pass
+
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    session = _session(agent=_Agent(), running=True)
+    server._finalize_session(session)
+
+    assert flushed["count"] == 0, "must not flush a running turn"
+
+
 def test_ws_orphan_reap_spares_reattached_session(monkeypatch):
     """A session that rebinds a live transport is NOT considered orphaned."""
 

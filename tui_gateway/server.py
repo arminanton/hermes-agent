@@ -445,6 +445,23 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
     session_id = getattr(agent, "session_id", None) or session_key
     _notify_session_boundary("on_session_finalize", session_id)
 
+    # Durability net: flush the agent's in-flight message tail to the DB BEFORE
+    # we mark the session ended. Between the loop's periodic _persist_session
+    # checkpoints, a long turn (deep delegation, many tool calls) accumulates
+    # assistant/tool messages that live only on the in-process agent. Every
+    # teardown path funnels through here (session.close, idle reaper, and — the
+    # bug this fixes — the WS orphan reaper firing after a transient stream
+    # drop). Without this flush those messages die with the agent and a later
+    # resume silently rewinds to the last checkpoint (the "landed in a totally
+    # different place" report). Guarded to not run under a live turn: a running
+    # turn owns the message list and its own exit path persists it, so flushing
+    # underneath it would race the loop's own writes.
+    if agent is not None and not session.get("running") and hasattr(agent, "flush_pending_to_db"):
+        try:
+            agent.flush_pending_to_db()
+        except Exception:
+            pass
+
     # Mark session ended in DB so it doesn't linger as a ghost row in /resume.
     # Use session_id (from agent.session_id) not session_key — after compression,
     # session_key may be stale (the ended parent) while session_id is the live
@@ -2465,7 +2482,7 @@ def _sync_session_key_after_compress(
     new_session_id = getattr(agent, "session_id", None) or ""
     old_key = session.get("session_key", "") or ""
     if not new_session_id or new_session_id == old_key:
-        return
+        return False
 
     try:
         from tools.approval import (
@@ -2511,6 +2528,7 @@ def _sync_session_key_after_compress(
             _restart_slash_worker(sid, session)
         except Exception:
             pass
+    return True
 
 
 def _get_usage(agent) -> dict:
@@ -6481,6 +6499,8 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
         history_version = int(session.get("history_version", 0))
         images = list(session.get("attached_images", []))
         session["attached_images"] = []
+        files = list(session.get("attached_files", []))
+        session["attached_files"] = []
         if not isinstance(session.get("inflight_turn"), dict):
             _start_inflight_turn(session, text)
     agent = session["agent"]

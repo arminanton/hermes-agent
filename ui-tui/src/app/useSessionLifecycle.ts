@@ -18,6 +18,7 @@ import type {
   SetupStatusResponse
 } from '../gatewayTypes.js'
 import { asRpcResult } from '../lib/rpc.js'
+import { applyScrollState, restoreScrollState } from '../lib/scrollPersistence.js'
 import type { Msg, PanelSection, SessionInfo, Usage } from '../types.js'
 
 import type { ComposerActions, GatewayRpc, StateSetter } from './interfaces.js'

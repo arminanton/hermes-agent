@@ -14,6 +14,7 @@ import type {
 import { isAction, isCopyShortcut, isMac, isVoiceToggleKey } from '../lib/platform.js'
 import { computePrecisionWheelStep, initPrecisionWheel } from '../lib/precisionWheel.js'
 import { computeWheelStep, initWheelAccelForHost } from '../lib/wheelAccel.js'
+import { canRecycle, triggerRecycle } from '../lib/recycleBridge.js'
 
 import { getInputSelection } from './inputSelectionStore.js'
 import type { InputHandlerActions, InputHandlerContext, InputHandlerResult } from './interfaces.js'
@@ -525,6 +526,27 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
 
     if (isCtrl(key, ch, 'x')) {
       return patchOverlayState({ sessions: true })
+    }
+
+    // Ctrl+R — reload the TUI renderer WITHOUT disturbing the session.
+    // The orchestrator keeps the gateway (the durable anchor) alive, so the
+    // running agent, its context/tokens/budget, any in-flight tool call,
+    // subagent delegation, or /autopilot run all continue untouched. Only the
+    // view layer is recycled — this is how a rebuilt TUI bundle gets picked up
+    // live. triggerRecycle() only fires in attach/orchestrator mode (canRecycle);
+    // otherwise the renderer owns the gateway and exiting would kill the
+    // session, so we refuse and tell the user instead of nuking their work.
+    if (isCtrl(key, ch, 'r')) {
+      if (canRecycle()) {
+        actions.sys('reloading TUI (session, run, and context preserved)...')
+        // Defer so the sys message renders before the renderer exits+respawns.
+        setTimeout(() => triggerRecycle(), 60)
+        return
+      }
+      return actions.sys(
+        'TUI reload needs the session orchestrator (attach mode). This session ' +
+          'runs the renderer directly, so a reload would end it — skipped.'
+      )
     }
 
     if (key.ctrl && ch.toLowerCase() === 'c') {
