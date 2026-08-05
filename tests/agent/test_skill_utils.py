@@ -165,7 +165,17 @@ def test_skill_config_raw_cache_invalidates_on_config_edit(tmp_path, monkeypatch
 
     config_path.write_text("skills:\n  disabled: [new-skill]\n", encoding="utf-8")
     import os
-    os.utime(config_path, None)
+    # The cache key is (path, mtime_ns, size). "old-skill" and "new-skill"
+    # are the same length, so st_size alone can't distinguish the two
+    # writes -- only mtime_ns can. On fast storage with coarse clock
+    # resolution, two os.utime(path, None) calls issued back-to-back in a
+    # tight loop can resolve to the SAME mtime_ns (reproduced directly:
+    # os.stat().st_mtime_ns matched across two writes microseconds
+    # apart), making this test flaky. Force a mtime guaranteed to differ
+    # from the first stat instead of trusting real-clock granularity.
+    prior_mtime_ns = config_path.stat().st_mtime_ns
+    forced_ns = prior_mtime_ns + 1_000_000_000  # +1s, comfortably outside any fs clock quantum
+    os.utime(config_path, ns=(forced_ns, forced_ns))
 
     assert get_disabled_skill_names() == {"new-skill"}
 def test_iter_skill_index_files_prunes_skill_support_dirs(tmp_path):
