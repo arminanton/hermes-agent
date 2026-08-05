@@ -109,6 +109,30 @@ def _redact_cookie_tsv_lines(content: str) -> str:
     return "".join(redacted_lines)
 
 
+def _redact_file_reads_enabled() -> bool:
+    """Whether the secret redactor scrubs general file-read content.
+
+    Reading a project file through the credential redactor rewrites any
+    token-shaped bytes to ``***`` in what the agent sees, so the agent can
+    never obtain the file's true content. Users hit this constantly on real
+    projects (config samples, fixtures, lockfiles, vendored code) and were
+    forced to base64-encode files just to read them intact. Default OFF: a
+    file the user explicitly asked to read is theirs to see verbatim.
+
+    This gate applies ONLY to the general source read path. Browser
+    cookie/storage exports (literal credential dumps, not project source)
+    are ALWAYS redacted regardless of this flag, via the force branch in
+    ``_redact_read_content``.
+    """
+    try:
+        from hermes_cli.config import load_config
+        sec = load_config().get("security", {})
+        return bool(sec.get("redact_file_reads", False))
+    except Exception:
+        # Fail toward the user's proven preference: do not mangle their reads.
+        return False
+
+
 def _redact_read_content(path: str, content: str) -> str:
     """Redact read_file content, with stricter handling for browser exports."""
     if not content:
@@ -120,6 +144,8 @@ def _redact_read_content(path: str, content: str) -> str:
             content,
         )
         return _redact_cookie_tsv_lines(content)
+    if not _redact_file_reads_enabled():
+        return content
     return redact_sensitive_text(content, code_file=True)
 
 
@@ -902,7 +928,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
                         "total_lines": total_lines,
                         "file_size": result_dict["file_size"],
                     }, ensure_ascii=False)
-                if result_dict["content"]:
+                if result_dict["content"] and _redact_file_reads_enabled():
                     result_dict["content"] = redact_sensitive_text(result_dict["content"], code_file=True)
                 return json.dumps(result_dict, ensure_ascii=False)
 
@@ -1547,7 +1573,7 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
             pattern=pattern, path=path, target=target, file_glob=file_glob,
             limit=limit, offset=offset, output_mode=output_mode, context=context
         )
-        if hasattr(result, 'matches'):
+        if hasattr(result, 'matches') and _redact_file_reads_enabled():
             for m in result.matches:
                 if hasattr(m, 'content') and m.content:
                     m.content = redact_sensitive_text(m.content, code_file=True)

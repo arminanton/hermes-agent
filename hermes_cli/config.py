@@ -2333,6 +2333,14 @@ DEFAULT_CONFIG = {
     "security": {
         "allow_private_urls": False,  # Allow requests to private/internal IPs (for OpenWrt, proxies, VPNs)
         "redact_secrets": True,
+        # Scrub secret-shaped strings out of general file-read output
+        # (read_file, search_files, document extraction). Default OFF: the
+        # redactor rewrites token-shaped bytes to *** in what the agent sees,
+        # so it can never obtain a project file's true content, which forced
+        # base64 round-trips just to read files intact. Browser cookie/storage
+        # EXPORTS are always redacted regardless of this flag. Logs, tool
+        # OUTPUT, and chat responses still follow redact_secrets.
+        "redact_file_reads": False,
         "tirith_enabled": True,
         "tirith_path": "tirith",
         "tirith_timeout": 5,

@@ -104,6 +104,65 @@ class TestReadFileHandler:
         assert "plain-cookie-value" not in result["content"]
         assert result["content"].count("[REDACTED]") >= 2
 
+    @patch("tools.file_tools._get_file_ops")
+    def test_normal_file_token_survives_read_by_default(self, mock_get):
+        # Default security.redact_file_reads is False: a project file the user
+        # asked to read is returned verbatim, not scrubbed to ***. This is the
+        # fix for the redactor forcing base64 round-trips to read files intact.
+        token = "sk-" + "A" * 32
+        body = f"API_KEY={token}\nconst x = compute()\n"
+        mock_ops = MagicMock()
+        result_obj = MagicMock()
+        result_obj.content = body
+        result_obj.to_dict.return_value = {
+            "content": body, "total_lines": 2, "file_size": len(body),
+        }
+        mock_ops.read_file.return_value = result_obj
+        mock_get.return_value = mock_ops
+
+        from tools.file_tools import read_file_tool
+        result = json.loads(read_file_tool("/home/user/project/config.py"))
+        assert token in result["content"]
+        assert "***" not in result["content"]
+
+    @patch("tools.file_tools._redact_file_reads_enabled", return_value=True)
+    @patch("tools.file_tools._get_file_ops")
+    def test_normal_file_redacted_when_flag_enabled(self, mock_get, _flag):
+        # When the user opts back in, the general read path masks secrets again.
+        token = "sk-" + "A" * 32
+        body = f"API_KEY={token}\n"
+        mock_ops = MagicMock()
+        result_obj = MagicMock()
+        result_obj.content = body
+        result_obj.to_dict.return_value = {
+            "content": body, "total_lines": 1, "file_size": len(body),
+        }
+        mock_ops.read_file.return_value = result_obj
+        mock_get.return_value = mock_ops
+
+        from tools.file_tools import read_file_tool
+        result = json.loads(read_file_tool("/home/user/project/config.py"))
+        assert token not in result["content"]
+
+    @patch("tools.file_tools._redact_file_reads_enabled", return_value=False)
+    @patch("tools.file_tools._get_file_ops")
+    def test_browser_export_still_redacted_even_with_flag_off(self, mock_get, _flag):
+        # The file-read exemption must NOT weaken browser cookie/storage export
+        # redaction: those are literal credential dumps, always scrubbed.
+        content = '{"name":"session","value":"super-secret-cookie-value"}'
+        mock_ops = MagicMock()
+        result_obj = MagicMock()
+        result_obj.content = content
+        result_obj.to_dict.return_value = {
+            "content": content, "total_lines": 1, "file_size": len(content),
+        }
+        mock_ops.read_file.return_value = result_obj
+        mock_get.return_value = mock_ops
+
+        from tools.file_tools import read_file_tool
+        result = json.loads(read_file_tool("/tmp/Cookies_export.json"))
+        assert "super-secret-cookie-value" not in result["content"]
+
 
 class TestWriteFileHandler:
     @patch("tools.file_tools._get_file_ops")
