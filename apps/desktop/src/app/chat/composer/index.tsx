@@ -1656,7 +1656,17 @@ export function ChatBar({
       return null
     }
 
-    const text = chatMessageText(last).trim()
+    const reply = chatMessageText(last).trim()
+    // Opt-in: also speak the reasoning/thinking. Off by default (thinking is
+    // long/raw); when on, prepend it so the spoken stream is thoughts → reply.
+    const thinking = $speakThinking.get()
+      ? last.parts
+          .filter((p): p is Extract<typeof last.parts[number], { type: 'reasoning' }> => p.type === 'reasoning')
+          .map(p => p.text)
+          .join('')
+          .trim()
+      : ''
+    const text = thinking ? `${thinking}\n\n${reply}` : reply
 
     if (!text) {
       return null
