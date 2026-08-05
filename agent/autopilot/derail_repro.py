@@ -66,7 +66,8 @@ def _playwright_index() -> Optional[str]:
             return p
     # fall back to `npm root -g`
     try:
-        root = subprocess.run(["npm", "root", "-g"], capture_output=True, text=True, timeout=10).stdout.strip()
+        root = subprocess.run(["npm", "root", "-g"], capture_output=True, text=True, timeout=10,
+                              stdin=subprocess.DEVNULL).stdout.strip()
         cand = os.path.join(root, "playwright", "index.js")
         if os.path.exists(cand):
             return cand

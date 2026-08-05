@@ -397,7 +397,11 @@ def _make_default_spawn_renderer(active_session_file: str, heartbeat_file: str =
             root = env.get("HERMES_PYTHON_SRC_ROOT") or os.getcwd()
             entry = os.path.join(root, "ui-tui", "dist", "entry.js")
             renderer_argv = [bun, entry]
-        return subprocess.Popen(renderer_argv, env=env)
+        # This is the interactive Ink/Node TUI renderer itself — it must
+        # inherit the real terminal's stdin/stdout to receive user
+        # keystrokes and paint the UI. DEVNULL would break the TUI
+        # entirely (no keyboard input could ever reach it).
+        return subprocess.Popen(renderer_argv, env=env)  # noqa: subprocess-stdin
 
     return _spawn
 
