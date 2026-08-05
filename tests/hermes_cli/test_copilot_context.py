@@ -264,3 +264,39 @@ class TestModelMetadataCopilotIntegration:
         ctx = get_model_context_length("gpt-4.1", provider="copilot")
         assert isinstance(ctx, int)
         assert ctx > 0
+
+
+class TestOfflineGpt56ReasoningEfforts:
+    """Offline (no live catalog) reasoning-effort fallback invariants.
+
+    Behavior contract, not a snapshot: GPT-5.6 (Sol/Terra/Luna) must expose the
+    ``max`` tier that the live Copilot catalog lists for them, while the older
+    GPT-5.5/5.4 family must NOT (their ceiling is ``xhigh``). Sending ``max`` to
+    a model that doesn't list it is an HTTP 400 on the Responses API, so the
+    offline fallback must keep the two families distinct.
+    """
+
+    def test_gpt56_offline_includes_max(self):
+        from hermes_cli.models import _github_reasoning_efforts_for_model_id
+
+        for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+            efforts = _github_reasoning_efforts_for_model_id(model)
+            assert "max" in efforts, (model, efforts)
+            # "max" must be the strongest tier offered
+            assert efforts[-1] == "max", (model, efforts)
+
+    def test_older_gpt5_offline_excludes_max(self):
+        from hermes_cli.models import _github_reasoning_efforts_for_model_id
+
+        for model in ("gpt-5.5", "gpt-5.4", "gpt-5.4-mini"):
+            efforts = _github_reasoning_efforts_for_model_id(model)
+            assert "max" not in efforts, (model, efforts)
+            assert "xhigh" in efforts, (model, efforts)
+
+    def test_gpt56_offline_adds_max_over_older_family(self):
+        from hermes_cli.models import _github_reasoning_efforts_for_model_id
+
+        older = set(_github_reasoning_efforts_for_model_id("gpt-5.5"))
+        newer = set(_github_reasoning_efforts_for_model_id("gpt-5.6-sol"))
+        # The distinguishing tier is "max": present for 5.6, absent for 5.5.
+        assert "max" in newer - older

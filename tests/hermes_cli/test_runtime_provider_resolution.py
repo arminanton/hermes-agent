@@ -2775,3 +2775,83 @@ def test_host_derived_key_helper_basic_cases():
     for k in ("DEEPSEEK_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY",
               "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
         _os.environ.pop(k, None)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Regression: Copilot api_mode must derive from the model actually being built,
+# not from the persisted model.api_mode of the (possibly different) config
+# default. Bug: default=claude-opus-4.8 persists api_mode=anthropic_messages;
+# switching to / opening /new on gpt-5.6-sol (a /responses-only model) inherited
+# anthropic_messages and Copilot's /v1/messages returned HTTP 400
+# no_available_model_endpoints. Fresh sessions escaped it because the composer
+# override carried the model; /model + /new both funnel through
+# resolve_runtime_provider(target_model=...), so the fix threads target_model
+# into _copilot_runtime_api_mode and only honors the persisted mode when the
+# target matches the configured default.
+
+
+def _copilot_cfg():
+    return {
+        "provider": "copilot",
+        "default": "claude-opus-4.8",
+        "api_mode": "anthropic_messages",
+    }
+
+
+def test_copilot_api_mode_switched_model_ignores_stale_persisted_mode(monkeypatch):
+    # gpt-5.6-sol is a Responses-API-only model. Even though the persisted
+    # api_mode is anthropic_messages (for the claude default), the switched
+    # model must resolve to codex_responses.
+    monkeypatch.setattr(
+        rp,
+        "_copilot_runtime_api_mode",
+        rp._copilot_runtime_api_mode,  # ensure we call the real one
+    )
+    from hermes_cli import models as _models
+
+    monkeypatch.setattr(
+        _models, "copilot_model_api_mode", lambda m, api_key=None: "codex_responses"
+    )
+    mode = rp._copilot_runtime_api_mode(
+        _copilot_cfg(), "", target_model="gpt-5.6-sol"
+    )
+    assert mode == "codex_responses"
+
+
+def test_copilot_api_mode_default_model_honors_persisted_mode(monkeypatch):
+    # When the target IS the configured default (claude-opus-4.8), the persisted
+    # anthropic_messages must still be honored (matches the default).
+    mode = rp._copilot_runtime_api_mode(
+        _copilot_cfg(), "", target_model="claude-opus-4.8"
+    )
+    assert mode == "anthropic_messages"
+
+
+def test_copilot_api_mode_no_target_falls_back_to_default(monkeypatch):
+    # No target_model → behaves as before: reads model.default, honors persisted.
+    mode = rp._copilot_runtime_api_mode(_copilot_cfg(), "")
+    assert mode == "anthropic_messages"
+
+
+def test_copilot_api_mode_switched_claude_still_anthropic(monkeypatch):
+    # Switching to a DIFFERENT claude model (not the default) must still route
+    # to anthropic_messages — derived from the model, not inherited.
+    from hermes_cli import models as _models
+
+    monkeypatch.setattr(
+        _models,
+        "copilot_model_api_mode",
+        lambda m, api_key=None: "anthropic_messages",
+    )
+    mode = rp._copilot_runtime_api_mode(
+        _copilot_cfg(), "", target_model="claude-sonnet-4.6"
+    )
+    assert mode == "anthropic_messages"
+
+
+def test_copilot_same_model_normalizes_dot_dash_and_prefix():
+    assert rp._copilot_same_model("claude-opus-4.8", "claude-opus-4.8")
+    assert rp._copilot_same_model("anthropic/claude-opus-4-8", "claude-opus-4.8")
+    assert not rp._copilot_same_model("gpt-5.6-sol", "claude-opus-4.8")
+    assert not rp._copilot_same_model("", "claude-opus-4.8")
+    assert not rp._copilot_same_model("gpt-5.6-sol", "")

@@ -235,13 +235,40 @@ def _provider_supports_explicit_api_mode(provider: Optional[str], configured_pro
     return normalized_configured == normalized_provider
 
 
-def _copilot_runtime_api_mode(model_cfg: Dict[str, Any], api_key: str) -> str:
+def _copilot_runtime_api_mode(
+    model_cfg: Dict[str, Any],
+    api_key: str,
+    *,
+    target_model: Optional[str] = None,
+) -> str:
     configured_provider = str(model_cfg.get("provider") or "").strip().lower()
     configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
-    if configured_mode and _provider_supports_explicit_api_mode("copilot", configured_provider):
-        return configured_mode
 
-    model_name = str(model_cfg.get("default") or "").strip()
+    # The model actually being built. On a mid-session /model switch or a /new
+    # session pinned to a non-default model, ``target_model`` is the real model
+    # and ``model.default`` in config is stale (still the previous default).
+    default_model = str(model_cfg.get("default") or "").strip()
+    model_name = str(target_model or default_model).strip()
+
+    # A persisted ``model.api_mode`` is computed FOR the configured default
+    # model. It must only be honored when the model we're building is that same
+    # default — otherwise it leaks the default's transport onto a different
+    # model. Concretely: default=claude-opus-4.8 persists
+    # api_mode=anthropic_messages; switching to gpt-5.6-sol (a /responses-only
+    # model) must NOT inherit anthropic_messages or Copilot's /v1/messages 400s
+    # with no_available_model_endpoints. Only the copilot-served Claude models
+    # speak /v1/messages; every GPT-5.x model speaks /responses. This is the
+    # same cross-contamination guard as _provider_supports_explicit_api_mode,
+    # applied across MODELS within the copilot provider rather than across
+    # providers.
+    honor_configured_mode = (
+        configured_mode is not None
+        and _provider_supports_explicit_api_mode("copilot", configured_provider)
+        and _copilot_same_model(model_name, default_model, api_key=api_key)
+    )
+    if honor_configured_mode:
+        return configured_mode  # type: ignore[return-value]
+
     if not model_name:
         return "chat_completions"
 
@@ -251,6 +278,38 @@ def _copilot_runtime_api_mode(model_cfg: Dict[str, Any], api_key: str) -> str:
         return copilot_model_api_mode(model_name, api_key=api_key)
     except Exception:
         return "chat_completions"
+
+
+def _copilot_same_model(
+    a: Optional[str],
+    b: Optional[str],
+    *,
+    api_key: str = "",
+) -> bool:
+    """Return True when two Copilot model ids refer to the same catalog model.
+
+    Compares via ``normalize_copilot_model_id`` so dot/dash and vendor-prefixed
+    variants (``anthropic/claude-opus-4-8`` vs ``claude-opus-4.8``) of the same
+    model match. Falls back to a case-insensitive string compare if
+    normalization is unavailable. Empty ids never match a non-empty id.
+    """
+    left = str(a or "").strip()
+    right = str(b or "").strip()
+    if not left or not right:
+        return False
+    if left.lower() == right.lower():
+        return True
+    try:
+        from hermes_cli.models import normalize_copilot_model_id
+
+        # Catalog is not needed for equality: normalization is deterministic for
+        # alias/dot-dash resolution, so pass no api_key to stay offline-fast.
+        return (
+            normalize_copilot_model_id(left).lower()
+            == normalize_copilot_model_id(right).lower()
+        )
+    except Exception:
+        return False
 
 
 _VALID_API_MODES = {
@@ -356,7 +415,11 @@ def _resolve_runtime_from_pool_entry(
     elif provider == "nous":
         api_mode = "chat_completions"
     elif provider == "copilot":
-        api_mode = _copilot_runtime_api_mode(model_cfg, getattr(entry, "runtime_api_key", ""))
+        api_mode = _copilot_runtime_api_mode(
+            model_cfg,
+            getattr(entry, "runtime_api_key", ""),
+            target_model=effective_model or None,
+        )
         base_url = base_url or PROVIDER_REGISTRY["copilot"].inference_base_url
     elif provider == "azure-foundry":
         # Azure Foundry: read api_mode and base_url from config
@@ -1240,6 +1303,7 @@ def _resolve_explicit_runtime(
     model_cfg: Dict[str, Any],
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
+    target_model: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     explicit_api_key = str(explicit_api_key or "").strip()
     explicit_base_url = str(explicit_base_url or "").strip().rstrip("/")
@@ -1271,7 +1335,50 @@ def _resolve_explicit_runtime(
             "requested_provider": requested_provider,
         }
 
-    if provider == "openai-codex":
+    if provider == "gpt-native-premium":
+        # gpt-native-premium reuses the openai-codex OAuth credential read-only (for the
+        # bearer + account_id) but generates via the sentinel-free pure-Python Android
+        # transport. Return the marker base_url gpt-native-premium:// so
+        # create_openai_client routes to GptNativeAndroidClient. api_mode=chat_completions.
+        base_url = explicit_base_url or "gpt-native-premium://chatgpt.com"
+        api_key = explicit_api_key
+        last_refresh = None
+        if not api_key:
+            creds = resolve_codex_runtime_credentials()
+            api_key = creds.get("api_key", "")
+            last_refresh = creds.get("last_refresh")
+        return {
+            "provider": provider,
+            "api_mode": "chat_completions",
+            "base_url": base_url,
+            "api_key": api_key,
+            "source": "explicit",
+            "last_refresh": last_refresh,
+            "requested_provider": requested_provider,
+        }
+
+    if provider == "maxai-v3":
+        # maxai-v3 needs NO real api key: MaxAIV3Client loads the account token
+        # from the token-state export itself. We DO return a non-empty
+        # PLACEHOLDER api_key so agent_init's `if api_key and base_url:` explicit
+        # path is taken (routing to create_openai_client -> the maxai-v3:// seam);
+        # an empty key would divert to the auto-router which has no maxai-v3 arm
+        # and then trip the "no API key" gate. The placeholder is never sent on
+        # the wire (the client signs with the loaded token). Mirrors the
+        # gpt-native no-real-key insight.
+        return {
+            "provider": provider,
+            "api_mode": "chat_completions",
+            "base_url": explicit_base_url or "maxai-v3://api.maxai.me",
+            "api_key": explicit_api_key or "maxai-v3-oauth",
+            "source": "explicit",
+            "requested_provider": requested_provider,
+        }
+
+    if provider in {"openai-codex", "gpt-native"}:
+        # gpt-native (ChatGPT Pro plugin) reuses the openai-codex OAuth credential +
+        # Codex Responses transport, keeping its own provider identity. See
+        # gpt-native/docs/PROVIDER-ARCHITECTURE-DECISION.md.
         base_url = explicit_base_url or DEFAULT_CODEX_BASE_URL
         api_key = explicit_api_key
         last_refresh = None
@@ -1282,7 +1389,7 @@ def _resolve_explicit_runtime(
             if not explicit_base_url:
                 base_url = creds.get("base_url", "").rstrip("/") or base_url
         return {
-            "provider": "openai-codex",
+            "provider": provider,
             "api_mode": "codex_responses",
             "base_url": base_url,
             "api_key": api_key,
@@ -1359,7 +1466,9 @@ def _resolve_explicit_runtime(
 
         api_mode = "chat_completions"
         if provider == "copilot":
-            api_mode = _copilot_runtime_api_mode(model_cfg, api_key)
+            api_mode = _copilot_runtime_api_mode(
+                model_cfg, api_key, target_model=target_model or None
+            )
         elif provider == "xai":
             api_mode = "codex_responses"
         else:
@@ -1460,6 +1569,7 @@ def resolve_runtime_provider(
         model_cfg=model_cfg,
         explicit_api_key=explicit_api_key,
         explicit_base_url=explicit_base_url,
+        target_model=target_model,
     )
     if explicit_runtime:
         return explicit_runtime
@@ -1544,11 +1654,37 @@ def resolve_runtime_provider(
             logger.info("Auto-detected Nous provider but credentials failed; "
                         "falling through to next provider.")
 
-    if provider == "openai-codex":
+    if provider == "maxai-v3":  # native MaxAI port: token from state file, placeholder key
+        return {
+            "provider": provider,
+            "api_mode": "chat_completions",
+            "base_url": "maxai-v3://api.maxai.me",
+            "api_key": "maxai-v3-oauth",
+            "source": "maxai-token-state",
+            "requested_provider": requested_provider,
+        }
+
+    if provider == "gpt-native-premium":  # premium lane: codex creds, Android transport
         try:
             creds = resolve_codex_runtime_credentials()
             return {
-                "provider": "openai-codex",
+                "provider": provider,
+                "api_mode": "chat_completions",
+                "base_url": "gpt-native-premium://chatgpt.com",
+                "api_key": creds.get("api_key", ""),
+                "source": creds.get("source", "hermes-auth-store"),
+                "last_refresh": creds.get("last_refresh"),
+                "requested_provider": requested_provider,
+            }
+        except AuthError:
+            if requested_provider != "auto":
+                raise
+
+    if provider in {"openai-codex", "gpt-native"}:  # gpt-native reuses codex OAuth+transport (own identity)
+        try:
+            creds = resolve_codex_runtime_credentials()
+            return {
+                "provider": provider,
                 "api_mode": "codex_responses",
                 "base_url": creds.get("base_url", "").rstrip("/"),
                 "api_key": creds.get("api_key", ""),
@@ -1816,7 +1952,9 @@ def resolve_runtime_provider(
         base_url = cfg_base_url or creds.get("base_url", "").rstrip("/")
         api_mode = "chat_completions"
         if provider == "copilot":
-            api_mode = _copilot_runtime_api_mode(model_cfg, creds.get("api_key", ""))
+            api_mode = _copilot_runtime_api_mode(
+                model_cfg, creds.get("api_key", ""), target_model=target_model or None
+            )
         elif provider == "xai":
             api_mode = "codex_responses"
         else:

@@ -186,6 +186,44 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         auth_type="oauth_external",
         inference_base_url=DEFAULT_CODEX_BASE_URL,
     ),
+    # gpt-native (ChatGPT Pro plugin) reuses the openai-codex OAuth credential +
+    # Codex Responses transport. Registered statically so its provider name is valid
+    # regardless of user-plugin discovery ordering. See
+    # gpt-native/docs/PROVIDER-ARCHITECTURE-DECISION.md.
+    "gpt-native": ProviderConfig(
+        id="gpt-native",
+        name="ChatGPT Pro (gpt-native)",
+        auth_type="oauth_external",
+        inference_base_url=DEFAULT_CODEX_BASE_URL,
+    ),
+    # gpt-native-premium (ChatGPT Pro premium lane) reuses the SAME openai-codex OAuth
+    # credential read-only but generates via the sentinel-free pure-Python Android
+    # transport (gpt-5.5-pro std/extended, deep-research). Registered statically so the
+    # provider name is valid regardless of plugin discovery ordering. The marker base_url
+    # gpt-native-premium:// routes create_openai_client to GptNativeAndroidClient.
+    "gpt-native-premium": ProviderConfig(
+        id="gpt-native-premium",
+        name="ChatGPT Pro Premium (gpt-native)",
+        auth_type="oauth_external",
+        inference_base_url="gpt-native-premium://chatgpt.com",
+    ),
+    # maxai-v3 (native byte-faithful MaxAI web-app port). NO real api key: the
+    # credential is the account token loaded from the token-state export by the
+    # MaxAIV3Client itself (auth/identity.py). Registered statically so the
+    # provider name is valid regardless of plugin discovery order. The marker
+    # base_url maxai-v3:// routes create_openai_client to MaxAIV3Client.
+    # auth_type="api_key" (NOT oauth_external) mirrors the uc-native / maxai-v2
+    # native-plugin precedent: the picker/auth-status treat a placeholder-key
+    # native provider as configured (it surfaces via the config.yaml providers
+    # block with its model list), instead of showing a false "needs setup"
+    # oauth dead-end. Routing keys on provider=="maxai-v3" / base_url, never on
+    # auth_type, so this is picker-classification only.
+    "maxai-v3": ProviderConfig(
+        id="maxai-v3",
+        name="MaxAI v3 (native)",
+        auth_type="api_key",
+        inference_base_url="maxai-v3://api.maxai.me",
+    ),
     "openai-api": ProviderConfig(
         id="openai-api",
         name="OpenAI API",

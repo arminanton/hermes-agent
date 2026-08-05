@@ -125,12 +125,19 @@ class ResponsesApiTransport(ProviderTransport):
                 reasoning_effort = reasoning_config["effort"]
 
         # Clamp efforts the OpenAI/Codex Responses API does not accept.
-        # Supported: none, minimal, low, medium, high, xhigh.  "max" is an
-        # Anthropic-only level: sending it here returns HTTP 400
-        # invalid_value, which (e.g. on a Codex fallback from an Anthropic
-        # primary configured with effort=max) kills the request.  "minimal"
-        # is mapped to "low" for older deployments that reject it.
-        _effort_clamp = {"minimal": "low", "max": "xhigh"}
+        # Supported on GPT-5.5/5.4 and older: none, minimal, low, medium, high,
+        # xhigh.  "max" was historically an Anthropic-only level that returned
+        # HTTP 400 invalid_value here (e.g. on a Codex fallback from an Anthropic
+        # primary configured with effort=max).  GPT-5.6 (Sol/Terra/Luna) DO
+        # accept "max" on the Responses API per the live catalog
+        # (capabilities.supports.reasoning_effort includes "max"), so only clamp
+        # "max"→"xhigh" for models that don't list it.  "minimal" is mapped to
+        # "low" for older deployments that reject it.
+        _model_lower = str(model or "").strip().lower()
+        _supports_max = _model_lower.startswith("gpt-5.6") or "/gpt-5.6" in _model_lower
+        _effort_clamp = {"minimal": "low"}
+        if not _supports_max:
+            _effort_clamp["max"] = "xhigh"
         reasoning_effort = _effort_clamp.get(reasoning_effort, reasoning_effort)
 
         response_tools = _responses_tools(tools)

@@ -1442,6 +1442,83 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
                 agent._client_log_context(),
             )
             return client
+    # gpt-native PREMIUM lane (reverse-engineered ChatGPT Pro Android transport):
+    # gpt-5.5-pro std/extended, deep-research, 1M context. Sentinel-free pure-Python
+    # (curl_cffi chrome131_android + Android request shape + codex OAuth bearer read-only).
+    # Routed by base_url scheme gpt-native-premium:// (the codex-lane models on this same
+    # provider keep api_mode=codex_responses and never reach here). The adapter lives in
+    # the gpt-native plugin repo (native/agent/gpt_native_android.py); we import it from the
+    # symlinked plugin dir so core carries no RE code. Additive branch, mirrors uc-native.
+    if str(client_kwargs.get("base_url", "")).startswith("gpt-native-premium://") \
+            or (agent.provider == "gpt-native"
+                and str(client_kwargs.get("base_url", "")).startswith("gpt-native-premium")):
+        import importlib.util as _ilu
+        import os as _os
+
+        _plugin_agent = _os.path.join(
+            _os.path.expanduser("~"), ".hermes", "plugins", "model-providers",
+            "gpt-native")
+        # the symlink points at native/plugin; the adapter is one dir up in native/agent
+        _adapter_path = _os.path.realpath(
+            _os.path.join(_plugin_agent, "..", "agent", "gpt_native_android.py"))
+        _spec = _ilu.spec_from_file_location("gpt_native_android", _adapter_path)
+        if _spec is None or _spec.loader is None:
+            raise RuntimeError(
+                "gpt-native premium adapter not found at %s" % _adapter_path)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        safe_kwargs = {
+            k: v for k, v in client_kwargs.items()
+            if k in {"api_key", "base_url", "default_headers", "timeout"}
+        }
+        client = _mod.GptNativeAndroidClient(**safe_kwargs)
+        _ra().logger.info(
+            "gpt-native premium client created (%s, shared=%s) %s",
+            reason,
+            shared,
+            agent._client_log_context(),
+        )
+        return client
+    # MaxAI v3 native lane (byte-faithful web-app port). Routed by base_url
+    # scheme maxai-v3://. Constructs the plugin's MaxAIV3Client (OpenAI-SDK-
+    # compatible) instead of the stock OpenAI client. The client owns the
+    # Firefox-JA3 curl_cffi transport (routed through a residential SOCKS proxy
+    # via MAXAI_V3_PROXY — NOT a whole-process netns, so Hermes keeps its host
+    # Postgres/CMX), the web-app signer, token lifecycle (loaded from the
+    # token-state export), OpenAI<->MaxAI translation, and server-side memory.
+    # Additive branch, mirrors gpt-native / uc-native; core carries no RE code
+    # (imported from the symlinked plugin's src/ package).
+    if str(client_kwargs.get("base_url", "")).startswith("maxai-v3://"):
+        import importlib.util as _ilu
+        import os as _os
+        import sys as _sys
+
+        _plugin = _os.path.join(
+            _os.path.expanduser("~"), ".hermes", "plugins",
+            "model-providers", "maxai-v3")
+        # The symlink points at v3/plugin; the package lives one dir up in
+        # v3/src/maxai_v3. Put that src/ on sys.path so the factory's internal
+        # ``from maxai_v3.client import ...`` imports resolve (maxai-v3 is a
+        # real package, unlike gpt-native's single-file adapter).
+        _src = _os.path.realpath(_os.path.join(_plugin, "..", "src"))
+        if _src not in _sys.path:
+            _sys.path.insert(0, _src)
+        _factory = _os.path.join(_src, "maxai_v3", "hermes_factory.py")
+        _spec = _ilu.spec_from_file_location(
+            "maxai_v3.hermes_factory", _factory)
+        if _spec is None or _spec.loader is None:
+            raise RuntimeError("maxai-v3 factory not found at %s" % _factory)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        safe_kwargs = {
+            k: v for k, v in client_kwargs.items()
+            if k in {"api_key", "base_url", "default_headers", "timeout"}
+        }
+        client = _mod.build_client(**safe_kwargs)
+        _ra().logger.info(
+            "maxai-v3 client created (%s, shared=%s) %s",
+            reason, shared, agent._client_log_context())
+        return client
     # Inject TCP keepalives so the kernel detects dead provider connections
     # instead of letting them sit silently in CLOSE-WAIT (#10324).  Without
     # this, a peer that drops mid-stream leaves the socket in a state where

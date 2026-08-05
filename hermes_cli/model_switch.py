@@ -643,6 +643,22 @@ def resolve_display_context_length(
     Prefer the provider-aware value; fall back to ``model_info.context_window``
     only if the resolver returns nothing.
     """
+    # Copilot: mirror the number the Copilot CLI SHOWS in its /model picker
+    # (the total window / long_context tier sum), not the enforced input budget.
+    # Display-only — token accounting still uses the input-budget resolver.
+    # Per Armin (2026-08-04): the banner must match what the CLI displays.
+    if (provider or "").lower() in {"copilot", "copilot-acp", "github-copilot", "github", "github-models"}:
+        try:
+            from hermes_cli.models import (
+                get_copilot_display_context,
+                _resolve_copilot_catalog_api_key,
+            )
+            _cop_key = _resolve_copilot_catalog_api_key() or api_key
+            disp = get_copilot_display_context(model, api_key=_cop_key)
+            if disp:
+                return int(disp)
+        except Exception:
+            pass  # Fall through to the standard resolver.
     try:
         from agent.model_metadata import get_model_context_length
         ctx = get_model_context_length(

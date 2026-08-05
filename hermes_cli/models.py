@@ -33,6 +33,13 @@ COPILOT_MODELS_URL = f"{COPILOT_BASE_URL}/models"
 _COPILOT_INTEGRATION_ID = "copilot-developer-cli"
 _COPILOT_CLI_VERSION = "1.0.63"
 COPILOT_REASONING_EFFORTS_GPT5 = ["minimal", "low", "medium", "high", "xhigh"]
+# GPT-5.6 (Sol/Terra/Luna) additionally expose "max" as their top effort tier
+# per the live Copilot /models catalog (capabilities.supports.reasoning_effort =
+# [none, low, medium, high, xhigh, max]). Older gpt-5.5/gpt-5.4 top out at
+# "xhigh", so "max" must NOT go in the shared GPT5 list above (it would make an
+# offline gpt-5.5 request send an unsupported effort). Consulted only on the
+# offline fallback path; when the live catalog is reachable it is authoritative.
+COPILOT_REASONING_EFFORTS_GPT56 = ["none", "low", "medium", "high", "xhigh", "max"]
 COPILOT_REASONING_EFFORTS_O_SERIES = ["low", "medium", "high"]
 
 # Account-usable Copilot models the live /models catalog OMITS (hidden/preview
@@ -2059,13 +2066,19 @@ def _is_anthropic_fast_model(model_id: Optional[str]) -> bool:
     Two routes return True:
       1. A ``-fast`` id (e.g. ``claude-opus-4.8-fast``) — the synthetic fast variant
          Hermes exposes; selecting it MEANS "send speed=fast on the base model".
-      2. A base claude model on an endpoint that accepts the speed param. Native
-         Anthropic currently honors speed=fast on Opus 4.6 only (4.7/4.8 400 there);
-         but **Copilot's /v1/messages proxy accepts speed=fast on opus/sonnet/haiku 4.x**
-         (empirically verified — it passes the param through to the upstream). The
-         per-endpoint gate in ``anthropic_adapter.build_anthropic_kwargs`` makes the
-         final call, so this stays permissive for claude-* and lets the adapter refuse
-         where the endpoint truly rejects it.
+      2. Any base ``claude-*`` model. Native Anthropic currently honors speed=fast
+         on Opus 4.6 only (others 400 there), but **Copilot's /v1/messages proxy
+         passes speed=fast through for every claude family** (empirically verified
+         on opus-4.x and sonnet-5). This layer is intentionally family-agnostic and
+         permissive: the per-endpoint gate in
+         ``anthropic_adapter.build_anthropic_kwargs`` / ``_supports_fast_mode``
+         makes the final call and refuses where the endpoint truly rejects it.
+
+    Family-agnostic on purpose: hardcoding a family allow-list
+    (``opus-4``/``sonnet-4``/``haiku-4``) silently dropped every NEW family
+    (claude-sonnet-5, future opus-5, …) out of fast mode until someone edited the
+    list. Matching all ``claude-*`` here keeps new models working without a
+    per-release code change; the endpoint gate remains the real guard.
     """
     raw = _strip_vendor_prefix(str(model_id or ""))
     base = raw.split(":")[0]
@@ -2073,8 +2086,14 @@ def _is_anthropic_fast_model(model_id: Optional[str]) -> bool:
         base = base[:-5]
     if not base.startswith("claude-"):
         return False
-    # opus / sonnet / haiku 4.x families support fast mode on at least one endpoint.
-    return any(fam in base for fam in ("opus-4", "sonnet-4", "haiku-4"))
+    # Exclude genuinely-legacy families (claude-2.x, claude-3.x) that have no
+    # fast offering on any endpoint. Everything from claude-4.x onward (opus/
+    # sonnet/haiku 4.x, sonnet-5, future opus-5, …) is allowed here; the
+    # endpoint-aware gate in the adapter makes the final call.
+    rest = base[len("claude-"):]
+    if rest[:1] in ("2", "3"):
+        return False
+    return True
 
 
 def resolve_fast_mode_overrides(model_id: Optional[str]) -> dict[str, Any] | None:
@@ -3234,19 +3253,20 @@ def fetch_github_model_catalog(
         seen_ids.add(model_id)
         models.append(item)
     
-    # Inject synthetic "-fast" companion entries for fast-capable Claude models so the
+    # Inject synthetic "-fast" companion entries for Claude models so the
     # Anthropic Fast Mode variant is selectable directly from /models (the way OpenRouter
     # exposes e.g. "claude-opus-4.8-fast"). These are NOT real catalog ids — selecting one
     # normalizes back to the base model on the wire (normalize_copilot_model_id strips
     # "-fast") and auto-attaches extra_body.speed="fast" (the ~2.5x throughput knob).
-    # Copilot's /v1/messages proxy accepts speed=fast on opus/sonnet/haiku 4.x.
+    # Copilot's /v1/messages proxy passes speed=fast through for EVERY claude family
+    # (family-agnostic on purpose — a hardcoded opus-4/sonnet-4/haiku-4 list silently
+    # dropped new families like sonnet-5). A base model that is already itself a real
+    # "-fast" catalog id (e.g. claude-opus-4.8-fast) is skipped by the -fast guard.
     if os.environ.get("HERMES_COPILOT_HIDE_FAST_VARIANTS") not in ("1", "true", "yes"):
         for item in list(models):
             base_id = str(item.get("id") or "").strip()
             low = base_id.lower()
-            if low.startswith("claude-") and any(
-                fam in low for fam in ("opus-4", "sonnet-4", "haiku-4")
-            ) and not low.endswith("-fast"):
+            if low.startswith("claude-") and not low.endswith("-fast"):
                 fast_id = f"{base_id}-fast"
                 if fast_id not in seen_ids:
                     fast_item = dict(item)
@@ -3254,6 +3274,12 @@ def fetch_github_model_catalog(
                     name = str(item.get("name") or base_id)
                     fast_item["name"] = f"{name} (Fast)"
                     fast_item["model_picker_enabled"] = True
+                    # Tag as a Hermes synthetic companion (NOT a real Copilot
+                    # catalog id). normalize_copilot_model_id uses this to decide
+                    # whether a "-fast" id should be sent verbatim on the wire
+                    # (real catalog id, e.g. claude-opus-4.8-fast) or stripped to
+                    # its base (synthetic, e.g. claude-sonnet-5-fast → claude-sonnet-5).
+                    fast_item["_hermes_synthetic_fast"] = True
                     models.append(fast_item)
                     seen_ids.add(fast_id)
 
@@ -3311,28 +3337,60 @@ _COPILOT_CONTEXT_SUPPLEMENT: dict[str, int] = {
 
 
 def _copilot_input_budget_from_limits(
-    model_id: str, limits: dict[str, Any]
+    model_id: str, limits: dict[str, Any], billing: Optional[dict[str, Any]] = None
 ) -> Optional[int]:
-    """Pick the true usable INPUT-token budget for a Copilot model.
+    """Return the enforced INPUT-token budget for a Copilot model.
 
-    Verified live 2026-06-07 (account e126380_magh):
-      - Claude (/v1/messages) and Gemini (/chat/completions) enforce the prompt
-        cap at the FULL ``max_context_window_tokens``; output tokens are billed
-        separately (opus accepted a 998,564-token prompt AND 128k output in the
-        same request). Their catalog ``max_prompt_tokens`` UNDER-reports by the
-        output reservation (936k = 1M − 64k), so using it wastes ~64k of usable
-        context, hence we use the full window for these families.
-      - GPT / o-series / codex (/responses) treat the window as a COMBINED
-        input+output budget; the enforced INPUT cap is ``max_prompt_tokens``
-        (gpt-5.5 rejects ~924k input though its window is 1.05M). Using the
-        window would over-budget and 400 near the top, so we keep max_prompt.
+    This is the ACCOUNTING number — what Hermes' context compressor treats as
+    the window (``threshold_tokens = context_length * threshold``). It MUST be
+    the server's enforced input cap (the value a single request 400s at), NOT
+    the total window that additionally reserves output tokens. The DISPLAY
+    number the CLI meter shows (input cap + output = e.g. grok 628k) is computed
+    separately by ``_copilot_display_context_from_item`` /
+    ``get_copilot_display_context``; do NOT conflate the two.
+
+    Per-family field selection, verified live 2026-06-07 / 2026-08-04
+    (account e126380_magh):
+
+      - Claude / Gemini (/v1/messages, /chat/completions): the enforced prompt
+        cap IS the full ``max_context_window_tokens`` (output billed
+        separately; opus accepted a 998,564-tok prompt AND 128k output in one
+        request). Their catalog ``max_prompt_tokens`` UNDER-reports by the
+        output reservation (936k = 1M − 64k), so use the window. Examples:
+        claude-opus-5 → 1.0M; gemini → 1M.
+      - GPT / grok / codex (/responses): the window is a COMBINED input+output
+        budget, and the enforced INPUT cap is the active billing tier's
+        ``max_prompt_tokens``. The account runs the ``long_context`` tier
+        (unlocked by ``X-GitHub-Api-Version: 2026-07-01``, which Hermes sends),
+        so prefer ``billing.token_prices.long_context.max_prompt_tokens`` —
+        that is the tier actually granted on the wire. Examples:
+        gpt-5.6-sol → 922k (its window is 1.05M); grok-4.5 → 500k (long_context
+        tier; the default-tier ``limits.max_prompt_tokens`` 372k is the FLOOR
+        Hermes would hit without the 2026-07-01 header, not the real cap).
+
+    Do NOT add ``max_output_tokens`` here — that yields the display window and
+    would let the compressor pack input past the enforced cap and 400.
     """
     window = limits.get("max_context_window_tokens")
     prompt = limits.get("max_prompt_tokens")
     mid = model_id.lower()
-    window_is_input_cap = mid.startswith("claude") or mid.startswith("gemini")
-    if window_is_input_cap and isinstance(window, int) and window > 0:
-        return window
+
+    # Claude/Gemini: the enforced prompt cap is the full window (catalog
+    # max_prompt under-reports by the output reservation).
+    if mid.startswith("claude") or mid.startswith("gemini"):
+        if isinstance(window, int) and window > 0:
+            return window
+
+    # GPT/grok/codex: enforced INPUT cap = the active (long_context) billing
+    # tier's max_prompt. This is the tier the 2026-07-01 api-version grants on
+    # the wire (grok 500k, not the default-tier 372k). No output added.
+    if isinstance(billing, dict):
+        tiers = billing.get("token_prices") or {}
+        lc = tiers.get("long_context") or {}
+        lc_prompt = lc.get("max_prompt_tokens")
+        if isinstance(lc_prompt, int) and lc_prompt > 0:
+            return lc_prompt
+
     if isinstance(prompt, int) and prompt > 0:
         return prompt
     if isinstance(window, int) and window > 0:
@@ -3383,7 +3441,8 @@ def get_copilot_model_context(model_id: str, api_key: Optional[str] = None) -> O
             continue
         caps = item.get("capabilities") or {}
         limits = caps.get("limits") or {}
-        budget = _copilot_input_budget_from_limits(mid, limits)
+        billing = item.get("billing") or {}
+        budget = _copilot_input_budget_from_limits(mid, limits, billing)
         if isinstance(budget, int) and budget > 0:
             cache[mid] = budget
 
@@ -3396,6 +3455,120 @@ def get_copilot_model_context(model_id: str, api_key: Optional[str] = None) -> O
     # override) with verified max_prompt values so a flaky omission doesn't
     # break context budgeting. Verified live 2026-06-07 (account e126380_magh).
     return cache.get(model_id) or _COPILOT_CONTEXT_SUPPLEMENT.get(model_id)
+
+
+# Module-level cache for the DISPLAY context value (the number the Copilot CLI
+# shows in its /model picker), kept separate from the accounting budget cache.
+_copilot_display_context_cache: dict[str, int] = {}
+_copilot_display_context_cache_time: float = 0.0
+
+# DISPLAY-only fallback for models the account's live /models catalog omits, so
+# the banner still mirrors the CLI meter's window even when we can't compute it
+# from a catalog item. Keyed by model id → the CLI /context DENOMINATOR (input
+# cap + max_output). MUST NOT be used for accounting — the compressor budget
+# comes from get_copilot_model_context (the enforced input cap) instead.
+#   grok-4.5: long_context input cap 500k + output 128k = 628k, the number the
+#   CLI shows ("grok-4.5 · 45k/628k tokens"). grok is not in this account's
+#   catalog, so without this fallback the display path collapses onto the 500k
+#   accounting number and the meter would wrongly read /500k.
+_COPILOT_DISPLAY_CONTEXT_SUPPLEMENT: dict[str, int] = {
+    "grok-4.5": 628000,
+}
+
+
+def _copilot_display_context_from_item(item: dict[str, Any]) -> Optional[int]:
+    """Compute the context number the Copilot CLI SHOWS for a catalog item.
+
+    Mirrors the CLI's picker "Context" column formula, reverse-engineered from
+    the 1.0.79 bundle (``app.js``):
+
+        Context = long_context tier present
+                    ? long_context.max_prompt_tokens + max_output_tokens
+                    : "—"   (single-tier models render a dash)
+
+    The CLI humanizes the sum (``>=1e6 -> "N.NM"``, else ``round/1e3 "K"``); we
+    return the raw integer and let the banner's ``_format_context_length`` do
+    the humanizing (it uses the identical rounding).
+
+    This is the DISPLAY number (total window the user sees), distinct from the
+    enforced INPUT budget from ``_copilot_input_budget_from_limits``. Per Armin
+    (2026-08-04) the banner must mirror what the CLI shows; token accounting
+    still uses the input budget. For single-tier models the CLI shows a dash;
+    we fall back to ``max_context_window_tokens`` so Hermes shows the real
+    window there instead of a blank (Armin: "mirror the window number").
+    """
+    caps = item.get("capabilities") or {}
+    limits = caps.get("limits") or {}
+    out = limits.get("max_output_tokens") or 0
+    billing = item.get("billing") or {}
+    tiers = billing.get("token_prices") or {}
+    lc = tiers.get("long_context") or {}
+    lc_prompt = lc.get("max_prompt_tokens")
+    if isinstance(lc_prompt, int) and lc_prompt > 0:
+        # Tiered model: CLI shows long_context.max_prompt + max_output.
+        return lc_prompt + (out if isinstance(out, int) else 0)
+    # Single-tier: CLI shows a dash; mirror the total window instead of blank.
+    window = limits.get("max_context_window_tokens")
+    if isinstance(window, int) and window > 0:
+        return window
+    return None
+
+
+def get_copilot_display_context(
+    model_id: str, api_key: Optional[str] = None
+) -> Optional[int]:
+    """Return the context number the Copilot CLI DISPLAYS for *model_id*.
+
+    Display-only: use for banners / ``/model`` output so Hermes mirrors the CLI
+    picker's "Context" column. Do NOT use for token accounting or compression
+    triggers — those must use ``get_copilot_model_context`` (the enforced input
+    budget). Process-cached for 1h like the budget resolver.
+    """
+    global _copilot_display_context_cache, _copilot_display_context_cache_time
+
+    if _copilot_display_context_cache and (
+        time.time() - _copilot_display_context_cache_time < _COPILOT_CONTEXT_CACHE_TTL
+    ):
+        if model_id in _copilot_display_context_cache:
+            return _copilot_display_context_cache[model_id]
+        # A "-fast" synthetic id shares its base model's display value.
+        base = model_id[:-5] if model_id.endswith("-fast") else model_id
+        if base in _copilot_display_context_cache:
+            return _copilot_display_context_cache[base]
+        return (
+            _COPILOT_CONTEXT_SUPPLEMENT.get(model_id)
+            or _COPILOT_DISPLAY_CONTEXT_SUPPLEMENT.get(model_id)
+        )
+
+    if not api_key:
+        api_key = _auto_resolve_copilot_token()
+    catalog = fetch_github_model_catalog(api_key=api_key)
+    if not catalog:
+        return (
+            _COPILOT_CONTEXT_SUPPLEMENT.get(model_id)
+            or _COPILOT_DISPLAY_CONTEXT_SUPPLEMENT.get(model_id)
+        )
+
+    cache: dict[str, int] = {}
+    for item in catalog:
+        mid = str(item.get("id") or "").strip()
+        if not mid:
+            continue
+        disp = _copilot_display_context_from_item(item)
+        if isinstance(disp, int) and disp > 0:
+            cache[mid] = disp
+
+    _copilot_display_context_cache = cache
+    _copilot_display_context_cache_time = time.time()
+
+    if model_id in cache:
+        return cache[model_id]
+    base = model_id[:-5] if model_id.endswith("-fast") else model_id
+    return (
+        cache.get(base)
+        or _COPILOT_CONTEXT_SUPPLEMENT.get(model_id)
+        or _COPILOT_DISPLAY_CONTEXT_SUPPLEMENT.get(model_id)
+    )
 
 
 def _is_github_models_base_url(base_url: Optional[str]) -> bool:
@@ -3690,6 +3863,8 @@ _COPILOT_MODEL_ALIASES = {
 def _copilot_catalog_ids(
     catalog: Optional[list[dict[str, Any]]] = None,
     api_key: Optional[str] = None,
+    *,
+    exclude_synthetic_fast: bool = False,
 ) -> set[str]:
     if catalog is None and api_key:
         catalog = fetch_github_model_catalog(api_key=api_key)
@@ -3699,6 +3874,7 @@ def _copilot_catalog_ids(
         str(item.get("id") or "").strip()
         for item in catalog
         if str(item.get("id") or "").strip()
+        and not (exclude_synthetic_fast and item.get("_hermes_synthetic_fast"))
     }
 
 
@@ -3712,7 +3888,15 @@ def normalize_copilot_model_id(
     if not raw:
         return ""
 
-    catalog_ids = _copilot_catalog_ids(catalog=catalog, api_key=api_key)
+    # Exclude synthetic "-fast" companions from the id set used for wire
+    # resolution: a synthetic id (e.g. claude-sonnet-5-fast) must NOT be treated
+    # as a real catalog id, otherwise it would be sent verbatim and 400
+    # (model_not_supported). Real "-fast" catalog ids (claude-opus-4.8-fast) stay
+    # in the set and resolve to themselves. Either way the speed=fast knob is
+    # attached separately by the adapter via resolve_fast_mode_overrides.
+    catalog_ids = _copilot_catalog_ids(
+        catalog=catalog, api_key=api_key, exclude_synthetic_fast=True
+    )
     alias = _COPILOT_MODEL_ALIASES.get(raw)
     if alias:
         return alias
@@ -3757,6 +3941,8 @@ def _github_reasoning_efforts_for_model_id(model_id: str) -> list[str]:
     if raw.startswith(("openai/o1", "openai/o3", "openai/o4", "o1", "o3", "o4")):
         return list(COPILOT_REASONING_EFFORTS_O_SERIES)
     normalized = normalize_copilot_model_id(model_id).lower()
+    if normalized.startswith("gpt-5.6"):
+        return list(COPILOT_REASONING_EFFORTS_GPT56)
     if normalized.startswith("gpt-5"):
         return list(COPILOT_REASONING_EFFORTS_GPT5)
     return []

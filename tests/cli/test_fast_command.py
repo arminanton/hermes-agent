@@ -348,7 +348,8 @@ class TestAnthropicFastMode(unittest.TestCase):
         """Fast mode spans opus/sonnet/haiku 4.x (endpoint-aware; adapter gates final)."""
         from hermes_cli.models import _is_anthropic_fast_model
 
-        # Supported: opus / sonnet / haiku 4.x in any form, incl the synthetic -fast id
+        # Supported: opus / sonnet / haiku 4.x AND newer families (sonnet-5, …),
+        # in any form, incl the synthetic -fast id. Endpoint-aware; adapter gates final.
         assert _is_anthropic_fast_model("claude-opus-4-6") is True
         assert _is_anthropic_fast_model("claude-opus-4.6") is True
         assert _is_anthropic_fast_model("anthropic/claude-opus-4-6") is True
@@ -358,9 +359,13 @@ class TestAnthropicFastMode(unittest.TestCase):
         assert _is_anthropic_fast_model("claude-opus-4.8-fast") is True
         assert _is_anthropic_fast_model("claude-sonnet-4-6") is True
         assert _is_anthropic_fast_model("claude-haiku-4-5") is True
+        # Newer families must NOT require a per-release allow-list edit.
+        assert _is_anthropic_fast_model("claude-sonnet-5") is True
+        assert _is_anthropic_fast_model("claude-sonnet-5-fast") is True
 
-        # Unsupported — non-4.x Claude and non-Claude
+        # Unsupported — genuinely-legacy Claude (2.x/3.x) and non-Claude
         assert _is_anthropic_fast_model("claude-3-5-sonnet") is False
+        assert _is_anthropic_fast_model("claude-2") is False
         assert _is_anthropic_fast_model("gpt-5.4") is False
         assert _is_anthropic_fast_model("") is False
 
@@ -447,6 +452,34 @@ class TestAnthropicFastModeAdapter(unittest.TestCase):
         assert "speed" not in kwargs
         assert "extra_headers" in kwargs
         assert _FAST_MODE_BETA in kwargs["extra_headers"].get("anthropic-beta", "")
+
+    def test_fast_suffix_stripped_from_wire_model(self):
+        # Regression: a `-fast` model id is the Fast Mode KNOB, not a real model.
+        # The wire `model` MUST be the base id (sending `...-fast` 400s "model not
+        # supported"); the speed param is attached separately. Covers the bug
+        # where selecting claude-opus-4.8-fast in the TUI sent the literal
+        # `-fast` id and Copilot's /v1/messages rejected it.
+        from agent.anthropic_adapter import build_anthropic_kwargs
+
+        for mid in (
+            "claude-opus-4.8-fast",
+            "claude-sonnet-4.6-fast",
+            "claude-haiku-4.5-fast",
+        ):
+            kwargs = build_anthropic_kwargs(
+                model=mid,
+                messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                tools=None,
+                max_tokens=None,
+                reasoning_config=None,
+                base_url="https://api.githubcopilot.com",
+                fast_mode=True,
+            )
+            self.assertNotIn("-fast", kwargs["model"], f"{mid}: wire model kept -fast")
+            self.assertEqual(
+                kwargs.get("extra_body", {}).get("speed"), "fast",
+                f"{mid}: speed knob not attached",
+            )
 
     def test_fast_mode_off_no_speed(self):
         from agent.anthropic_adapter import build_anthropic_kwargs
@@ -537,6 +570,8 @@ class TestSyntheticFastVariant(unittest.TestCase):
         base_items = [
             {"id": "claude-opus-4.8", "name": "Claude Opus 4.8",
              "model_picker_enabled": True, "capabilities": {"type": "chat"}},
+            {"id": "claude-sonnet-5", "name": "Claude Sonnet 5",
+             "model_picker_enabled": True, "capabilities": {"type": "chat"}},
             {"id": "gpt-5", "name": "GPT-5",
              "model_picker_enabled": True, "capabilities": {"type": "chat"}},
         ]
@@ -547,9 +582,35 @@ class TestSyntheticFastVariant(unittest.TestCase):
         finally:
             M._fetch_github_model_catalog_items = orig
         ids = [c["id"] for c in (cat or [])]
-        # the fast variant for the claude model is injected; gpt-5 gets none
+        # fast variants injected for BOTH claude families (incl. the new
+        # sonnet-5, proving family-agnostic injection); gpt-5 gets none.
         self.assertIn("claude-opus-4.8-fast", ids)
+        self.assertIn("claude-sonnet-5-fast", ids)
         self.assertNotIn("gpt-5-fast", ids)
+        # synthetic companions are tagged so wire-resolution can strip them.
+        s5f = next(c for c in (cat or []) if c["id"] == "claude-sonnet-5-fast")
+        self.assertTrue(s5f.get("_hermes_synthetic_fast"))
+
+    def test_synthetic_fast_id_strips_to_base_on_wire(self):
+        # A synthetic -fast id (claude-sonnet-5-fast, NOT a real catalog id) must
+        # normalize to its base on the wire; a real -fast catalog id
+        # (claude-opus-4.8-fast) is preserved verbatim.
+        from hermes_cli.models import normalize_copilot_model_id
+
+        catalog = [
+            {"id": "claude-sonnet-5"},
+            {"id": "claude-opus-4.8"},
+            {"id": "claude-opus-4.8-fast"},  # real Copilot catalog id
+            {"id": "claude-sonnet-5-fast", "_hermes_synthetic_fast": True},
+        ]
+        self.assertEqual(
+            normalize_copilot_model_id("claude-sonnet-5-fast", catalog=catalog),
+            "claude-sonnet-5",
+        )
+        self.assertEqual(
+            normalize_copilot_model_id("claude-opus-4.8-fast", catalog=catalog),
+            "claude-opus-4.8-fast",
+        )
 
     def test_adapter_attaches_speed_for_copilot_opus48(self):
         from agent.anthropic_adapter import build_anthropic_kwargs

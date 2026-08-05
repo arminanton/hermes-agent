@@ -195,6 +195,7 @@ DEFAULT_CONTEXT_LENGTHS = {
     # OpenRouter-prefixed models resolve via OpenRouter live API or models.dev.
     "claude-fable-5": 1000000,
     "claude-fable": 1000000,
+    "claude-opus-5": 1000000,
     "claude-opus-4-8": 1000000,
     "claude-opus-4.8": 1000000,
     "claude-opus-4-7": 1000000,
@@ -208,6 +209,10 @@ DEFAULT_CONTEXT_LENGTHS = {
     "claude-sonnet-4.7": 1000000,
     "claude-sonnet-4-8": 1000000,
     "claude-sonnet-4.8": 1000000,
+    # Claude 5 family (opus-5/sonnet-5): vendor 1M. Copilot deployment reports
+    # 1M window / 936k prompt budget via the live catalog; this is the offline
+    # last-resort fallback for catalog misses and non-Copilot surfaces.
+    "claude-sonnet-5": 1000000,
     # claude-fable-5 (Mythos-class GA): modeled on opus-4.8 (1M) since the
     # official 1.0.61 bundle clones opus-4.8's config for it. This is a fallback
     # for catalog misses / non-Copilot surfaces; the live Copilot catalog
@@ -234,7 +239,9 @@ DEFAULT_CONTEXT_LENGTHS = {
     "gpt-5.5": 1050000,               # OpenAI vendor total window (1.05M)
     "gpt-5.4-nano": 400000,           # 400k window
     "gpt-5.4-mini": 400000,           # 400k window
-    "gpt-5.4": 750000,                # GPT-5.4, GPT-5.4 Pro
+    "gpt-5.4": 1050000,               # GPT-5.4: Copilot 1.0.79 unified it to the
+                                      # gpt-5.5 tier (1.05M window / 922k prompt,
+                                      # wire-confirmed). -nano/-mini keep 400k above.
     # gpt-5.3-codex-spark is Codex-OAuth-only (ChatGPT Pro entitlement) and
     # uses a smaller 128k window than other gpt-5.x slugs. Listed here as
     # a defensive override so the longest-substring fallback doesn't match
@@ -309,6 +316,22 @@ DEFAULT_CONTEXT_LENGTHS = {
     "grok-4-fast": 2000000,     # grok-4-fast-(non-)reasoning, also matches -reasoning
     "grok-4.20": 2000000,       # grok-4.20-0309-(non-)reasoning, -multi-agent-0309
     "grok-4.3": 1000000,        # grok-4.3, grok-4.3-latest — 1M context per docs.x.ai
+    # grok-4.5 on GitHub Copilot: this is the ACCOUNTING budget (drives the
+    # context compressor: threshold_tokens = context_length × threshold). It
+    # must be the enforced INPUT cap, so set it to 500,000 = the long_context
+    # billing tier's max_prompt_tokens. That tier is unlocked by the
+    # X-GitHub-Api-Version: 2026-07-01 header, which Hermes sends on every
+    # Copilot inference call (see copilot_auth.py _COPILOT_API_VERSION_FALLBACK)
+    # — the same tier the Copilot CLI runs, which is why the CLI reaches ~500k
+    # input (confirmed live 2026-08-04, account e126380_magh). The 372,000 seen
+    # in earlier probes was the DEFAULT tier (what you get WITHOUT the 2026-07-01
+    # header) — a floor, not the ceiling. Do NOT use 628k here: 628k is the
+    # DISPLAY window (500k input + 128k output) shown by the CLI /context meter;
+    # feeding the window to the compressor would let it pack input past the 500k
+    # wall and 400. Display 628k is handled separately by
+    # get_copilot_display_context. Must sort before the generic "grok-4" (256K)
+    # catch-all so the substring fallback doesn't under-report.
+    "grok-4.5": 500000,
     "grok-4": 256000,           # grok-4, grok-4-0709
     "grok-3": 131072,           # grok-3, grok-3-mini, grok-3-fast, grok-3-mini-fast
     "grok-2": 131072,           # grok-2, grok-2-1212, grok-2-latest

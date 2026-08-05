@@ -743,6 +743,26 @@ _PROBE_VERIFIED_OVERRIDES: Dict[Tuple[str, str], Dict[str, Any]] = {
     ("github-copilot", "claude-mythos-1"):     {"context_window": 1_000_000, "max_output": 128_000},
     ("github-copilot", "claude-mythos-preview"):       {"context_window": 1_000_000, "max_output": 128_000},
     ("github-copilot", "claude-mythos-1-preview"):     {"context_window": 1_000_000, "max_output": 128_000},
+    # claude-sonnet-5 (new Copilot default, 2026-07) + claude-opus-4.8-fast (the
+    # "(fast mode)" preview variant). Live /models catalog with
+    # X-GitHub-Api-Version: 2026-07-01 (probe-verified 2026-07-13, account
+    # e126380_magh): ctx window 1,000,000, max_prompt 936,000, max_output 64,000,
+    # efforts [low,medium,high,xhigh,max]. Picker shows "1M" (=window) + "Max".
+    # context_window kept at the round 1,000,000 to match the opus-4.8 convention
+    # above; the wire cap self-corrects to the exact ~936k prompt budget on the
+    # first response-error turn if it ever matters.
+    ("github-copilot", "claude-sonnet-5"):      {"context_window": 1_000_000, "max_output": 128_000},
+    ("github-copilot", "claude-opus-4.8-fast"): {"context_window": 1_000_000, "max_output": 128_000},
+    # claude-opus-5 (Copilot CLI 1.0.79 catalog, 2026-08). Live /models reports
+    # ctx window 1,000,000, max_prompt 936,000, max_output 64,000, efforts
+    # [low,medium,high,xhigh,max] -- but the 64,000 is the SAME Claude-family
+    # under-report opus-4.8/sonnet-5 carry. Probe-verified live 2026-08-04
+    # (account e126380_magh, /v1/messages, beta triplet + copilot-1m-context):
+    # max_tokens=128,000 -> 200 OK; max_tokens=200,000 -> 400
+    # "128000, which is the maximum allowed number of output tokens". Real
+    # output cap is 128,000, matching opus-4.8. context_window kept at the round
+    # 1,000,000 convention (self-corrects to ~936k prompt budget on first turn).
+    ("github-copilot", "claude-opus-5"):        {"context_window": 1_000_000, "max_output": 128_000},
 
     # ─── provider=github-copilot, gpt-5 family ──────────────────────────────
     # /responses, input:string schema. gpt-5.5 marketed at 1.05M total window.
@@ -754,7 +774,22 @@ _PROBE_VERIFIED_OVERRIDES: Dict[Tuple[str, str], Dict[str, Any]] = {
     # that's a conservative routing default, NOT the real cap. The probe
     # V18.1 evidence stands.
     ("github-copilot", "gpt-5.5"):             {"context_window": 1_050_000, "max_output": 512_000},
-    ("github-copilot", "gpt-5.4"):             {"context_window":   750_000, "max_output": 512_000},
+    # gpt-5.6 Sol/Terra/Luna (GA 2026-07). Live /models catalog with
+    # X-GitHub-Api-Version: 2026-07-01 (probe-verified 2026-07-13): ctx window
+    # 1,050,000, max_prompt 922,000, max_output 128,000, efforts
+    # [none,low,medium,high,xhigh,max]. Picker shows "1.1M" (=rounded window) +
+    # "Max". Same family caps as gpt-5.5 but with the extra "max" effort tier.
+    ("github-copilot", "gpt-5.6-sol"):         {"context_window": 1_050_000, "max_output": 512_000},
+    ("github-copilot", "gpt-5.6-terra"):       {"context_window": 1_050_000, "max_output": 512_000},
+    ("github-copilot", "gpt-5.6-luna"):        {"context_window": 1_050_000, "max_output": 512_000},
+    # gpt-5.4: Copilot CLI 1.0.79 unified it up to the gpt-5.5/5.6 tier. Live
+    # /models (2026-08-04) reports window 1,050,000 / max_prompt 922,000, and
+    # the wire CONFIRMS it: a >922k prompt on /responses returns
+    # 400 "prompt token count ... exceeds the limit of 922000" (probe-verified,
+    # account e126380_magh). The old 750,000 here was from a pre-1.0.79 catalog
+    # and under-reported. Picker shows "1.1M". max_output 512k retained
+    # (probe-verified for the gpt-5.x family; catalog's 128k is the under-report).
+    ("github-copilot", "gpt-5.4"):             {"context_window": 1_050_000, "max_output": 512_000},
     ("github-copilot", "gpt-5.4-mini"):        {"context_window":   400_000, "max_output": 400_000},
     # gpt-5.3-codex was renamed → gpt-5.3-codex-spark in the 2026-06-04 Codex
     # catalog refresh. Keep both keys so old configs still resolve.
@@ -764,6 +799,24 @@ _PROBE_VERIFIED_OVERRIDES: Dict[Tuple[str, str], Dict[str, Any]] = {
     ("github-copilot", "gpt-5.2-codex"):       {"context_window":   272_000, "max_output": 128_000},
     ("github-copilot", "gpt-5-mini"):          {"context_window":   128_000, "max_output": 128_000},
     ("github-copilot", "gpt-4.1"):             {"context_window":    64_000, "max_output":  64_000},
+
+    # ─── provider=github-copilot, xAI Grok ─────────────────────────────────
+    # grok-4.5: TWO real numbers, kept in their correct roles.
+    #   * 500k = the enforced INPUT cap = long_context billing tier max_prompt.
+    #     This tier is unlocked by X-GitHub-Api-Version: 2026-07-01 (which Hermes
+    #     sends on every Copilot call), so it's the cap actually granted on the
+    #     wire — the same tier the Copilot CLI runs, which is why the CLI reaches
+    #     ~500k input (confirmed live 2026-08-04, account e126380_magh). The 372k
+    #     from earlier probes was the DEFAULT tier (no 2026-07-01 header) — a
+    #     floor, not the ceiling. This 500k is the ACCOUNTING budget that drives
+    #     compression; it lives in model_metadata.get_model_context_length.
+    #   * 628k = the DISPLAY window the CLI /context meter shows
+    #     ("grok-4.5 · 45k/628k tokens") = 500k input + 128k output.
+    # This ModelInfo.context_window is a DISPLAY-side value (feeds /models
+    # listings and the banner fallback), so it carries 628k to mirror the CLI
+    # picker. Token accounting does NOT read this — it uses the 500k input cap.
+    # max_output 128k per the catalog.
+    ("github-copilot", "grok-4.5"):            {"context_window":   628_000, "max_output": 128_000},
 
     # ─── provider=openai-codex (ChatGPT Codex backend, NOT Copilot proxy) ──
     # chatgpt.com/backend-api/codex/responses. Slug universe for this account
@@ -795,7 +848,14 @@ _PROBE_VERIFIED_OVERRIDES: Dict[Tuple[str, str], Dict[str, Any]] = {
     # the UI shows "n/a"; users should pick provider=google instead, which
     # unlocks the model via cloudcode-pa OAuth (Phase A9, 2026-06-04).
     ("github-copilot", "gemini-3.1-pro-preview"): {"context_window":         0, "max_output":       0},
-    ("github-copilot", "gemini-3.5-flash"):    {"context_window":   200_000, "max_output":  65_536},
+    # gemini-3.5-flash on Copilot: live /models 1.0.79 reports window 1,000,000
+    # / max_prompt 936,000 / long_context 936,000 (endpoint /chat/completions).
+    # The CLI picker shows "1M" (= the same catalog the image renders). The old
+    # 200,000 here was a stale proxy-clamp value from when gemini was
+    # integrator-gated; 1.0.79 exposes the full window on this account.
+    ("github-copilot", "gemini-3.5-flash"):    {"context_window": 1_000_000, "max_output":  65_536},
+    # gemini-3.6-flash (new in 1.0.79): same 1M window / 936k prompt tier.
+    ("github-copilot", "gemini-3.6-flash"):    {"context_window": 1_000_000, "max_output":  65_536},
 
     # ─── provider=google (cloudcode-pa OAuth, the "alternative token") ──
     # Phase A9 unlock 2026-06-04: opus/sonnet/gemini-3.x reachable via the

@@ -146,3 +146,67 @@ class TestResolveDisplayContextLength:
                 custom_providers=custom_provs,
             )
         assert ctx == 400_000
+
+
+class TestCopilotDisplayMirrorsCLI:
+    """Copilot /model display must mirror the number the Copilot CLI SHOWS
+    (total window / long_context tier sum), not the enforced input budget.
+
+    Per Armin (2026-08-04): "mirror the window number." The banner shows what
+    the CLI picker shows; token accounting still uses the input budget from
+    get_copilot_model_context (a separate resolver, not exercised here).
+    """
+
+    def test_copilot_prefers_display_context(self):
+        """A copilot model returns the CLI display value, not the budget."""
+        with patch(
+            "hermes_cli.models.get_copilot_display_context",
+            return_value=628_000,  # grok-4.5: long_context 500k + output 128k
+        ), patch(
+            "hermes_cli.models._resolve_copilot_catalog_api_key",
+            return_value="tok",
+        ):
+            ctx = resolve_display_context_length(
+                "grok-4.5",
+                "copilot",
+                base_url="https://api.githubcopilot.com",
+            )
+        assert ctx == 628_000, "copilot display must mirror the CLI's shown 628K"
+
+    def test_copilot_alias_providers_use_display_path(self):
+        """github-copilot / github-models aliases hit the same display path."""
+        for prov in ("github-copilot", "github-models", "copilot-acp"):
+            with patch(
+                "hermes_cli.models.get_copilot_display_context",
+                return_value=1_050_000,
+            ), patch(
+                "hermes_cli.models._resolve_copilot_catalog_api_key",
+                return_value="tok",
+            ):
+                ctx = resolve_display_context_length("gpt-5.6-sol", prov)
+            assert ctx == 1_050_000, f"{prov} must use the copilot display path"
+
+    def test_copilot_display_miss_falls_through_to_resolver(self):
+        """When the display resolver returns None, fall back to the standard
+        provider-aware resolver rather than showing nothing."""
+        with patch(
+            "hermes_cli.models.get_copilot_display_context", return_value=None
+        ), patch(
+            "hermes_cli.models._resolve_copilot_catalog_api_key", return_value=""
+        ), patch(
+            "agent.model_metadata.get_model_context_length",
+            return_value=1_000_000,
+        ):
+            ctx = resolve_display_context_length("claude-opus-5", "copilot")
+        assert ctx == 1_000_000
+
+    def test_non_copilot_provider_skips_display_path(self):
+        """A non-copilot provider must not consult the copilot display resolver."""
+        with patch(
+            "hermes_cli.models.get_copilot_display_context",
+            side_effect=AssertionError("must not be called for non-copilot"),
+        ), patch(
+            "agent.model_metadata.get_model_context_length", return_value=272_000
+        ):
+            ctx = resolve_display_context_length("gpt-5.5", "openai-codex")
+        assert ctx == 272_000

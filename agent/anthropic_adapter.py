@@ -188,10 +188,12 @@ _ANTHROPIC_DEFAULT_OUTPUT_LIMIT_VENDOR_FALLBACK = 32_000
 # These can be lower OR higher than vendor-direct because Copilot operates
 # its own deployments. Used only when fetch_github_model_catalog() fails.
 _ANTHROPIC_OUTPUT_LIMITS_COPILOT_FALLBACK = {
+    "claude-opus-5":     128_000,
     "claude-opus-4-8":   128_000,
     "claude-opus-4-7":   128_000,
     "claude-opus-4-6":   128_000,
     "claude-opus-4-5":   128_000,
+    "claude-sonnet-5":    128_000,
     "claude-sonnet-4-8":  64_000,
     "claude-sonnet-4-7":  64_000,
     "claude-sonnet-4-6":  64_000,
@@ -611,6 +613,8 @@ def _reset_effort_clamp_state_for_tests() -> None:
 # wrongly clamps (the previous ['medium']-only opus snapshot caused exactly
 # that regression). Keyed by the hyphenated, dot-normalized id.
 _COPILOT_EFFORT_FALLBACK = {
+    "claude-opus-5": ["low", "medium", "high", "xhigh", "max"],
+    "claude-sonnet-5": ["low", "medium", "high", "xhigh", "max"],
     "claude-opus-4-8": ["low", "medium", "high", "xhigh", "max"],
     "claude-opus-4-7": ["low", "medium", "high", "xhigh", "max"],
     "claude-opus-4-6": ["low", "medium", "high", "max"],
@@ -748,27 +752,49 @@ def _forbids_sampling_params(model: str) -> bool:
     return not any(v in m for v in _LEGACY_MANUAL_THINKING_CLAUDE_SUBSTRINGS)
 
 
+def _strip_fast_suffix(model: str) -> str:
+    """Strip a trailing ``-fast`` (the synthetic fast-variant id) so the BASE
+    model id goes on the wire.
+
+    ``-fast`` is the Anthropic Fast Mode KNOB (extra_body.speed="fast"), NOT a
+    real model id — neither native Anthropic nor Copilot's /v1/messages has a
+    ``...-fast`` model, so sending it verbatim 400s "model not supported". The
+    speed param is attached separately (see the fast-mode block below), so here
+    we only need the base id. A vendor prefix (``copilot/``) is preserved.
+    """
+    raw = model or ""
+    if raw.endswith("-fast"):
+        return raw[:-5]
+    return raw
+
+
 def _supports_fast_mode(model: str, base_url: Optional[str] = None) -> bool:
     """Return True for models that support Anthropic Fast Mode (speed=fast).
 
     Endpoint-aware:
       * **Native Anthropic** (``api.anthropic.com``): per Anthropic docs, fast mode is
         currently Opus 4.6 only. Sending ``speed:"fast"`` to other Claude models 400s.
-      * **GitHub Copilot** (``api.githubcopilot.com/v1/messages``): the proxy accepts
-        ``speed:"fast"`` on the opus/sonnet/haiku 4.x families and passes it upstream
-        (empirically verified on opus-4.8 — returns clean, no 400). So fast mode is
-        unlocked for those on the Copilot endpoint.
+      * **GitHub Copilot** (``api.githubcopilot.com/v1/messages``): the proxy passes
+        ``speed:"fast"`` through for EVERY claude family and forwards it upstream
+        (empirically verified on opus-4.x and sonnet-5 — returns clean, no 400). So
+        fast mode is unlocked for any ``claude-*`` on the Copilot endpoint. This is
+        deliberately family-agnostic: a hardcoded ``opus-4``/``sonnet-4``/``haiku-4``
+        allow-list silently dropped every new family (sonnet-5, future opus-5, …).
       * **Other third-party proxies**: conservatively keep the native rule (4.6-only),
         since an unknown proxy may reject the unknown param/beta header.
 
     The ``-fast`` suffix (the synthetic fast variant id) is normalized away before the
     base check by the time we reach here.
     """
-    m = (model or "").lower()
-    if m.endswith("-fast"):
-        m = m[:-5]
+    m = _strip_fast_suffix((model or "").lower())
     if _is_copilot_base_url(base_url):
-        return any(fam in m for fam in ("opus-4", "sonnet-4", "haiku-4"))
+        # Family-agnostic for current claude families; exclude only the
+        # genuinely-legacy claude-2.x / claude-3.x (no fast offering anywhere).
+        base = m.split("/")[-1]
+        if not base.startswith("claude-"):
+            return False
+        rest = base[len("claude-"):]
+        return rest[:1] not in ("2", "3")
     return any(v in m for v in _FAST_MODE_SUPPORTED_SUBSTRINGS)
 
 
@@ -2986,7 +3012,7 @@ def build_anthropic_kwargs(
                             pass  # tool_result uses ID, not name
 
     kwargs: Dict[str, Any] = {
-        "model": model,
+        "model": _strip_fast_suffix(model),
         "messages": anthropic_messages,
         "max_tokens": effective_max_tokens,
     }

@@ -5376,12 +5376,46 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             # logged at DEBUG by the advisory module.
             pass
 
+    def _copilot_display_context_override(self, ctx_len):
+        """For Copilot models, return the context number the Copilot CLI SHOWS
+        (total window / long_context tier sum) for banner/status display.
+
+        Display-only: mirrors the CLI picker's "Context" column so Hermes'
+        banner matches what the user sees in `copilot /model`. Token accounting
+        and compression keep using the enforced input budget
+        (``context_compressor.context_length``), which is unchanged. Returns
+        ``ctx_len`` untouched for non-Copilot providers or on any failure.
+        Per Armin (2026-08-04): the banner must mirror the CLI's number.
+        """
+        try:
+            provider = (getattr(self, "provider", "") or "").lower()
+            if provider not in {
+                "copilot", "copilot-acp", "github-copilot", "github", "github-models",
+            }:
+                return ctx_len
+            from hermes_cli.models import (
+                get_copilot_display_context,
+                _resolve_copilot_catalog_api_key,
+            )
+            key = _resolve_copilot_catalog_api_key() or getattr(self, "api_key", "")
+            disp = get_copilot_display_context(self.model, api_key=key)
+            if disp:
+                return int(disp)
+        except Exception:
+            pass
+        return ctx_len
+
     def show_banner(self):
         """Display the welcome banner in Claude Code style."""
         self.console.clear()
         ctx_len = None
         if hasattr(self, 'agent') and self.agent and hasattr(self.agent, 'context_compressor'):
             ctx_len = self.agent.context_compressor.context_length
+        # For Copilot models, mirror the number the Copilot CLI SHOWS in its
+        # /model picker (total window / long_context tier sum) rather than the
+        # enforced input budget the compressor accounts against. Display-only;
+        # accounting is unaffected. Per Armin (2026-08-04): match the CLI.
+        ctx_len = self._copilot_display_context_override(ctx_len)
         
         # Auto-compact for narrow terminals — the full banner with caduceus
         # + tool list needs ~80 columns minimum to render without wrapping.
@@ -7584,6 +7618,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     ctx_len = None
                     if hasattr(self, 'agent') and self.agent and hasattr(self.agent, 'context_compressor'):
                         ctx_len = self.agent.context_compressor.context_length
+                    ctx_len = self._copilot_display_context_override(ctx_len)
                     build_welcome_banner(
                         console=cc,
                         model=self.model,

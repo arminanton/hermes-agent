@@ -3752,6 +3752,13 @@ def resolve_provider_client(
         return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
                 else (client, final_model))
 
+    # ── gpt-native (ChatGPT Pro plugin) reuses the openai-codex OAuth credential
+    #    and Codex Responses transport. Delegate credential/client construction to
+    #    the openai-codex arm; gpt-native keeps its own ProviderProfile (model
+    #    catalog, aliases). See gpt-native/docs/PROVIDER-ARCHITECTURE-DECISION.md.
+    if provider in {"gpt-native", "chatgpt", "gpt"}:
+        return resolve_provider_client("openai-codex", model, async_mode)
+
     # ── OpenAI Codex (OAuth → Responses API) ─────────────────────────
     if provider == "openai-codex":
         if not model:

@@ -325,3 +325,66 @@ class TestEnvVarOrder:
         assert copilot.api_key_env_vars == (
             "COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"
         )
+
+
+class TestApiVersionExtraction:
+    """CAPI X-GitHub-Api-Version extraction from CLI bundles.
+
+    Regression coverage for the 2026-07-13 fix: as of Copilot CLI 1.0.71 the
+    api-version literal moved out of the JS bundle and into the Rust core binary
+    (prebuilds/*/runtime.node), sitting in the CAPI header cluster next to
+    Openai-Intent / Editor-Version with no JS assignment syntax. The old regex
+    only matched the JS-constant form and silently fell back to a stale version,
+    which served the old context tier (gpt-5.6 capped at the 922k default-tier
+    wall instead of the long_context tier).
+    """
+
+    def test_extracts_js_constant_form(self, tmp_path):
+        from hermes_cli.copilot_auth import _extract_api_version_from_bundle
+        js = tmp_path / "index.js"
+        js.write_text('a="X-GitHub-Api-Version",b="2026-06-01";other="2022-11-28"')
+        assert _extract_api_version_from_bundle(js) == "2026-06-01"
+
+    def test_extracts_binary_cluster_form(self, tmp_path):
+        from hermes_cli.copilot_auth import _extract_api_version_from_bundle
+        # Mimic the Rust binary's CAPI header cluster: date adjacent to
+        # Openai-Intent / Editor-Version with NO assignment syntax.
+        node = tmp_path / "runtime.node"
+        node.write_bytes(
+            b"...Openai-Intentconversation-agent2026-07-01Editor-VersionX-Copilot-Traceparent..."
+        )
+        assert _extract_api_version_from_bundle(node) == "2026-07-01"
+
+    def test_ignores_rest_api_version_and_unanchored_dates(self, tmp_path):
+        from hermes_cli.copilot_auth import _extract_api_version_from_bundle
+        # 2022-11-28 is the github.com REST/gist version (must be dropped); a
+        # far-off date with no CAPI-header anchor nearby must NOT be picked.
+        f = tmp_path / "app.js"
+        f.write_text(
+            'headers={"X-GitHub-Api-Version":"2022-11-28"};'
+            'someCertExpiry="2027-12-31";' + ("x" * 200) + "unrelated"
+        )
+        assert _extract_api_version_from_bundle(f) is None
+
+    def test_resolver_picks_newest_across_bundles(self, tmp_path, monkeypatch):
+        # Two bundles: an older JS one (2026-06-01) discovered first and a newer
+        # binary one (2026-07-01). The resolver must return the NEWEST, not the
+        # first hit.
+        import hermes_cli.copilot_auth as C
+        old = tmp_path / "old_index.js"
+        old.write_text('a="X-GitHub-Api-Version",b="2026-06-01"')
+        new = tmp_path / "new_runtime.node"
+        new.write_bytes(b"Openai-Intentconversation-agent2026-07-01Editor-Version")
+
+        monkeypatch.setattr(C, "_discover_copilot_cli_bundles", lambda: [old, new])
+        monkeypatch.setattr(C, "_copilot_api_version_memo", None)
+        monkeypatch.setenv("HERMES_COPILOT_API_VERSION", "")
+        # Point the on-disk cache at an empty temp path so it doesn't short-circuit.
+        monkeypatch.setattr(C, "_COPILOT_API_VERSION_CACHE_PATH", tmp_path / "nonexistent.json")
+        assert C._latest_copilot_api_version() == "2026-07-01"
+
+    def test_fallback_is_modern(self):
+        # The hard fallback must be at least the 2026-07-01 tier so a bundle-miss
+        # never regresses to the old default-tier api-version.
+        from hermes_cli.copilot_auth import _COPILOT_API_VERSION_FALLBACK
+        assert _COPILOT_API_VERSION_FALLBACK >= "2026-07-01"

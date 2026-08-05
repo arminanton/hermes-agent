@@ -438,10 +438,20 @@ _TOKEN_EXCHANGE_URL = "https://api.github.com/copilot_internal/v2/token"
 _VERSION_CACHE_TTL = 24 * 60 * 60  # 24h
 
 # X-GitHub-Api-Version sent on Copilot API calls. Sourced (in priority order)
-# from the locally-installed `@github/copilot` npm bundle, which bakes it in
-# as a constant and is updated whenever the user runs `npm i -g @github/copilot`.
-# Fallback is the value shipped by @github/copilot @ 1.0.57 (today's date).
-_COPILOT_API_VERSION_FALLBACK = "2026-06-01"
+# from the locally-installed `@github/copilot` bundle, which bakes it in as a
+# constant and is updated whenever the user updates the CLI.
+#
+# NOTE (2026-07-13): as of Copilot CLI 1.0.71 the CAPI api-version literal moved
+# OUT of the JS bundle (app.js / sdk/index.js now only carry "2022-11-28", the
+# github.com REST/gist API version) and INTO the Rust core binary
+# (prebuilds/<platform>/runtime.node, in capi_client.rs, adjacent to
+# Openai-Intent / Editor-Version). `_extract_api_version_from_bundle` therefore
+# also scans the .node binary. This api-version gates the model tier: 2026-06-01
+# serves the old default tier (gpt-5.6 prompt capped at 922k with a hard
+# model_max_prompt_tokens_exceeded wall), while 2026-07-01 unlocks the
+# long_context tier the CLI itself uses. Keep the fallback at the newest verified
+# value so a bundle-miss still reaches the modern tier.
+_COPILOT_API_VERSION_FALLBACK = "2026-07-01"
 _COPILOT_API_VERSION_CACHE_PATH = (
     Path.home() / ".cache" / "hermes" / "copilot_api_version.json"
 )
@@ -719,6 +729,7 @@ def _discover_copilot_cli_bundles() -> list[Path]:
     """
     seen: set[Path] = set()
     out: list[Path] = []
+    import re
 
     def _add(p: Path) -> None:
         try:
@@ -746,15 +757,57 @@ def _discover_copilot_cli_bundles() -> list[Path]:
     # User-local global install (npm prefix override).
     _add(Path.home() / ".npm-global" / "lib" / "node_modules" / "@github" / "copilot" / "sdk" / "index.js")
 
+    # Downloaded runtime bundles (the ACTUALLY-RUNNING version). The npm-loader
+    # (npm-loader.js) downloads and executes a native bundle under
+    # ~/.cache/copilot/pkg/<platform>/<version>/, which is frequently NEWER than
+    # the @github/copilot version recorded in node_modules. As of 1.0.71 the
+    # CAPI api-version literal only lives in this bundle's Rust core binary
+    # (prebuilds/<platform>/runtime.node), so we must scan it. Add newest
+    # version first (semver-ish sort, so the freshest bundle wins).
+    pkg_root = Path.home() / ".cache" / "copilot" / "pkg"
+    if pkg_root.is_dir():
+        try:
+            def _ver_key(p: Path) -> tuple:
+                parts = re.split(r"[.-]", p.name)
+                return tuple(int(x) if x.isdigit() else -1 for x in parts)
+            plat_dirs = [d for d in pkg_root.iterdir() if d.is_dir()]
+            for plat in plat_dirs:
+                ver_dirs = sorted(
+                    (d for d in plat.iterdir() if d.is_dir()),
+                    key=_ver_key,
+                    reverse=True,
+                )
+                for vdir in ver_dirs:
+                    # app.js (JS bundle) + the Rust core binary that now carries
+                    # the CAPI api-version. Both are scanned by the extractor.
+                    _add(vdir / "app.js")
+                    prebuilds = vdir / "prebuilds"
+                    if prebuilds.is_dir():
+                        for node_bin in prebuilds.rglob("*.node"):
+                            _add(node_bin)
+        except Exception as exc:
+            logger.debug("copilot pkg-cache scan failed: %s", exc)
+
     return out
 
 
 def _extract_api_version_from_bundle(bundle: Path) -> str | None:
-    """Grep the Copilot CLI bundle for the X-GitHub-Api-Version constant.
+    """Extract the CAPI ``X-GitHub-Api-Version`` value from a Copilot CLI bundle.
 
-    The bundle defines it as e.g. ``Mss="X-GitHub-Api-Version",Oss="2026-06-01"``.
-    We extract every adjacent date literal, drop the github.com REST date
-    ``2022-11-28`` (used only for gist/asset uploads), and return the newest.
+    Two bundle shapes are handled:
+
+    * **JS bundle** (older CLIs, ``sdk/index.js`` / ``app.js``): defines it as a
+      minified constant, e.g. ``Mss="X-GitHub-Api-Version",Oss="2026-06-01"``.
+    * **Rust core binary** (CLI >= ~1.0.71, ``prebuilds/*/*.node``): the literal
+      moved into ``capi_client.rs`` and sits in the CAPI header cluster next to
+      ``Openai-Intent`` / ``Editor-Version`` with no JS assignment syntax.
+
+    Strategy: read the file as bytes-tolerant text, then look for a
+    ``YYYY-MM-DD`` date that co-occurs with a CAPI-header anchor token. We drop
+    the github.com REST date ``2022-11-28`` (gist/asset uploads only) and only
+    accept dates anchored near CAPI header names so we never pick an unrelated
+    date literal (cert expiry, feature-flag date, etc.). Returns the newest
+    qualifying date, or ``None``.
     """
     import re
     try:
@@ -762,13 +815,33 @@ def _extract_api_version_from_bundle(bundle: Path) -> str | None:
     except Exception as exc:
         logger.debug("copilot CLI bundle read failed (%s): %s", bundle, exc)
         return None
-    matches = re.findall(
+
+    candidates: set[str] = set()
+
+    # Shape 1: explicit JS constant assignment adjacent to the header name.
+    for m in re.findall(
         r'"X-GitHub-Api-Version"\s*,\s*[A-Za-z0-9_$]+\s*=\s*"(\d{4}-\d{2}-\d{2})"',
         text,
-    )
-    # Filter out the github.com REST API version (different surface).
-    candidates = sorted({m for m in matches if m != "2022-11-28"}, reverse=True)
-    return candidates[0] if candidates else None
+    ):
+        candidates.add(m)
+
+    # Shape 2: date literal anchored within a short window of a CAPI header
+    # cluster token. In the Rust binary the api-version sits immediately next to
+    # these strings (e.g. "...Openai-Intentconversation-agent2026-07-01Editor-Version...").
+    # Requiring an anchor within ~40 chars avoids grabbing unrelated dates.
+    _ANCHORS = ("Openai-Intent", "Editor-Version", "X-GitHub-Api-Version",
+                "Copilot-Integration-Id", "X-Copilot-Traceparent", "X-Interaction-Type")
+    for anchor in _ANCHORS:
+        for am in re.finditer(re.escape(anchor), text):
+            window = text[max(0, am.start() - 40): am.end() + 40]
+            for dm in re.findall(r"(\d{4}-\d{2}-\d{2})", window):
+                candidates.add(dm)
+
+    # Filter out the github.com REST API version (different surface) and any
+    # implausible dates (must be a Copilot CAPI date, 2025+; guards against cert
+    # or build dates that happen to match the shape).
+    good = {c for c in candidates if c != "2022-11-28" and c >= "2025-01-01"}
+    return max(good) if good else None
 
 
 def _latest_copilot_api_version() -> str:
@@ -806,16 +879,22 @@ def _latest_copilot_api_version() -> str:
     except Exception as exc:
         logger.debug("copilot api-version cache read failed: %s", exc)
 
-    ver = _COPILOT_API_VERSION_FALLBACK
+    # Scan every discovered bundle and take the NEWEST api-version found. We do
+    # NOT stop at the first hit: a stale npm install (e.g. an old
+    # node_modules/@github/copilot/sdk/index.js) is often discovered before the
+    # freshly-downloaded ~/.cache/copilot/pkg bundle, and the older one still
+    # carries the previous api-version literal. Comparing lexically works for the
+    # YYYY-MM-DD shape. The fallback participates so we never regress below it.
+    found: list[str] = [_COPILOT_API_VERSION_FALLBACK]
     for bundle in _discover_copilot_cli_bundles():
         extracted = _extract_api_version_from_bundle(bundle)
         if extracted:
-            ver = extracted
-            logger.debug("copilot api-version %s from %s", ver, bundle)
-            break
-    else:
+            found.append(extracted)
+            logger.debug("copilot api-version %s from %s", extracted, bundle)
+    ver = max(found)
+    if ver == _COPILOT_API_VERSION_FALLBACK and len(found) == 1:
         logger.debug(
-            "no @github/copilot bundle found, using fallback api-version %s",
+            "no @github/copilot bundle api-version found, using fallback %s",
             _COPILOT_API_VERSION_FALLBACK,
         )
 
