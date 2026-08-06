@@ -185,6 +185,28 @@ def _compose_directive(arbiter: dict[str, Any], deliberations: list[dict[str, An
     return " ".join(bits)
 
 
+def _gate_panel() -> str:
+    """The Council panel/preset the autopilot completion gate should use.
+
+    Historically the gate hardcoded ``mode="fast"``, which selects the
+    manufactured-disagreement ``fast`` panel: a single adversarial critic tuned
+    to MANUFACTURE an objection every round. On a completion claim that is
+    already substantively done, that panel never converges — it invents a fresh,
+    ever-smaller PRESENTATION ask each tick (`conditional 0.55–0.62` forever),
+    so the run only ends via the refinement-churn safety valve after burning
+    several dead rounds. (Observed live on the NuData run, 2026-08-05.)
+
+    The operator can point the gate at a convergent, audited panel instead
+    (e.g. ``ship_gate_audited`` = Security + Compliance + Pre-mortem + Oracle +
+    Evidence-Auditor + Sycophancy-Auditor), which weighs the deterministic
+    receipts rather than reflexively objecting. Read from
+    ``COUNCIL_GATE_PANEL`` (already set in the shipped config's council MCP env);
+    empty falls back to the legacy fast-mode behaviour so nothing changes for
+    operators who haven't opted in.
+    """
+    return os.environ.get("COUNCIL_GATE_PANEL", "").strip()
+
+
 def _council_run(question: str, *, mode: str, max_tokens: int,
                  evidence_receipts: Optional[list] = None) -> dict[str, Any]:
     """Seam: run the real Council (kept separate so tests can stub it).
@@ -193,17 +215,36 @@ def _council_run(question: str, *, mode: str, max_tokens: int,
     receipts), they are passed to the engine as first-class evidence so the
     deliberators reason against the engine's actual re-run, not the agent's prose.
     Falls back gracefully if the installed engine predates the receipts parameter.
+
+    When ``COUNCIL_GATE_PANEL`` is set it is passed as the explicit ``panel`` so
+    the completion gate uses a convergent audited panel instead of the
+    never-settling ``fast`` critic (see :func:`_gate_panel`). An engine too old
+    to accept ``panel`` degrades cleanly back to ``mode``.
     """
     from council.deliberation import run_council
 
     kwargs: dict[str, Any] = dict(mode=mode, evidence_search=False, max_tokens=max_tokens)
-    if evidence_receipts:
+    panel = _gate_panel()
+    if panel:
+        kwargs["panel"] = panel
+
+    def _invoke(**extra: Any) -> dict[str, Any]:
+        call_kwargs = dict(kwargs, **extra)
         try:
-            return run_council(question, evidence_receipts=evidence_receipts, **kwargs)
+            return run_council(question, **call_kwargs)
         except TypeError:
-            # older engine without the evidence_receipts kwarg — degrade cleanly
-            logger.debug("autopilot: council engine has no evidence_receipts param; omitting")
-    return run_council(question, **kwargs)
+            # An older engine may lack `panel` and/or `evidence_receipts`. Retry
+            # without the optional kwargs rather than failing the whole gate
+            # (which would force the receipts-only fallback every tick).
+            call_kwargs.pop("panel", None)
+            call_kwargs.pop("evidence_receipts", None)
+            if "panel" in kwargs:
+                logger.debug("autopilot: council engine rejected optional kwargs; degrading")
+            return run_council(question, **call_kwargs)
+
+    if evidence_receipts:
+        return _invoke(evidence_receipts=evidence_receipts)
+    return _invoke()
 
 
 def judge_completion(

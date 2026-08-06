@@ -10279,13 +10279,12 @@ def _kick_autopilot_turn(sid: str, session: dict) -> bool:
         # nudge that has no prior work to build on.
         kick = goal
     else:
-        target = f" toward this goal: {goal}" if goal else ""
-        kick = (
-            f"[Autopilot] Resume and keep working{target} until it is verifiably "
-            "complete. Take the next concrete action now. Do not stop, "
-            "summarize-and-wait, or ask the user; make the most defensible decision "
-            "from context and act on it."
-        )
+        # Seed the resume with THIS session's verbatim tail so autopilot
+        # continues the actual work-in-flight instead of inferring the project
+        # from the goal wording alone (the cross-project derailment fix — see
+        # agent/autopilot/resume.py). Parity with the CLI resume path.
+        from agent.autopilot.resume import build_resume_kick
+        kick = build_resume_kick(goal, history)
     rid = f"__autopilot__{int(time.time() * 1000)}"
     try:
         _emit("message.start", sid)

@@ -8532,13 +8532,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     "  ↳ Send a task and I'll keep working until it's verifiably done."
                 )
                 return
-            target = f" toward this goal: {goal}" if goal else ""
-            kick = (
-                f"[Autopilot] Resume and keep working{target} until it is verifiably "
-                "complete. Take the next concrete action now; do not stop, "
-                "summarize-and-wait, or ask the user; make the most defensible "
-                "decision from context and act on it."
-            )
+            # Seed the resume with THIS session's verbatim tail so autopilot
+            # continues the actual work-in-flight instead of inferring the
+            # project from the goal wording (which caused a cross-project
+            # derailment — see agent/autopilot/resume.py).
+            from agent.autopilot.resume import build_resume_kick
+            kick = build_resume_kick(goal, self.conversation_history or [])
             self._pending_input.put(kick)
             _cprint("  ↻ Autopilot: resuming work…")
         except Exception as exc:  # noqa: BLE001 never break the toggle
