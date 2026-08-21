@@ -719,9 +719,13 @@ class TestCodexTransportXaiServiceTierStrip:
             "non-xAI codex_responses providers must keep service_tier"
         )
 
-    def test_github_responses_preserves_service_tier(self, transport):
-        """GitHub Models (Copilot) is another codex_responses surface
-        that should not be affected by the xAI strip."""
+    def test_github_responses_strips_service_tier(self, transport):
+        """GitHub Copilot's Responses surface REJECTS service_tier with
+        HTTP 400 "service_tier is not supported" (live-verified against
+        gpt-5.6-luna), exactly like xAI.  It must be stripped defensively,
+        since agent.service_tier in config.yaml or a lingering /fast mode
+        leaks the field onto every gpt-5.x-on-Copilot request.  Only
+        OpenAI's own Responses endpoint (is_codex_backend) accepts it."""
         kw = transport.build_kwargs(
             model="gpt-5.5",
             messages=[{"role": "user", "content": "hi"}],
@@ -729,7 +733,80 @@ class TestCodexTransportXaiServiceTierStrip:
             is_github_responses=True,
             request_overrides={"service_tier": "priority"},
         )
-        assert kw.get("service_tier") == "priority"
+        assert "service_tier" not in kw, (
+            f"service_tier must be stripped on GitHub Copilot Responses "
+            f"requests, got {kw.get('service_tier')!r}"
+        )
+
+
+class TestCopilotResponsesTemperatureStrip:
+    """GitHub Copilot's GPT-5.x Responses models reject ``temperature`` at any
+    value except omitted (HTTP 400 "Unsupported parameter: 'temperature' is not
+    supported with this model."), live-verified 2026-08-20 on
+    api.githubcopilot.com for gpt-5.6-luna and gpt-5.5 (both 400 on 0.3 and 0.0,
+    200 only when absent/==1).  It leaks in from callers that hardcode a
+    temperature (title generation sends 0.3, issue #72351).  grok-4.6/mai-code
+    on the same surface DO accept it (verified 200 at 0.3), and native Codex /
+    other backends accept it, so the strip is scoped to gpt-5.x-on-Copilot.
+    """
+
+    @pytest.fixture
+    def transport(self):
+        from agent.transports.codex import ResponsesApiTransport
+        return ResponsesApiTransport()
+
+    def test_github_responses_strips_temperature_for_gpt5(self, transport):
+        kw = transport.build_kwargs(
+            model="gpt-5.6-luna",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            is_github_responses=True,
+            request_overrides={"temperature": 0.3},
+        )
+        assert "temperature" not in kw, (
+            f"temperature must be stripped for gpt-5.x on Copilot Responses, "
+            f"got {kw.get('temperature')!r}"
+        )
+
+    def test_github_responses_strips_temperature_zero_for_gpt55(self, transport):
+        # 0.0 is falsy — make sure the strip doesn't rely on truthiness.
+        kw = transport.build_kwargs(
+            model="gpt-5.5",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            is_github_responses=True,
+            request_overrides={"temperature": 0.0},
+        )
+        assert "temperature" not in kw
+
+    def test_github_responses_keeps_temperature_for_grok(self, transport):
+        # grok-4.6 on Copilot Responses accepts temperature (verified 200 @ 0.3);
+        # stripping it would needlessly drop a user's sampling choice.
+        kw = transport.build_kwargs(
+            model="grok-4.6",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            is_github_responses=True,
+            request_overrides={"temperature": 0.3},
+        )
+        assert kw.get("temperature") == 0.3, (
+            "grok on Copilot Responses accepts temperature — must not be stripped"
+        )
+
+    def test_native_codex_keeps_temperature_for_gpt5(self, transport):
+        # The strip is Copilot-only. Native Codex (chatgpt.com backend) and
+        # other GPT-5.x deployments accept temperature; don't strip there.
+        kw = transport.build_kwargs(
+            model="gpt-5.5",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            is_github_responses=False,
+            is_codex_backend=True,
+            request_overrides={"temperature": 0.3},
+        )
+        assert kw.get("temperature") == 0.3, (
+            "non-Copilot GPT-5.x must keep temperature"
+        )
 
 
 class TestPreflightSlashEnumStrip:

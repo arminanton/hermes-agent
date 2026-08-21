@@ -264,16 +264,34 @@ class ResponsesApiTransport(ProviderTransport):
         if request_overrides:
             kwargs.update(request_overrides)
 
-        # xAI Responses API rejects ``service_tier`` (HTTP 400 "Argument not
-        # supported: service_tier") — hit when ``/fast`` priority-processing
-        # mode lingers from a prior model in the same session, or when a
-        # user explicitly sets ``agent.service_tier`` in config.yaml.  The
-        # main-loop guard (``resolve_fast_mode_overrides`` only returns
-        # ``service_tier`` for OpenAI fast-eligible models) doesn't cover
-        # those leak paths, so strip defensively when targeting xAI.  See
-        # #28490 for the original report.
-        if is_xai_responses:
+        # xAI and GitHub Copilot Responses APIs reject ``service_tier`` (HTTP
+        # 400 "service_tier is not supported" / "Argument not supported:
+        # service_tier") — hit when ``/fast`` priority-processing mode lingers
+        # from a prior model in the same session, or when a user explicitly
+        # sets ``agent.service_tier`` in config.yaml.  The main-loop guard
+        # (``resolve_fast_mode_overrides`` only returns ``service_tier`` for
+        # OpenAI fast-eligible models) doesn't cover those leak paths, so strip
+        # defensively when targeting a backend that rejects the field.  Only
+        # OpenAI's own Responses endpoint accepts ``service_tier``.  See #28490
+        # (xAI) and the gpt-5.6-luna Copilot 400 for the reports.
+        if is_xai_responses or is_github_responses:
             kwargs.pop("service_tier", None)
+
+        # GitHub Copilot's GPT-5.x Responses models reject ``temperature`` at
+        # ANY value except omitted (HTTP 400 "Unsupported parameter:
+        # 'temperature' is not supported with this model.").  Live-verified
+        # 2026-08-20 on api.githubcopilot.com: gpt-5.6-luna and gpt-5.5 both 400
+        # on temperature=0.3 AND temperature=0.0, 200 only when the field is
+        # absent or ==1.  This leaks in from auxiliary callers that hardcode a
+        # temperature — e.g. title generation sends temperature=0.3 (issue
+        # #72351), structured-JSON extraction sends 0 — silently killing those
+        # turns whenever the aux/main model is a GPT-5.x on Copilot.  grok-4.6 /
+        # mai-code on the same Copilot Responses surface DO accept temperature
+        # (verified 200 at 0.3), so scope the strip to the GPT-5.x family only.
+        if is_github_responses and (
+            _model_lower.startswith("gpt-5") or "/gpt-5" in _model_lower
+        ):
+            kwargs.pop("temperature", None)
 
         # Forward per-request timeout to the SDK so OpenAI/Anthropic clients
         # honor it.  Without this, ``providers.<id>.request_timeout_seconds``
