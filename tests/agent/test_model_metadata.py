@@ -1475,6 +1475,53 @@ class TestContextLengthCache:
             save_context_length(model, url, 200000)
             assert get_cached_context_length(model, url) == 200000
 
+    def test_save_is_atomic_no_tmp_leftovers(self, tmp_path):
+        """save_context_length + invalidate use atomic write-temp+replace, so no
+        partial/torn cache and no leftover .tmp files (upstream 6def7ce1df).
+        A concurrent reader/crash must never see an empty or half-written file.
+        """
+        from agent.model_metadata import invalidate_cached_context_length
+        cache_file = tmp_path / "cache.yaml"
+        with patch("agent.model_metadata._get_context_cache_path", return_value=cache_file):
+            save_context_length("model-a", "http://a", 64000)
+            save_context_length("model-b", "http://b", 128000)
+            invalidate_cached_context_length("model-a", "http://a")
+            # The cache is complete and valid (not torn) after the churn.
+            assert get_cached_context_length("model-b", "http://b") == 128000
+            assert get_cached_context_length("model-a", "http://a") is None
+        # No temp files left behind in the cache directory.
+        leftovers = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+        assert leftovers == [], f"atomic write left temp files: {leftovers}"
+
+    def test_atomic_write_preserves_old_file_on_dump_failure(self, tmp_path, monkeypatch):
+        """If serialization fails mid-write, the previously-persisted cache must
+        survive intact (the whole point of write-temp+replace over truncate)."""
+        import agent.model_metadata as mm
+        cache_file = tmp_path / "cache.yaml"
+        with patch("agent.model_metadata._get_context_cache_path", return_value=cache_file):
+            save_context_length("keep", "http://x", 111000)
+            # Force the atomic writer to blow up on the NEXT save.
+            monkeypatch.setattr(
+                mm, "_atomic_write_text",
+                lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+            )
+            # save swallows the error (best-effort), old file stays valid.
+            save_context_length("new", "http://y", 222000)
+            assert get_cached_context_length("keep", "http://x") == 111000
+
+    def test_refuses_to_cache_nonpositive_length(self, tmp_path):
+        """A 0/negative context length is a failed-probe artifact — it must NOT
+        be persisted, or it poisons every future lookup (upstream 2fb28ad3d4)."""
+        cache_file = tmp_path / "cache.yaml"
+        with patch("agent.model_metadata._get_context_cache_path", return_value=cache_file):
+            save_context_length("bad", "http://x", 0)
+            assert get_cached_context_length("bad", "http://x") is None
+            save_context_length("bad2", "http://x", -5)
+            assert get_cached_context_length("bad2", "http://x") is None
+            # A valid length after the rejected ones still persists fine.
+            save_context_length("good", "http://x", 128000)
+            assert get_cached_context_length("good", "http://x") == 128000
+
 
 class TestGrok43StaleCacheGuard:
     """Pre-catalog builds resolved grok-4.3 via the generic 'grok-4' catch-all

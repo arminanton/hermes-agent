@@ -973,12 +973,60 @@ def _load_context_cache() -> Dict[str, int]:
         return {}
 
 
+def _atomic_write_text(path: "Path", text: str) -> None:
+    """Write ``text`` to ``path`` atomically (write-temp + ``os.replace``).
+
+    A plain ``open(path, "w")`` truncates the target BEFORE the new content is
+    written, so a crash/kill mid-write, or a concurrent reader between truncate
+    and flush, sees an empty or torn file. Hermes routinely runs several
+    processes against one shared ``$HERMES_HOME`` (a cron agent + an interactive
+    session + gateway sessions), and ``_load_context_cache`` swallows a YAML
+    error as ``{}`` — so a torn cache silently wipes every persisted context
+    length, and every model then re-probes and can fall back to the generic
+    256K default (a 1M-window model ends up wrongly short). Writing to a
+    temp file in the same directory and ``os.replace``-ing it in is atomic on
+    POSIX, so readers always see either the old or the new complete file.
+    Ported from upstream ``6def7ce1df``.
+    """
+    import os as _os
+    import tempfile as _tempfile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = _tempfile.mkstemp(
+        dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
+    )
+    try:
+        with _os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            _os.fsync(f.fileno())
+        _os.replace(tmp, path)
+    except Exception:
+        try:
+            _os.unlink(tmp)
+        except Exception:
+            pass
+        raise
+
+
 def save_context_length(model: str, base_url: str, length: int) -> None:
     """Persist a discovered context length for a model+provider combo.
 
     Cache key is ``model@base_url`` so the same model name served from
     different providers can have different limits.
     """
+    # Never persist a non-positive context length: a 0/negative value is a
+    # failed-probe or parse artifact, and once cached it short-circuits every
+    # future lookup to a wrong, tiny window (a 1M-window model silently caps at
+    # 0/256K).  Refusing to store it forces a clean re-resolve next time.
+    # (upstream 2fb28ad3d4 / #25812 zero-guard.)
+    try:
+        if int(length) <= 0:
+            logger.debug("Refusing to cache non-positive context length %s@%s = %s",
+                         model, base_url, length)
+            return
+    except (TypeError, ValueError):
+        return
     # Never persist a sub-1M context length for Copilot Claude-Opus: Copilot /v1/messages
     # serves Opus at 1M; a sub-1M value is the /chat/completions misroute artifact (168k)
     # that poisons every future session via the step-1 cache read. (root-caused 2026-06-16)
@@ -997,9 +1045,9 @@ def save_context_length(model: str, base_url: str, length: int) -> None:
     cache[key] = length
     path = _get_context_cache_path()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            yaml.dump({"context_lengths": cache}, f, default_flow_style=False)
+        _atomic_write_text(
+            path, yaml.dump({"context_lengths": cache}, default_flow_style=False)
+        )
         logger.info("Cached context length %s -> %s tokens", key, f"{length:,}")
     except Exception as e:
         logger.debug("Failed to save context length cache: %s", e)
@@ -1024,7 +1072,10 @@ def invalidate_cached_context_length(model: str, base_url: str) -> None:
         if key in cache_dict:
             del cache_dict[key]
             data["context_lengths"] = cache_dict
-            cache_path.write_text(_yaml_invalidate.safe_dump(data, default_flow_style=False))
+            _atomic_write_text(
+                cache_path,
+                _yaml_invalidate.safe_dump(data, default_flow_style=False),
+            )
     except Exception:
         pass
 
@@ -1045,9 +1096,9 @@ def _invalidate_cached_context_length(model: str, base_url: str) -> None:
     del cache[key]
     path = _get_context_cache_path()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            yaml.dump({"context_lengths": cache}, f, default_flow_style=False)
+        _atomic_write_text(
+            path, yaml.dump({"context_lengths": cache}, default_flow_style=False)
+        )
     except Exception as e:
         logger.debug("Failed to invalidate context length cache entry %s: %s", key, e)
 
