@@ -2554,7 +2554,41 @@ DEFAULT_CONFIG = {
         "providers": {},
     },
 
-    # Network settings — workarounds for connectivity issues.
+    # Per-model metadata overrides — manually declare context_window,
+    # max_output_tokens, or capabilities for any provider+model. Overrides
+    # win over models.dev, probe-verified overrides, and hardcoded defaults.
+    #
+    # Canonical fields (any subset): context_window, max_output_tokens,
+    # supports_tools, supports_vision, supports_reasoning, model_family.
+    #
+    # Scopes:
+    #   1. Explicit per-provider+model: model_overrides.<provider>.<model_id>
+    #      — always wins over the catalog for the fields it sets.
+    #   2. Per-provider fill-gap default: model_overrides.<provider>._default
+    #   3. Global fill-gap default:       model_overrides._default
+    #      — (2) and (3) apply ONLY to models the catalog does not know (the
+    #      self-unblock path for custom/local/new models); they never displace
+    #      catalog data for known models, so a _default cannot clamp every
+    #      model of a provider.
+    #
+    # Provider keys accept the Hermes id or the models.dev id (copilot /
+    # github-copilot both work). Model ids match case-insensitively.
+    #
+    # Example:
+    #   model_overrides:
+    #     upstage:
+    #       solar-pro4:
+    #         context_window: 524288
+    #     custom:my-local-vllm:
+    #       my-llava-model:
+    #         context_window: 8192
+    #         supports_vision: true
+    #         supports_reasoning: false
+    #     _default:
+    #       context_window: 128000
+    "model_overrides": {},
+
+    # Network settings, workarounds for connectivity issues.
     "network": {
         # Force IPv4 connections.  On servers with broken or unreachable IPv6,
         # Python tries AAAA records first and hangs for the full TCP timeout

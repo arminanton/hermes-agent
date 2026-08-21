@@ -323,19 +323,29 @@ def lookup_models_dev_context(provider: str, model: str) -> Optional[int]:
 
     Returns the context window in tokens, or None if not found.
     Handles case-insensitive matching and filters out context=0 entries.
+
+    An EXPLICIT ``model_overrides`` config entry for this provider+model wins
+    over the catalog value; ``_default`` entries fill the gap only when the
+    catalog has no answer — the supported self-unblock path for models with
+    wrong or missing context in models.dev (#84482).
     """
+    # Explicit config override, checked before catalog so it always wins.
+    override_ctx = _override_context_window(provider, model)
+    if override_ctx is not None:
+        return override_ctx
+
     mdev_provider_id = PROVIDER_TO_MODELS_DEV.get(provider)
     if not mdev_provider_id:
-        return None
+        return _default_override_context(provider)
 
     data = fetch_models_dev()
     provider_data = data.get(mdev_provider_id)
     if not isinstance(provider_data, dict):
-        return None
+        return _default_override_context(provider)
 
     models = provider_data.get("models", {})
     if not isinstance(models, dict):
-        return None
+        return _default_override_context(provider)
 
     # Exact match
     entry = models.get(model)
@@ -374,7 +384,8 @@ def lookup_models_dev_context(provider: str, model: str) -> Optional[int]:
                 if ctx:
                     return ctx
 
-    return None
+    # Catalog miss — a _default override may fill the gap (#84482).
+    return _default_override_context(provider)
 
 
 def _extract_context(entry: Dict[str, Any]) -> Optional[int]:
@@ -408,6 +419,266 @@ class ModelCapabilities:
     context_window: int = 200000
     max_output_tokens: int = 8192
     model_family: str = ""
+
+
+# --------------------------------------------------------------------------- #
+# Per-model metadata overrides (config.yaml → model_overrides)                 #
+# --------------------------------------------------------------------------- #
+#
+# Canonical override schema (the ONLY key space consumers accept):
+#   context_window, max_output_tokens, supports_tools, supports_vision,
+#   supports_reasoning, model_family
+#
+# Resolution semantics:
+#   1. ``model_overrides.<provider>.<model_id>`` — explicit override. Always
+#      wins over the catalog (and over our probe-verified overrides) for the
+#      fields it sets (partial patch). This is the user's manual declaration,
+#      so it is the highest authority in the metadata stack.
+#   2. ``model_overrides.<provider>._default`` / ``model_overrides._default``
+#      — FILL-GAP defaults. They apply ONLY to models the catalog does not
+#      know (the #8731/#84482 self-unblock path for custom/local/new models)
+#      and never displace catalog data for known models. A
+#      ``_default: {context_window: 128000}`` therefore cannot clamp every
+#      catalog-known model of a provider.
+#
+# Provider keys accept the Hermes provider id (as used elsewhere in
+# config.yaml) or the models.dev provider id (``copilot`` and
+# ``github-copilot`` both work). Model ids match exactly, then
+# case-insensitively (mirroring catalog lookup).
+#
+# Ported from upstream dafdba324a + de47d19f1f, adapted to compose with our
+# existing ``_resolve_probe_override`` layer in ``get_model_info`` (user
+# config wins over probe-verified overrides).
+
+_OVERRIDE_CACHE: Optional[Dict[str, Any]] = None
+_OVERRIDE_CACHE_CFG_ID: int = 0
+_OVERRIDE_WARNED_KEYS: set = set()
+
+#: The recognized canonical override fields (for validation / docs).
+_OVERRIDE_FIELDS = frozenset({
+    "context_window", "max_output_tokens", "supports_tools",
+    "supports_vision", "supports_reasoning", "model_family",
+})
+
+
+def _load_model_overrides() -> Dict[str, Any]:
+    """Load and cache the ``model_overrides`` config section.
+
+    Caches by ``id(cfg)`` so a config reload (new dict identity) invalidates
+    automatically. Returns empty dict on any failure.
+    """
+    global _OVERRIDE_CACHE, _OVERRIDE_CACHE_CFG_ID
+    try:
+        from hermes_cli.config import cfg_get, load_config_readonly
+        cfg = load_config_readonly()
+        cfg_id = id(cfg)
+        if cfg_id == _OVERRIDE_CACHE_CFG_ID and _OVERRIDE_CACHE is not None:
+            return _OVERRIDE_CACHE
+        raw = cfg_get(cfg, "model_overrides", default={})
+        overrides = raw if isinstance(raw, dict) else {}
+        _OVERRIDE_CACHE = overrides
+        _OVERRIDE_CACHE_CFG_ID = cfg_id
+        return overrides
+    except Exception:
+        return {}
+
+
+def _provider_override_section(provider: str) -> Optional[Dict[str, Any]]:
+    """Return the override section for *provider*, or None.
+
+    Accepts either the Hermes provider id or the models.dev provider id as the
+    config key, so ``copilot`` and ``github-copilot`` both work regardless of
+    which id space a caller passes in.
+    """
+    overrides = _load_model_overrides()
+    if not overrides:
+        return None
+    provider_key = (provider or "").strip()
+    if not provider_key:
+        return None
+
+    candidates = [provider_key]
+    mapped = PROVIDER_TO_MODELS_DEV.get(provider_key)
+    if mapped and mapped != provider_key:
+        candidates.append(mapped)
+    # Reverse: caller passed a models.dev id, config keyed by Hermes id.
+    for hermes_id, mdev_id in PROVIDER_TO_MODELS_DEV.items():
+        if mdev_id == provider_key and hermes_id != provider_key:
+            candidates.append(hermes_id)
+
+    for key in candidates:
+        section = overrides.get(key)
+        if isinstance(section, dict):
+            return section
+    return None
+
+
+def _explicit_model_override(provider: str, model: str) -> Optional[Dict[str, Any]]:
+    """Return the explicit per-provider+model override dict, or None.
+
+    Model ids match exactly first, then case-insensitively (skipping the
+    ``_default`` sentinel), mirroring catalog lookup behavior.
+    """
+    model_key = (model or "").strip()
+    if not model_key:
+        return None
+    section = _provider_override_section(provider)
+    if section is None:
+        return None
+
+    entry = section.get(model_key)
+    if isinstance(entry, dict):
+        return entry
+
+    model_lower = model_key.lower()
+    for mid, mdata in section.items():
+        if mid == "_default":
+            continue
+        if mid.lower() == model_lower and isinstance(mdata, dict):
+            return mdata
+    return None
+
+
+def _default_model_override(provider: str) -> Optional[Dict[str, Any]]:
+    """Return the fill-gap ``_default`` override for *provider*, or None.
+
+    Checks the per-provider ``_default`` first, then the global one. Only
+    consulted for models the catalog does not know (see the block comment).
+    """
+    section = _provider_override_section(provider)
+    if section is not None:
+        default = section.get("_default")
+        if isinstance(default, dict):
+            return default
+    overrides = _load_model_overrides()
+    global_default = overrides.get("_default")
+    if isinstance(global_default, dict):
+        return global_default
+    return None
+
+
+def _override_for(
+    provider: str, model: str, *, catalog_hit: bool
+) -> Optional[Dict[str, Any]]:
+    """Select the override dict for a lookup, honoring fill-gap semantics.
+
+    Explicit per-provider+model overrides always apply. ``_default`` entries
+    apply only when the catalog has no entry for the model.
+    """
+    explicit = _explicit_model_override(provider, model)
+    if explicit is not None:
+        return explicit
+    if catalog_hit:
+        return None
+    return _default_model_override(provider)
+
+
+def _override_int(override: Dict[str, Any], key: str) -> Optional[int]:
+    """Coerce an override field to a positive int, warning once on garbage."""
+    raw = override.get(key)
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+        if value > 0:
+            return value
+    except (TypeError, ValueError):
+        pass
+    warn_key = (key, repr(raw))
+    if warn_key not in _OVERRIDE_WARNED_KEYS:
+        _OVERRIDE_WARNED_KEYS.add(warn_key)
+        logger.warning(
+            "model_overrides: ignoring invalid %s value %r "
+            "(expected a positive integer)", key, raw,
+        )
+    return None
+
+
+def _override_context_window(provider: str, model: str) -> Optional[int]:
+    """Return the EXPLICITLY overridden context_window, or None.
+
+    Explicit-only on purpose: this runs early in the resolution chain
+    (agent/model_metadata.py step 0b, before custom_providers and live
+    probes), where a ``_default`` must not preempt more specific sources.
+    Fill-gap defaults are applied later by ``lookup_models_dev_context`` once
+    the catalog has actually missed.
+    """
+    ov = _explicit_model_override(provider, model)
+    if ov is None:
+        return None
+    return _override_int(ov, "context_window")
+
+
+def _default_override_context(provider: str) -> Optional[int]:
+    """Fill-gap context from a ``_default`` override, for catalog misses."""
+    default = _default_model_override(provider)
+    if default is None:
+        return None
+    return _override_int(default, "context_window")
+
+
+def _override_to_catalog_shape(override: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate canonical override keys into a models.dev-shaped patch.
+
+    ``get_model_info``/``_parse_model_info`` consume the raw catalog shape
+    (``limit.context``, ``tool_call``, ...). All override consumers accept ONE
+    canonical schema (the documented ``context_window``/``supports_*`` keys),
+    so this boundary translates rather than forcing users to know the internal
+    catalog shape.
+    """
+    patch: Dict[str, Any] = {}
+    limit: Dict[str, Any] = {}
+    ctx = _override_int(override, "context_window")
+    if ctx is not None:
+        limit["context"] = ctx
+    out = _override_int(override, "max_output_tokens")
+    if out is not None:
+        limit["output"] = out
+    if limit:
+        patch["limit"] = limit
+    if "supports_tools" in override:
+        patch["tool_call"] = bool(override["supports_tools"])
+    if "supports_reasoning" in override:
+        patch["reasoning"] = bool(override["supports_reasoning"])
+    if "supports_vision" in override:
+        patch["attachment"] = bool(override["supports_vision"])
+        patch["_vision_override"] = bool(override["supports_vision"])
+    if "model_family" in override:
+        patch["family"] = str(override["model_family"] or "")
+    return patch
+
+
+def _merge_catalog_entry_with_override(
+    raw: Dict[str, Any], override: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Patch a catalog entry with a canonical-schema override.
+
+    Sub-dicts (``limit``, ``modalities``) are merged, not clobbered — an
+    override setting only ``context_window`` must not wipe the catalog's
+    ``limit.output``.
+    """
+    shaped = _override_to_catalog_shape(override)
+    merged = dict(raw)
+    limit_patch = shaped.pop("limit", None)
+    if limit_patch:
+        base_limit = raw.get("limit")
+        base_limit = dict(base_limit) if isinstance(base_limit, dict) else {}
+        base_limit.update(limit_patch)
+        merged["limit"] = base_limit
+    vision_override = shaped.pop("_vision_override", None)
+    if vision_override is not None:
+        base_mods = raw.get("modalities")
+        base_mods = dict(base_mods) if isinstance(base_mods, dict) else {}
+        input_mods = base_mods.get("input")
+        input_mods = list(input_mods) if isinstance(input_mods, list) else []
+        if vision_override and "image" not in input_mods:
+            input_mods.append("image")
+        elif not vision_override and "image" in input_mods:
+            input_mods.remove("image")
+        base_mods["input"] = input_mods
+        merged["modalities"] = base_mods
+    merged.update(shaped)
+    return merged
 
 
 def _get_provider_models(provider: str) -> Optional[Dict[str, Any]]:
@@ -453,6 +724,14 @@ def get_model_capabilities(provider: str, model: str) -> Optional[ModelCapabilit
     Uses the existing fetch_models_dev() and PROVIDER_TO_MODELS_DEV mapping.
     Returns None if model not found.
 
+    EXPLICIT ``model_overrides`` entries (per-provider+model) win over catalog
+    values for the fields they set. ``_default`` entries fill the gap only for
+    models the catalog does not know — the supported self-unblock path for
+    custom/local models (#8731) and for models with wrong metadata in
+    models.dev (#84482). An override may set any subset of fields; unspecified
+    fields fall through to the catalog value (or sensible defaults when the
+    model is absent from the catalog).
+
     Extracts from model entry fields:
       - reasoning  (bool)  → supports_reasoning
       - tool_call  (bool)  → supports_tools
@@ -462,41 +741,72 @@ def get_model_capabilities(provider: str, model: str) -> Optional[ModelCapabilit
       - family     (str)   → model_family
     """
     models = _get_provider_models(provider)
-    if models is None:
+    entry = _find_model_entry(models, model) if models is not None else None
+
+    # Select the override AFTER the catalog lookup: explicit overrides always
+    # apply; _default entries only fill gaps for catalog misses.
+    override = _override_for(provider, model, catalog_hit=entry is not None)
+
+    # If no catalog entry and no override, we can't resolve capabilities.
+    if entry is None and override is None:
         return None
 
-    entry = _find_model_entry(models, model)
-    if entry is None:
-        return None
+    if entry is not None:
+        # Extract capability flags (default to False if missing)
+        supports_tools = bool(entry.get("tool_call", False))
+        # Vision: prefer explicit `modalities.input` when models.dev provides it.
+        # The older `attachment` flag can be stale or too broad for image routing;
+        # fall back to it only when the input modalities are absent/invalid.
+        input_mods = entry.get("modalities", {})
+        if isinstance(input_mods, dict):
+            input_mods = input_mods.get("input")
+        else:
+            input_mods = None
+        if isinstance(input_mods, list):
+            supports_vision = "image" in input_mods
+        else:
+            supports_vision = bool(entry.get("attachment", False))
+        supports_reasoning = bool(entry.get("reasoning", False))
 
-    # Extract capability flags (default to False if missing)
-    supports_tools = bool(entry.get("tool_call", False))
-    # Vision: prefer explicit `modalities.input` when models.dev provides it.
-    # The older `attachment` flag can be stale or too broad for image routing;
-    # fall back to it only when the input modalities are absent/invalid.
-    input_mods = entry.get("modalities", {})
-    if isinstance(input_mods, dict):
-        input_mods = input_mods.get("input")
+        # Extract limits
+        limit = entry.get("limit", {})
+        if not isinstance(limit, dict):
+            limit = {}
+
+        ctx = limit.get("context")
+        context_window = int(ctx) if isinstance(ctx, (int, float)) and ctx > 0 else 200000
+
+        out = limit.get("output")
+        max_output_tokens = int(out) if isinstance(out, (int, float)) and out > 0 else 8192
+
+        model_family = entry.get("family", "") or ""
     else:
-        input_mods = None
-    if isinstance(input_mods, list):
-        supports_vision = "image" in input_mods
-    else:
-        supports_vision = bool(entry.get("attachment", False))
-    supports_reasoning = bool(entry.get("reasoning", False))
+        # Unknown model — derive sensible defaults. The override patches
+        # whichever fields it specifies; the rest stay at defaults safe for
+        # agentic use (tools on, vision/reasoning off).
+        supports_tools = True
+        supports_vision = False
+        supports_reasoning = False
+        context_window = 200000
+        max_output_tokens = 8192
+        model_family = ""
 
-    # Extract limits
-    limit = entry.get("limit", {})
-    if not isinstance(limit, dict):
-        limit = {}
-
-    ctx = limit.get("context")
-    context_window = int(ctx) if isinstance(ctx, (int, float)) and ctx > 0 else 200000
-
-    out = limit.get("output")
-    max_output_tokens = int(out) if isinstance(out, (int, float)) and out > 0 else 8192
-
-    model_family = entry.get("family", "") or ""
+    # Apply override patches (each field is optional in the override dict).
+    if override is not None:
+        if "supports_tools" in override:
+            supports_tools = bool(override["supports_tools"])
+        if "supports_vision" in override:
+            supports_vision = bool(override["supports_vision"])
+        if "supports_reasoning" in override:
+            supports_reasoning = bool(override["supports_reasoning"])
+        ctx_ov = _override_int(override, "context_window")
+        if ctx_ov is not None:
+            context_window = ctx_ov
+        out_ov = _override_int(override, "max_output_tokens")
+        if out_ov is not None:
+            max_output_tokens = out_ov
+        if "model_family" in override:
+            model_family = str(override["model_family"] or "")
 
     return ModelCapabilities(
         supports_tools=supports_tools,
@@ -1021,22 +1331,24 @@ def get_model_info(
     case-insensitive fallback.  Returns None if not found in models.dev AND
     not in the override table.
 
-    The override layer:
-      1. Looks up the (provider, model) probe-verified override.
-      2. If we have a base ModelInfo from models.dev, applies the override
-         on top (context_window/max_output/etc are replaced; cost,
-         capabilities, modalities preserved).
-      3. If models.dev has no entry but we DO have an override, synthesizes
-         a minimal ModelInfo from the override alone: better to surface a
-         partial-but-honest entry than fall back to ``None``.
+    The override layers (lowest → highest authority):
+      1. models.dev catalog entry (base).
+      2. probe-verified override (``_PROBE_VERIFIED_OVERRIDES``): replaces
+         numeric limits where models.dev is known to lie.
+      3. USER ``model_overrides`` config: the user's manual declaration, the
+         highest authority — wins over both catalog and probe overrides.
+         Explicit per-provider+model entries patch known models; ``_default``
+         entries fill the gap only for models the catalog does not know
+         (#8731/#84482 self-unblock). Canonical schema, sub-dicts merged.
     """
     mdev_id = PROVIDER_TO_MODELS_DEV.get(provider_id, provider_id)
-    override = _resolve_probe_override(provider_id, model_id)
+    probe_override = _resolve_probe_override(provider_id, model_id)
 
     data = fetch_models_dev()
     pdata = data.get(mdev_id)
 
     base: Optional[ModelInfo] = None
+    matched_id = model_id
     if isinstance(pdata, dict):
         models = pdata.get("models", {})
         if isinstance(models, dict):
@@ -1050,21 +1362,75 @@ def get_model_info(
                 for mid, mdata in models.items():
                     if mid.lower() == model_lower and isinstance(mdata, dict):
                         base = _parse_model_info(mid, mdata, mdev_id)
+                        matched_id = mid
                         break
 
-    if override:
+    # Layer 2: probe-verified override on top of the catalog base.
+    if probe_override:
         if base is not None:
             # Apply override on top: replace numeric limits, keep everything else.
             from dataclasses import replace as _replace
-            return _replace(base, **{k: v for k, v in override.items() if hasattr(base, k)})
-        # No models.dev entry: synthesize a minimal honest one.
-        return ModelInfo(
-            id=model_id,
-            name=model_id,
-            family=_canonicalize_model_id(model_id).rsplit("-", 1)[0] or model_id,
-            provider_id=mdev_id,
-            context_window=int(override.get("context_window", 0) or 0),
-            max_output=int(override.get("max_output", 0) or 0),
-        )
+            base = _replace(base, **{k: v for k, v in probe_override.items() if hasattr(base, k)})
+        else:
+            # No models.dev entry: synthesize a minimal honest one.
+            base = ModelInfo(
+                id=model_id,
+                name=model_id,
+                family=_canonicalize_model_id(model_id).rsplit("-", 1)[0] or model_id,
+                provider_id=mdev_id,
+                context_window=int(probe_override.get("context_window", 0) or 0),
+                max_output=int(probe_override.get("max_output", 0) or 0),
+            )
+
+    # Layer 3: USER model_overrides config — highest authority. Explicit
+    # entries win over catalog + probe for known models; _default fills the gap
+    # only when the model is entirely unknown (no catalog and no probe).
+    user_override = _override_for(
+        provider_id, model_id, catalog_hit=base is not None
+    )
+    if user_override is not None:
+        from dataclasses import replace as _replace
+        patch = _model_info_patch_from_override(user_override)
+        if base is not None:
+            if patch:
+                base = _replace(base, **patch)
+        else:
+            # Override-only synthesis: canonical fields → ModelInfo.
+            base = ModelInfo(
+                id=model_id,
+                name=model_id,
+                family=str(user_override.get("model_family") or "")
+                or (_canonicalize_model_id(model_id).rsplit("-", 1)[0] or model_id),
+                provider_id=mdev_id,
+                context_window=patch.get("context_window", 0),
+                max_output=patch.get("max_output", 0),
+                reasoning=patch.get("reasoning", False),
+                tool_call=patch.get("tool_call", True),
+                attachment=patch.get("attachment", False),
+            )
 
     return base
+
+
+def _model_info_patch_from_override(override: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate a canonical model_overrides dict into ModelInfo field kwargs.
+
+    Only the fields the override actually sets are returned, so a partial
+    override patches just those fields on the base ModelInfo (dataclass.replace).
+    """
+    patch: Dict[str, Any] = {}
+    ctx = _override_int(override, "context_window")
+    if ctx is not None:
+        patch["context_window"] = ctx
+    out = _override_int(override, "max_output_tokens")
+    if out is not None:
+        patch["max_output"] = out
+    if "supports_tools" in override:
+        patch["tool_call"] = bool(override["supports_tools"])
+    if "supports_reasoning" in override:
+        patch["reasoning"] = bool(override["supports_reasoning"])
+    if "supports_vision" in override:
+        patch["attachment"] = bool(override["supports_vision"])
+    if "model_family" in override:
+        patch["family"] = str(override["model_family"] or "")
+    return patch

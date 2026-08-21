@@ -1769,6 +1769,7 @@ def get_model_context_length(
 
     Resolution order:
     0. Explicit config override (model.context_length or custom_providers per-model)
+    0b. model_overrides config (explicit per-provider+model context_window)
     1. Persistent cache (previously discovered via probing).  Nous URLs
        bypass the cache here so step 5b can always reconcile against
        the authoritative portal /v1/models response.
@@ -1793,7 +1794,23 @@ def get_model_context_length(
     if config_context_length is not None and isinstance(config_context_length, int) and config_context_length > 0:
         return config_context_length
 
-    # 0b. custom_providers per-model override — check before any probe.
+    # 0b. model_overrides config — EXPLICIT per-provider+model context_window
+    # override only (fill-gap _default entries are applied later, inside
+    # lookup_models_dev_context once the catalog has actually missed, so a
+    # _default can never preempt custom_providers or live probes). This is the
+    # supported self-unblock path for models with wrong context in models.dev
+    # (#84482) and for custom/local models (#8731). Config-read only; never
+    # blocks on the network.
+    if provider and model:
+        try:
+            from agent.models_dev import _override_context_window
+            mo_ctx = _override_context_window(provider, model)
+            if mo_ctx is not None and mo_ctx > 0:
+                return mo_ctx
+        except Exception:
+            pass  # fall through to other resolution paths
+
+    # 0c. custom_providers per-model override — check before any probe.
     # This closes the gap where /model switch and display paths used to fall
     # back to 128K despite the user having a per-model context_length set.
     # See #15779.
