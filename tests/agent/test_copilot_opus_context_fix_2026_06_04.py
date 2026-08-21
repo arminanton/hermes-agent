@@ -496,20 +496,20 @@ def test_phase_b_agy_cli_overrides(provider, model, ctx, out):
     assert mi.max_output == out
 
 
-@pytest.mark.xfail(
-    reason=(
-        "V1 agy --print subprocess shim retired 2026-06-04 in favor of the "
-        "Connect-RPC LanguageServerDaemon client. AGY_SLUG_TO_DISPLAY no "
-        "longer exists; the new client maps Hermes slugs to LS model enums "
-        "via _HERMES_SLUG_TO_LS_MODEL in agy_cli_client.py. See "
-        "tests/agent/test_agy_cli_client_v2.py for the V2 coverage."
-    ),
-    strict=False,
-)
 def test_phase_b_agy_slug_to_display_map_is_complete():
     """The Hermes slug → ``agy --model "<display>"`` map must cover every
     catalog model. Verifies the agy provider plugin can convert any Hermes
     slug we expose into the exact argument string agy expects.
+
+    NOTE (2026-06-04 retirement scope): the V1 agy ``--print`` *subprocess
+    client* was retired in favor of the Connect-RPC LanguageServerDaemon
+    client (``agent/agy_cli_client.py`` — see ``test_agy_cli_client_v2.py``).
+    That retirement removed the client-side ``_render_messages_to_prompt`` /
+    ``_strip_banner`` / ``_slug_to_display`` internals (the sibling xfail tests
+    below still pin those as gone). It did NOT remove the *plugin's* slug
+    catalog: ``AGY_SLUG_TO_DISPLAY`` in ``plugins/model-providers/agy-cli``
+    is still the live source of the exposed slug list, so this test remains a
+    real, passing contract check (previously mis-marked xfail).
     """
     import importlib.util
     from pathlib import Path
@@ -544,98 +544,6 @@ def test_phase_b_agy_slug_to_display_map_is_complete():
             assert disp == ""
         else:
             assert disp, f"Empty display string for slug {slug!r}"
-
-
-@pytest.mark.xfail(
-    reason="V1 agy --print shim retired 2026-06-04; _render_messages_to_prompt "
-           "is internal to the old subprocess path. See test_agy_cli_client_v2.py.",
-    strict=False,
-)
-def test_phase_b_agy_cli_client_render_messages_to_prompt():
-    """The prompt-flattening logic must preserve role markers so multi-turn
-    conversations don't lose system / assistant context when fed to agy --print.
-    """
-    from agent.agy_cli_client import _render_messages_to_prompt
-
-    out = _render_messages_to_prompt([
-        {"role": "system", "content": "You are helpful."},
-        {"role": "user", "content": "Hello."},
-        {"role": "assistant", "content": "Hi there."},
-        {"role": "user", "content": "How are you?"},
-    ])
-    assert "[SYSTEM]" in out and "You are helpful." in out
-    assert "[USER]" in out and "Hello." in out and "How are you?" in out
-    assert "[ASSISTANT]" in out and "Hi there." in out
-    # Order preserved
-    assert out.index("Hello.") < out.index("Hi there.") < out.index("How are you?")
-
-
-@pytest.mark.xfail(
-    reason="V1 agy --print shim retired 2026-06-04. See test_agy_cli_client_v2.py.",
-    strict=False,
-)
-def test_phase_b_agy_cli_client_multipart_content_flattened():
-    """OpenAI multi-part content (list of typed parts) must flatten to text."""
-    from agent.agy_cli_client import _render_messages_to_prompt
-
-    out = _render_messages_to_prompt([
-        {"role": "user", "content": [
-            {"type": "text", "text": "First part."},
-            {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},  # dropped
-            {"type": "text", "text": "Second part."},
-        ]},
-    ])
-    assert "First part." in out
-    assert "Second part." in out
-    # Non-text part silently dropped (agy --print is text-only)
-    assert "data:image" not in out
-
-
-@pytest.mark.xfail(
-    reason="V1 agy --print shim retired 2026-06-04 — _strip_banner is no longer "
-           "needed because Connect-RPC responses are clean JSON, not stdout text.",
-    strict=False,
-)
-def test_phase_b_agy_cli_client_strips_banner():
-    """The agy CLI prints a startup banner that must NOT leak into the
-    assistant message. Synthetic stdout simulates the banner + real response.
-    """
-    from agent.agy_cli_client import _strip_banner
-
-    raw = (
-        "Antigravity CLI v1.0.5\n"
-        "Welcome to Antigravity!\n"
-        "Type \"/help\" for help.\n"
-        "Press Ctrl+C to exit.\n"
-        "\n"
-        "Hello, this is the real model reply.\n"
-        "Second line of the real reply.\n"
-    )
-    clean = _strip_banner(raw)
-    assert "Antigravity" not in clean
-    assert "Welcome" not in clean
-    assert "/help" not in clean
-    assert clean.startswith("Hello, this is the real model reply.")
-    assert "Second line" in clean
-
-
-@pytest.mark.xfail(
-    reason="V1 agy --print shim retired 2026-06-04 — slug mapping moved from "
-           "_slug_to_display (display strings for --model argv) to "
-           "_HERMES_SLUG_TO_LS_MODEL (LS proto enum). See test_agy_cli_client_v2.py.",
-    strict=False,
-)
-def test_phase_b_agy_cli_client_slug_to_display_lookup():
-    """Unknown slugs fall through unchanged; known slugs map to the display
-    string; the special ``default`` slug returns empty (skip --model)."""
-    from agent.agy_cli_client import _slug_to_display
-
-    assert _slug_to_display("gemini-3.1-pro-high") == "Gemini 3.1 Pro (High)"
-    assert _slug_to_display("gpt-oss-120b") == "GPT-OSS 120B (Medium)"
-    assert _slug_to_display("claude-opus-4.6-thinking") == "Claude Opus 4.6 (Thinking)"
-    assert _slug_to_display("default") == ""
-    # Unknown slug — fall through to raw (agy will give a clean error)
-    assert _slug_to_display("future-model-not-yet-released") == "future-model-not-yet-released"
 
 
 def test_phase_b_agy_provider_plugin_loadable():

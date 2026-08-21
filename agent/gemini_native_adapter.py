@@ -28,7 +28,7 @@ from typing import Any, Dict, Iterator, List, Optional
 import httpx
 
 from agent.gemini_schema import sanitize_gemini_tool_parameters
-from agent.google_user_agent import (
+from agent.gemini_ua import (
     gemini_cli_user_agent,
     gemini_cli_x_goog_api_client,
 )
