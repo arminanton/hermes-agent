@@ -3218,9 +3218,11 @@ def copilot_default_headers(model: str = "") -> dict[str, str]:
         return {
             "User-Agent": f"copilot/{_COPILOT_CLI_VERSION}",
             "Copilot-Integration-Id": _COPILOT_INTEGRATION_ID,
-            "Runtime-Client-Version": _COPILOT_CLI_VERSION,
-            "Openai-Intent": "conversation-panel",
-            "x-initiator": "agent",
+            "Editor-Version": f"copilot/{_COPILOT_CLI_VERSION}",
+            "Openai-Intent": "conversation-agent",
+            "X-Initiator": "agent",
+            "X-Interaction-Type": "conversation-user",
+            "Copilot-Harness-Id": "copilot-sdk",
         }
 
 

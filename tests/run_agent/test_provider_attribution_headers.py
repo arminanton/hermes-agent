@@ -6,11 +6,15 @@ from run_agent import AIAgent
 
 
 
-# Per-call volatile headers — copilot_request_headers() generates fresh UUIDs
-# for X-Request-Id and X-Interaction-Id on every call (mirrors VS Code Copilot
-# Chat's trace-correlation behavior). Strip them on both sides before asserting
-# structural equality.
-_VOLATILE_COPILOT_HEADERS = ("X-Request-Id", "X-Interaction-Id")
+# Per-call volatile headers. ``copilot_request_headers()`` generates fresh UUIDs
+# for request, interaction, client-session, and agent-task correlation. Strip
+# them on both sides before asserting structural equality.
+_VOLATILE_COPILOT_HEADERS = (
+    "X-Request-Id",
+    "X-Interaction-Id",
+    "X-Agent-Task-Id",
+    "X-Client-Session-Id",
+)
 
 
 def _strip_volatile_copilot(headers):

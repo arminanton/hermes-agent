@@ -128,11 +128,16 @@ def test_copilot_anthropic_identity_headers_present():
     # 33-model catalog incl gemini-3.x + true per-model limits), the CLI
     # User-Agent (copilot/<ver>), and NO Editor-* VS Code headers.
     assert low.get("copilot-integration-id") == "copilot-developer-cli"
-    assert low.get("x-github-api-version")          # date-versioned, e.g. 2026-06-01
+    assert low.get("x-github-api-version")          # date-versioned, e.g. 2026-08-01
     assert low.get("user-agent", "").startswith("copilot/")
     assert low.get("x-initiator") == "agent"
-    assert "editor-version" not in low
+    # CLI 1.0.81-6 DOES send Editor-Version (value copilot/<ver>), MITM-captured
+    # 2026-08-20; it does NOT send the Editor-Plugin-Version pair.
+    assert low.get("editor-version", "").startswith("copilot/")
     assert "editor-plugin-version" not in low
+    # Full CLI identity parity: harness id + interaction type present.
+    assert low.get("copilot-harness-id") == "copilot-sdk"
+    assert low.get("x-interaction-type") == "conversation-user"
 
 
 def test_copilot_anthropic_no_inert_1m_slug():

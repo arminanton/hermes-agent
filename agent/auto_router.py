@@ -549,24 +549,36 @@ class AutoRouter:
         # (e.g. for unit tests that stub HTTP calls).
         try:
             from hermes_cli.copilot_auth import (
+                copilot_fallback_request_headers,
                 copilot_request_headers,
                 get_copilot_api_token,
             )
 
-            base = copilot_request_headers(is_agent_turn=True, model="auto")
-            api_token = get_copilot_api_token(bearer_token)
+            try:
+                base = copilot_request_headers(is_agent_turn=True, model="auto")
+            except Exception as exc:
+                logger.debug("auto-mode: Copilot header discovery failed: %s", exc)
+                base = copilot_fallback_request_headers()
+            try:
+                api_token = get_copilot_api_token(bearer_token)
+            except Exception as exc:
+                logger.debug("auto-mode: Copilot token exchange failed: %s", exc)
+                api_token = bearer_token
         except Exception as exc:  # pragma: no cover
             logger.debug("auto-mode: hermes_cli.copilot_auth unavailable: %s", exc)
             # copilot_auth is the single source of truth; this fallback only
             # fires if it is unavailable. Mirror its Copilot CLI identity shape
             # (no Editor-* VS Code headers) so the identity stays consistent.
+            version = "1.0.81-6"
             base = {
-                "User-Agent": "copilot/1.0.63",
+                "User-Agent": f"copilot/{version}",
                 "Copilot-Integration-Id": "copilot-developer-cli",
-                "Runtime-Client-Version": "1.0.63",
-                "Openai-Intent": "conversation-edits",
-                "X-GitHub-Api-Version": "2026-06-01",
-                "x-initiator": "agent",
+                "Editor-Version": f"copilot/{version}",
+                "Openai-Intent": "conversation-agent",
+                "X-GitHub-Api-Version": "2026-08-01",
+                "X-Initiator": "agent",
+                "X-Interaction-Type": "conversation-user",
+                "Copilot-Harness-Id": "copilot-sdk",
             }
             api_token = bearer_token
 

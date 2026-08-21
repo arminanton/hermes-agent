@@ -165,6 +165,38 @@ class TestCopilotBaseUrlResolution:
             copilot_auth.resolve_copilot_base_url("token")
 
 
+def test_fallback_identity_matches_current_copilot_contract():
+    from hermes_cli.copilot_auth import copilot_fallback_request_headers
+
+    headers = copilot_fallback_request_headers()
+    assert headers["User-Agent"] == headers["Editor-Version"]
+    assert headers["Copilot-Integration-Id"] == "copilot-developer-cli"
+    assert headers["Openai-Intent"] == "conversation-agent"
+    assert headers["X-Interaction-Type"] == "conversation-user"
+    assert headers["Copilot-Harness-Id"] == "copilot-sdk"
+
+
+def test_auto_router_degraded_path_keeps_canonical_fallback_identity(monkeypatch):
+    from agent.auto_router import AutoRouter
+
+    monkeypatch.setattr(
+        "hermes_cli.copilot_auth.copilot_request_headers",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("discovery unavailable")),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.copilot_auth.get_copilot_api_token",
+        lambda token: (_ for _ in ()).throw(RuntimeError("exchange unavailable")),
+    )
+
+    headers = AutoRouter()._base_headers("raw-token")
+
+    assert headers["Authorization"] == "Bearer raw-token"
+    assert headers["Copilot-Integration-Id"] == "copilot-developer-cli"
+    assert headers["Openai-Intent"] == "conversation-agent"
+    assert headers["X-Interaction-Type"] == "conversation-user"
+    assert headers["Copilot-Harness-Id"] == "copilot-sdk"
+
+
 class TestIdentityAudit:
     """Structured Copilot identity resolution audit."""
 
@@ -329,15 +361,19 @@ class TestRequestHeaders:
             lambda: "1.0.63",
         )
         headers = copilot_request_headers()
-        assert headers["Openai-Intent"] == "conversation-panel"
+        # CLI 1.0.81-6 sends Openai-Intent=conversation-agent (MITM-captured).
+        assert headers["Openai-Intent"] == "conversation-agent"
         # Presents as the @github/copilot CLI: UA is copilot/<ver> (short form
         # or full "copilot/<ver> (<platform> <node>) term/<term>" when node is
-        # resolvable). The Editor-* VS Code Chat headers are NOT sent; the CLI
-        # sends Runtime-Client-Version instead.
+        # resolvable). CLI 1.0.81-6 DOES send Editor-Version (value copilot/<ver>);
+        # it does NOT send the Editor-Plugin-Version pair or Runtime-Client-Version.
         assert headers["User-Agent"].startswith("copilot/1.0.63")
-        assert "Editor-Version" not in headers
+        assert headers["Editor-Version"] == "copilot/1.0.63"
         assert "Editor-Plugin-Version" not in headers
-        assert headers["Runtime-Client-Version"] == "1.0.63"
+        assert "Runtime-Client-Version" not in headers
+        # Fixed identity headers the CLI carries on every inference call.
+        assert headers["Copilot-Harness-Id"] == "copilot-sdk"
+        assert headers["X-Interaction-Type"] == "conversation-user"
 
     def test_user_agent_full_cli_form_when_node_present(self, monkeypatch):
         """When a Node runtime + TERM_PROGRAM are resolvable, the UA matches the
@@ -370,12 +406,12 @@ class TestRequestHeaders:
     def test_agent_turn_sets_initiator(self):
         from hermes_cli.copilot_auth import copilot_request_headers
         headers = copilot_request_headers(is_agent_turn=True)
-        assert headers["x-initiator"] == "agent"
+        assert headers["X-Initiator"] == "agent"
 
     def test_user_turn_sets_initiator(self):
         from hermes_cli.copilot_auth import copilot_request_headers
         headers = copilot_request_headers(is_agent_turn=False)
-        assert headers["x-initiator"] == "user"
+        assert headers["X-Initiator"] == "user"
 
     def test_vision_header(self):
         from hermes_cli.copilot_auth import copilot_request_headers
@@ -399,13 +435,13 @@ class TestCopilotDefaultHeaders:
         )
         headers = copilot_default_headers()
         assert "Openai-Intent" in headers
-        assert headers["Openai-Intent"] == "conversation-panel"
+        assert headers["Openai-Intent"] == "conversation-agent"
         assert headers["User-Agent"].startswith("copilot/1.0.63")
 
     def test_includes_x_initiator(self):
         from hermes_cli.models import copilot_default_headers
         headers = copilot_default_headers()
-        assert "x-initiator" in headers
+        assert "X-Initiator" in headers
 
 
 class TestApiModeSelection:
@@ -496,24 +532,27 @@ class TestApiVersionExtraction:
         assert _extract_api_version_from_bundle(f) is None
 
     def test_resolver_picks_newest_across_bundles(self, tmp_path, monkeypatch):
-        # Two bundles: an older JS one (2026-06-01) discovered first and a newer
-        # binary one (2026-07-01). The resolver must return the NEWEST, not the
-        # first hit.
+        # Two bundles: an older JS one (2026-08-01) discovered first and a newer
+        # binary one (2026-09-01). The resolver must return the NEWEST, not the
+        # first hit. Values are kept at/above the hard fallback so the fallback
+        # (which also participates in the max()) can't mask the ordering being
+        # tested — this asserts the newest-wins invariant, not a literal.
         import hermes_cli.copilot_auth as C
         old = tmp_path / "old_index.js"
-        old.write_text('a="X-GitHub-Api-Version",b="2026-06-01"')
+        old.write_text('a="X-GitHub-Api-Version",b="2026-08-01"')
         new = tmp_path / "new_runtime.node"
-        new.write_bytes(b"Openai-Intentconversation-agent2026-07-01Editor-Version")
+        new.write_bytes(b"Openai-Intentconversation-agent2026-09-01Editor-Version")
 
         monkeypatch.setattr(C, "_discover_copilot_cli_bundles", lambda: [old, new])
         monkeypatch.setattr(C, "_copilot_api_version_memo", None)
         monkeypatch.setenv("HERMES_COPILOT_API_VERSION", "")
         # Point the on-disk cache at an empty temp path so it doesn't short-circuit.
         monkeypatch.setattr(C, "_COPILOT_API_VERSION_CACHE_PATH", tmp_path / "nonexistent.json")
-        assert C._latest_copilot_api_version() == "2026-07-01"
+        assert C._latest_copilot_api_version() == "2026-09-01"
 
     def test_fallback_is_modern(self):
-        # The hard fallback must be at least the 2026-07-01 tier so a bundle-miss
-        # never regresses to the old default-tier api-version.
+        # The hard fallback must be at least the 2026-08-01 tier so a bundle-miss
+        # never regresses to an older api-version (the CLI runtime carries
+        # 2026-08-01 in capi_client.rs as of 1.0.81-6).
         from hermes_cli.copilot_auth import _COPILOT_API_VERSION_FALLBACK
-        assert _COPILOT_API_VERSION_FALLBACK >= "2026-07-01"
+        assert _COPILOT_API_VERSION_FALLBACK >= "2026-08-01"

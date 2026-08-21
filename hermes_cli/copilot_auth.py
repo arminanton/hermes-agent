@@ -448,12 +448,15 @@ _VERSION_CACHE_TTL = 24 * 60 * 60  # 24h
 # github.com REST/gist API version) and INTO the Rust core binary
 # (prebuilds/<platform>/runtime.node, in capi_client.rs, adjacent to
 # Openai-Intent / Editor-Version). `_extract_api_version_from_bundle` therefore
-# also scans the .node binary. This api-version gates the model tier: 2026-06-01
-# serves the old default tier (gpt-5.6 prompt capped at 922k with a hard
-# model_max_prompt_tokens_exceeded wall), while 2026-07-01 unlocks the
-# long_context tier the CLI itself uses. Keep the fallback at the newest verified
-# value so a bundle-miss still reaches the modern tier.
-_COPILOT_API_VERSION_FALLBACK = "2026-07-01"
+# also scans the .node binary. Historically this api-version gated the model
+# tier (2026-06-01 served the old default tier while 2026-07-01 unlocked the
+# long_context tier). NOTE (2026-08-20, live-verified against
+# api.githubcopilot.com): as of CLI 1.0.81-6 the per-model catalog limits are
+# BYTE-IDENTICAL across 2026-06-01 / 2026-07-01 / 2026-08-01 — the long_context
+# tier is now selected server-side by token count, not by this header. The
+# runtime binary carries 2026-08-01 in capi_client.rs, so keep the fallback at
+# that value to match the CLI's identity on the degraded (bundle-miss) path.
+_COPILOT_API_VERSION_FALLBACK = "2026-08-01"
 _COPILOT_API_VERSION_CACHE_PATH = (
     Path.home() / ".cache" / "hermes" / "copilot_api_version.json"
 )
@@ -463,9 +466,9 @@ _COPILOT_API_VERSION_CACHE_PATH = (
 # `copilot-developer-cli` Copilot-Integration-Id). Sourced (in priority order)
 # from the GitHub releases API (authoritative upstream) then the npm registry
 # `latest` dist-tag (downstream mirror, can lag); cached on disk with the same
-# TTL as the other version probes. Fallback is the value shipped at the time of
-# writing (2026-06-19).
-_COPILOT_CLI_VERSION_FALLBACK = "1.0.63"
+# TTL as the other version probes. Keep the fallback synchronized with the
+# AutoRouter import-failure identity.
+_COPILOT_CLI_VERSION_FALLBACK = "1.0.81-6"
 _COPILOT_CLI_RELEASES_URL = "https://api.github.com/repos/github/copilot-cli/releases/latest"
 _COPILOT_CLI_REGISTRY_URL = "https://registry.npmjs.org/@github%2Fcopilot/latest"
 _COPILOT_CLI_VERSION_CACHE_PATH = (
@@ -1231,54 +1234,139 @@ def get_copilot_api_token(raw_token: str) -> str:
 
 # ─── Copilot API Headers ───────────────────────────────────────────────────
 
+def _copilot_machine_id() -> str:
+    """Return a stable per-install machine id (the CLI's ``X-Client-Machine-Id``).
+
+    The real ``@github/copilot`` CLI sends a STABLE device/machine UUID on every
+    inference call (verified identical across all captured requests, 2026-08-20:
+    ``eafa7c5d-...``). It is a persistent install fingerprint, not per-call, so
+    we generate one once and persist it next to the other Copilot caches. This
+    matches the CLI 1:1 (a per-call random id would be an anti-fingerprint tell).
+    Override via ``HERMES_COPILOT_MACHINE_ID``.
+    """
+    override = os.getenv("HERMES_COPILOT_MACHINE_ID", "").strip()
+    if override:
+        return override
+
+    global _copilot_machine_id_memo
+    try:
+        if _copilot_machine_id_memo:
+            return _copilot_machine_id_memo
+    except NameError:  # pragma: no cover - module-load ordering guard
+        pass
+
+    import uuid as _uuid
+
+    path = Path.home() / ".cache" / "hermes" / "copilot_machine_id.txt"
+    mid = ""
+    try:
+        if path.is_file():
+            mid = path.read_text().strip()
+    except Exception as exc:
+        logger.debug("copilot machine-id read failed: %s", exc)
+    if not mid:
+        mid = str(_uuid.uuid4())
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(mid)
+        except Exception as exc:
+            logger.debug("copilot machine-id write failed: %s", exc)
+    _copilot_machine_id_memo = mid
+    return mid
+
+
+_copilot_machine_id_memo: Optional[str] = None
+
+
+def copilot_fallback_request_headers() -> dict[str, str]:
+    """Return the nonvolatile request identity used when discovery degrades."""
+    version = _COPILOT_CLI_VERSION_FALLBACK
+    return {
+        "User-Agent": f"copilot/{version}",
+        "Copilot-Integration-Id": "copilot-developer-cli",
+        "Editor-Version": f"copilot/{version}",
+        "Openai-Intent": "conversation-agent",
+        "X-GitHub-Api-Version": _COPILOT_API_VERSION_FALLBACK,
+        "X-Initiator": "agent",
+        "X-Interaction-Type": "conversation-user",
+        "Copilot-Harness-Id": "copilot-sdk",
+    }
+
+
 def copilot_request_headers(
     *,
     is_agent_turn: bool = True,
     is_vision: bool = False,
     model: str = "",
-    intent: str = "conversation-panel",
+    intent: str = "conversation-agent",
     interaction_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    agent_task_id: Optional[str] = None,
+    repository_nwo: str = "__no_repository__",
+    repository_host: str = "__no_repository__",
+    is_streaming: bool = True,
 ) -> dict[str, str]:
-    """Build the standard headers for Copilot API requests.
+    """Build Copilot API request headers matching the real ``@github/copilot`` CLI.
 
-    Presents as the official ``@github/copilot`` CLI (matching the
-    ``copilot-developer-cli`` Copilot-Integration-Id), NOT the VS Code Chat
-    extension. Verified against the real CLI bundle (``@github/copilot`` 1.0.63,
-    its ``que()`` inference-header builder, RE 2026-06-19): the CLI sends
-    ``Copilot-Integration-Id`` + ``Authorization: Bearer`` + ``Runtime-Client-Version``
-    and does NOT send the ``Editor-Version`` / ``Editor-Plugin-Version`` pair
-    (those are VS Code Chat extension headers). We follow the CLI shape so the
-    whole identity (integration-id + UA + headers) is internally consistent.
+    Reproduces the exact header set the CLI 1.0.81-6 puts on the wire (MITM-
+    captured 2026-08-20 across ``/models``, ``/responses``, and ``/v1/messages``).
+    We match it 1:1 rather than sending a minimal subset: an incomplete header
+    fingerprint is itself a flagging signal, so parity is the anti-block posture.
+
+    Captured CLI request headers (values are per-install / per-session / per-call
+    as noted):
+      Copilot-Integration-Id: copilot-developer-cli   (fixed identity)
+      Editor-Version:         copilot/<cli-version>    (the CLI DOES send this on
+                                                        1.0.81-6, unlike 1.0.63)
+      User-Agent:             copilot/<ver> (<plat> <node>) term/<TERM>
+      X-GitHub-Api-Version:   <resolved>
+      Openai-Intent:          conversation-agent
+      X-Initiator:            agent|user
+      X-Interaction-Type:     conversation-user        (fixed; NOT the intent)
+      Copilot-Harness-Id:     copilot-sdk
+      X-Client-Machine-Id:    <stable install uuid>
+      X-Client-Session-Id:    <per-conversation uuid>
+      X-Agent-Task-Id:        <per-turn uuid>
+      X-Interaction-Id:       <per-call uuid>
+      X-GitHub-Repository-Nwo:  __no_repository__ (or owner/repo)
+      X-GitHub-Repository-Host: __no_repository__ (or github.com)
+      X-Stainless-Helper-Method: stream               (OpenAI SDK signature, on
+                                                        streamed responses)
+      Copilot-Vision-Request: true                    (vision turns only)
     """
     import uuid as _uuid
     headers: dict[str, str] = {
         "User-Agent": _copilot_user_agent(),
         "Copilot-Integration-Id": _copilot_integration_id(),
-        # The real CLI sends this in place of the VS Code Editor-* pair; value
-        # is the @github/copilot CLI version we're identifying as.
-        "Runtime-Client-Version": _latest_copilot_cli_version(),
-        "Openai-Intent": intent,
-        # Mirror of Openai-Intent (extension sends both unless overridden).
-        "X-Interaction-Type": intent,
-        # Inference-path Copilot API version (currently 2026-06-01).
+        # The real CLI 1.0.81-6 DOES send Editor-Version (value = copilot/<ver>).
+        # (Earlier RE of the 1.0.63 bundle wrongly concluded it was VS-Code-only;
+        # the live 1.0.81-6 capture shows it on every inference call.)
+        "Editor-Version": f"copilot/{_latest_copilot_cli_version()}",
         "X-GitHub-Api-Version": _latest_copilot_api_version(),
-        "x-initiator": "agent" if is_agent_turn else "user",
-        # Per-call request id + stable per-session interaction id (server uses
-        # them for trace/log correlation and may key some quotas off
-        # X-Interaction-Id).
-        "X-Request-Id": str(_uuid.uuid4()),
+        "Openai-Intent": intent,
+        "X-Initiator": "agent" if is_agent_turn else "user",
+        # Fixed literal in every captured request (not the Openai-Intent value).
+        "X-Interaction-Type": "conversation-user",
+        "Copilot-Harness-Id": "copilot-sdk",
+        # Stable per-install device fingerprint (same value on every call).
+        "X-Client-Machine-Id": _copilot_machine_id(),
+        # Per-call request id + per-conversation session id + per-turn task id.
         "X-Interaction-Id": interaction_id or str(_uuid.uuid4()),
+        "X-Client-Session-Id": session_id or str(_uuid.uuid4()),
+        "X-Agent-Task-Id": agent_task_id or str(_uuid.uuid4()),
+        "X-GitHub-Repository-Nwo": repository_nwo or "__no_repository__",
+        "X-GitHub-Repository-Host": repository_host or "__no_repository__",
     }
+    if is_streaming:
+        # OpenAI SDK (stainless) signature the CLI carries on streamed turns.
+        headers["X-Stainless-Helper-Method"] = "stream"
 
     # NOTE: hermes previously injected `X-Copilot-Agent-Slug: copilot-1m-context`
     # here, believing it mapped the token to the developer-app integrator and
     # unlocked 1M context / Gemini-3.x. Live probing (2026-06-07) proved that
     # slug is INERT: it changes neither catalog visibility nor per-model limits.
     # What actually exposes gemini-3.x and the full limits is the
-    # Copilot-Integration-Id (`copilot-developer-cli`, matching the official CLI). The
-    # slug was removed to avoid sending a misleading no-op header. The official
-    # @github/copilot CLI sends `copilot-developer-sandbox` only on specific
-    # (non-inference) endpoints; we don't need it for chat/messages/responses.
+    # Copilot-Integration-Id (`copilot-developer-cli`, matching the official CLI).
 
     if is_vision:
         headers["Copilot-Vision-Request"] = "true"

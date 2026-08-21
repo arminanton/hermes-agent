@@ -192,6 +192,90 @@ class TestBaseUrlResolution:
         assert base == "https://api.githubcopilot.com"
 
 
+# ── GAP-6: identity-header parity with the real Copilot CLI 1.0.81-6 ─────────
+
+class TestIdentityHeaderParity:
+    """The header set must match the MITM-captured CLI 1.0.81-6 request 1:1.
+
+    Matching exactly (not a minimal subset) is the anti-fingerprint posture: an
+    incomplete header set is itself a flagging signal.
+    """
+
+    def _headers(self):
+        from hermes_cli.copilot_auth import copilot_request_headers
+
+        return copilot_request_headers(is_agent_turn=True, model="gpt-5.6-sol")
+
+    def test_carries_full_cli_header_set(self):
+        h = self._headers()
+        # Every header the real CLI sends on an inference call.
+        assert h["Copilot-Integration-Id"] == "copilot-developer-cli"
+        assert h["Editor-Version"].startswith("copilot/")
+        assert h["User-Agent"].startswith("copilot/")
+        assert h["Openai-Intent"] == "conversation-agent"
+        assert h["X-Initiator"] == "agent"
+        assert h["X-Interaction-Type"] == "conversation-user"
+        assert h["Copilot-Harness-Id"] == "copilot-sdk"
+        assert h["X-GitHub-Api-Version"]
+        assert h["X-Client-Machine-Id"]
+        assert h["X-Client-Session-Id"]
+        assert h["X-Agent-Task-Id"]
+        assert h["X-Interaction-Id"]
+        assert h["X-GitHub-Repository-Nwo"] == "__no_repository__"
+        assert h["X-GitHub-Repository-Host"] == "__no_repository__"
+        assert h["X-Stainless-Helper-Method"] == "stream"
+
+    def test_does_not_send_retired_headers(self):
+        # These were Hermes-invented / VS-Code-extension headers the real CLI
+        # 1.0.81-6 does NOT send; keeping them would be a fingerprint mismatch.
+        h = self._headers()
+        assert "Runtime-Client-Version" not in h
+        assert "X-Request-Id" not in h
+        assert "Editor-Plugin-Version" not in h
+        # Casing matches the SDK (X-Initiator, not lowercase x-initiator).
+        assert "x-initiator" not in h
+
+    def test_machine_id_is_stable_across_calls(self):
+        from hermes_cli.copilot_auth import copilot_request_headers
+
+        a = copilot_request_headers()["X-Client-Machine-Id"]
+        b = copilot_request_headers()["X-Client-Machine-Id"]
+        assert a == b  # stable per-install fingerprint, NOT per-call
+
+    def test_per_call_ids_vary_when_not_supplied(self):
+        from hermes_cli.copilot_auth import copilot_request_headers
+
+        a = copilot_request_headers()
+        b = copilot_request_headers()
+        assert a["X-Interaction-Id"] != b["X-Interaction-Id"]
+
+    def test_explicit_session_and_task_ids_honored(self):
+        from hermes_cli.copilot_auth import copilot_request_headers
+
+        h = copilot_request_headers(
+            session_id="sess-1", agent_task_id="task-1", interaction_id="int-1"
+        )
+        assert h["X-Client-Session-Id"] == "sess-1"
+        assert h["X-Agent-Task-Id"] == "task-1"
+        assert h["X-Interaction-Id"] == "int-1"
+
+    def test_user_turn_initiator(self):
+        from hermes_cli.copilot_auth import copilot_request_headers
+
+        assert copilot_request_headers(is_agent_turn=False)["X-Initiator"] == "user"
+
+    def test_vision_header_only_on_vision(self):
+        from hermes_cli.copilot_auth import copilot_request_headers
+
+        assert "Copilot-Vision-Request" not in copilot_request_headers()
+        assert copilot_request_headers(is_vision=True)["Copilot-Vision-Request"] == "true"
+
+    def test_non_streaming_omits_stainless(self):
+        from hermes_cli.copilot_auth import copilot_request_headers
+
+        assert "X-Stainless-Helper-Method" not in copilot_request_headers(is_streaming=False)
+
+
 # ── GAP-7 latent break: plan-aware host recognition across all detection sites ─
 
 class TestPlanAwareHostDetection:
