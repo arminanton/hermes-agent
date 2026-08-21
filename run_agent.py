@@ -5117,50 +5117,31 @@ class AIAgent:
         if self.reasoning_config and isinstance(self.reasoning_config, dict):
             if self.reasoning_config.get("enabled") is False:
                 return None
-            requested_effort = str(
+            requested = str(
                 self.reasoning_config.get("effort", "medium")
             ).strip().lower()
         else:
-            requested_effort = "medium"
+            requested = "medium"
 
         # ``supported_efforts`` is the live Copilot catalog allow-list
-        # (capabilities.supports.reasoning_effort). Honor the requested level
-        # when the catalog says it's supported, including ``xhigh`` for
-        # gpt-5.5/gpt-5.4, which DO support it. Only downgrade when the level
-        # is genuinely absent from the catalog, and annotate the downgrade in
-        # the DEBUG log instead of doing it silently.
-        #
-        # (Previously this force-downgraded xhigh→high unconditionally, a stale
-        #  guard from the free-tier deployment that silently capped every
-        #  gpt-5.x request at "high" even though the paid catalog lists xhigh.)
-        if requested_effort not in supported_efforts:
-            original_effort = requested_effort
-            # Pick the strongest supported level that does not EXCEED the
-            # request (rank-based), instead of snapping to medium. This keeps
-            # "max" → "xhigh" for GPT-5.x (whose ceiling is xhigh) rather than
-            # collapsing a high-effort request down to medium. Falls back to the
-            # weakest supported level only when nothing is at/below the request.
-            _RANK = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
-            try:
-                _req_rank = _RANK.index(requested_effort)
-            except ValueError:
-                _req_rank = len(_RANK) - 1
-            _ranked = [e for e in supported_efforts if e in _RANK]
-            _below = [e for e in _ranked if _RANK.index(e) <= _req_rank]
-            if _below:
-                requested_effort = max(_below, key=lambda e: _RANK.index(e))
-            elif _ranked:
-                requested_effort = min(_ranked, key=lambda e: _RANK.index(e))
-            else:
-                requested_effort = supported_efforts[0]
-            if requested_effort != original_effort:
-                logger.debug(
-                    "run_agent: reasoning_effort %r not supported by %s "
-                    "(catalog supports %s); using %r",
-                    original_effort, self.model, supported_efforts, requested_effort,
-                )
+        # (capabilities.supports.reasoning_effort). Clamp the requested level to
+        # it via the canonical policy (agent/reasoning_effort.clamp_effort): a
+        # supported level passes verbatim (incl. ``xhigh`` for gpt-5.5/5.4 and
+        # ``max`` for gpt-5.6), otherwise the nearest WEAKER supported level, so
+        # ``max``→``xhigh`` on gpt-5.5 rather than collapsing to medium, and
+        # ``minimal``→``low`` on codex (never silently switching thinking off via
+        # ``none``). Replaces the prior hand-rolled rank table (one policy now).
+        from agent.reasoning_effort import clamp_effort
 
-        return {"effort": requested_effort}
+        effective = clamp_effort(requested, supported_efforts)
+        if effective != requested:
+            logger.debug(
+                "run_agent: reasoning_effort %r not supported by %s "
+                "(catalog supports %s); using %r",
+                requested, self.model, supported_efforts, effective,
+            )
+
+        return {"effort": effective}
 
     def _build_assistant_message(self, assistant_message, finish_reason: str) -> dict:
         """Forwarder — see ``agent.chat_completion_helpers.build_assistant_message``."""
