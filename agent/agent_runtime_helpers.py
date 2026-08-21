@@ -1390,21 +1390,6 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
             agent._client_log_context(),
         )
         return client
-    # Antigravity CLI (agy): print-mode subprocess, no streaming.
-    # Routed by provider=agy-cli OR base_url=agy://antigravity. See
-    # plugins/model-providers/agy-cli/__init__.py + agent/agy_cli_client.py.
-    if agent.provider in {"agy-cli", "agy", "antigravity", "antigravity-cli"} \
-            or str(client_kwargs.get("base_url", "")).startswith("agy://"):
-        from agent.agy_cli_client import AgyCliClient
-
-        client = AgyCliClient(**client_kwargs)
-        _ra().logger.info(
-            "Antigravity (agy) CLI client created (%s, shared=%s) %s",
-            reason,
-            shared,
-            agent._client_log_context(),
-        )
-        return client
     if agent.provider == "google-gemini-cli" or str(client_kwargs.get("base_url", "")).startswith("cloudcode-pa://"):
         from agent.gemini_cloudcode_adapter import GeminiCloudCodeClient
 

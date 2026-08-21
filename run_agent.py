@@ -4678,19 +4678,10 @@ class AIAgent:
 
         Lazy-initializes on first call per api_mode. Returns None if no
         transport is registered for the mode.
-
-        ALIAS NOTE (2026-06-05): ``agy_cli`` is a Hermes-internal api_mode
-        marker (set in hermes_cli/runtime_provider.py:1472) used to route
-        client construction to AgyCliClient. AgyCliClient is OpenAI-
-        compatible so for the purpose of build_kwargs/normalize_response
-        we use the same transport as ``chat_completions``. Without this
-        alias, build_kwargs() returned None and every agy call died with
-        ``'NoneType' object has no attribute 'build_kwargs'``.
         """
         mode = api_mode or self.api_mode
         # Internal-marker modes that should share an existing transport
         _MODE_ALIASES = {
-            "agy_cli": "chat_completions",
         }
         mode = _MODE_ALIASES.get(mode, mode)
         cache = getattr(self, "_transport_cache", None)

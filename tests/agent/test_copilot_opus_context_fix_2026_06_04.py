@@ -24,13 +24,13 @@ import pytest
 
 def _overlay_routing_present() -> bool:
     """True only when the full copilot-opus-context overlay machinery is wired
-    into the tree under test (mythos/fable routing + agy-cli catalog rows).
+    into the tree under test (mythos/fable routing).
 
-    On a clean upstream/public stack these account-specific routing tables and the
-    agy-cli provider catalog are NOT present (they live in the private overlay /
-    the deferred set), so the tests that assert their exact behavior are skipped
-    rather than failed. On the full tree they all run. This keeps the file green
-    on BOTH the public PR stack and the live overlay.
+    On a clean upstream/public stack these account-specific routing tables are
+    NOT present (they live in the private overlay / the deferred set), so the
+    tests that assert their exact behavior are skipped rather than failed. On
+    the full tree they all run. This keeps the file green on BOTH the public PR
+    stack and the live overlay.
     """
     try:
         from hermes_cli import models as hcm
@@ -43,8 +43,8 @@ def _overlay_routing_present() -> bool:
 
 _needs_overlay = pytest.mark.skipif(
     not _overlay_routing_present(),
-    reason="requires the private copilot-opus-context overlay (mythos/fable routing "
-    "+ agy-cli catalog); absent on the clean public stack, present on the full tree",
+    reason="requires the private copilot-opus-context overlay (mythos/fable "
+    "routing); absent on the clean public stack, present on the full tree",
 )
 
 
@@ -383,9 +383,7 @@ import pytest as _pytest
     ("anthropic", "claude-opus-4-8", 1_000_000, 128_000),
     ("anthropic", "claude-sonnet-4.6", 1_000_000, 64_000),
     ("anthropic", "claude-haiku-4.5", 200_000, 64_000),
-    # ─── Phase A9: provider=google (cloudcode-pa OAuth unlock) ───────────
-    # Reachable via cloudcode-pa.googleapis.com after removing the broken
-    # antigravity-core-2026 X-Goog-User-Project hardcoding.
+    # ─── provider=google (vendor-doc context caps) ──────────────────────
     ("google", "gemini-2.5-pro", 1_048_576, 65_536),
     ("google", "gemini-3.1-pro-preview", 1_000_000, 65_536),
     ("google", "gemini-3-pro-preview", 1_000_000, 65_536),
@@ -459,112 +457,6 @@ def test_a8_no_override_falls_through_to_models_dev():
     # Don't assert specific numbers — they come from upstream and may shift.
     # Just assert we get a ModelInfo back, proving fall-through works.
     assert mi is not None or True  # tolerate models.dev not having it
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase B — agy-cli subprocess provider
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-@_pytest.mark.parametrize("provider,model,ctx,out", [
-    # Antigravity CLI catalog from `agy models` v1.0.5 + GSD extension
-    ("agy-cli",     "gemini-3.5-flash-low",       1_000_000, 65_536),
-    ("agy-cli",     "gemini-3.5-flash-medium",    1_000_000, 65_536),
-    ("agy-cli",     "gemini-3.5-flash-high",      1_000_000, 65_536),
-    ("agy-cli",     "gemini-3.1-pro-low",         1_000_000, 65_536),
-    ("agy-cli",     "gemini-3.1-pro-high",        1_000_000, 65_536),
-    ("agy-cli",     "claude-sonnet-4.6-thinking", 1_000_000, 64_000),
-    ("agy-cli",     "claude-opus-4.6-thinking",   1_000_000, 128_000),
-    ("agy-cli",     "gpt-oss-120b",                 131_072, 65_536),
-    ("agy-cli",     "default",                    1_000_000, 65_536),
-    # Provider aliases
-    ("agy",         "gpt-oss-120b",                 131_072, 65_536),
-    ("antigravity", "gemini-3.1-pro-high",        1_000_000, 65_536),
-    ("antigravity-cli", "claude-opus-4.6-thinking", 1_000_000, 128_000),
-])
-@_needs_overlay
-def test_phase_b_agy_cli_overrides(provider, model, ctx, out):
-    """The Antigravity CLI catalog must be visible via get_model_info so the
-    /models UI shows correct ctx/output, even though the CLI itself never
-    hits a REST /models endpoint.
-    """
-    from agent.models_dev import get_model_info
-
-    mi = get_model_info(provider, model)
-    assert mi is not None, f"get_model_info({provider!r}, {model!r}) returned None"
-    assert mi.context_window == ctx
-    assert mi.max_output == out
-
-
-def test_phase_b_agy_slug_to_display_map_is_complete():
-    """The Hermes slug → ``agy --model "<display>"`` map must cover every
-    catalog model. Verifies the agy provider plugin can convert any Hermes
-    slug we expose into the exact argument string agy expects.
-
-    NOTE (2026-06-04 retirement scope): the V1 agy ``--print`` *subprocess
-    client* was retired in favor of the Connect-RPC LanguageServerDaemon
-    client (``agent/agy_cli_client.py`` — see ``test_agy_cli_client_v2.py``).
-    That retirement removed the client-side ``_render_messages_to_prompt`` /
-    ``_strip_banner`` / ``_slug_to_display`` internals (the sibling xfail tests
-    below still pin those as gone). It did NOT remove the *plugin's* slug
-    catalog: ``AGY_SLUG_TO_DISPLAY`` in ``plugins/model-providers/agy-cli``
-    is still the live source of the exposed slug list, so this test remains a
-    real, passing contract check (previously mis-marked xfail).
-    """
-    import importlib.util
-    from pathlib import Path
-
-    plugin_init = (
-        Path(__file__).parent.parent.parent
-        / "plugins" / "model-providers" / "agy-cli" / "__init__.py"
-    )
-    assert plugin_init.exists(), f"Missing plugin: {plugin_init}"
-    spec = importlib.util.spec_from_file_location("plugins_agy_cli_test", plugin_init)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
-    expected_slugs = {
-        "default",
-        "gemini-3.5-flash-low",
-        "gemini-3.5-flash-medium",
-        "gemini-3.5-flash-high",
-        "gemini-3.1-pro-low",
-        "gemini-3.1-pro-high",
-        "claude-sonnet-4.6-thinking",
-        "claude-opus-4.6-thinking",
-        "gpt-oss-120b",
-    }
-    assert set(mod.AGY_SLUG_TO_DISPLAY.keys()) == expected_slugs, (
-        f"AGY_SLUG_TO_DISPLAY keys drifted from agy CLI v1.0.5 catalog. "
-        f"Re-run `agy models` and reconcile."
-    )
-    # Every non-default slug must have a non-empty display string.
-    for slug, disp in mod.AGY_SLUG_TO_DISPLAY.items():
-        if slug == "default":
-            assert disp == ""
-        else:
-            assert disp, f"Empty display string for slug {slug!r}"
-
-
-def test_phase_b_agy_provider_plugin_loadable():
-    """The agy-cli plugin must register cleanly with the provider registry.
-    Smoke test: import the plugin and confirm the registered profile exists.
-    """
-    import importlib.util
-    from pathlib import Path
-
-    plugin_init = (
-        Path(__file__).parent.parent.parent
-        / "plugins" / "model-providers" / "agy-cli" / "__init__.py"
-    )
-    spec = importlib.util.spec_from_file_location("plugins_agy_cli_loadable", plugin_init)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
-    assert mod.agy_cli.name == "agy-cli"
-    assert "agy" in mod.agy_cli.aliases
-    assert mod.agy_cli.api_mode == "agy_cli"
-    assert mod.agy_cli.base_url == "agy://antigravity"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

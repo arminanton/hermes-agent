@@ -4569,50 +4569,6 @@ def validate_requested_model(
             "message": f"Model `{requested}` was not found in LM Studio's model listing.",
         }
 
-    # Antigravity CLI (`agy-cli`): no HTTP /models endpoint; the model list is
-    # owned by the agy binary's internal Connect-RPC server and the plugin's
-    # `AGY_SLUG_TO_DISPLAY` map. Use the plugin's own model list as the
-    # validation source rather than letting the generic /models probe fail
-    # and emit a misleading "could not reach the agy-cli API" warning.
-    if normalized == "agy-cli" or normalized in {"agy", "antigravity", "antigravity-cli"}:
-        try:
-            import importlib.util as _ilu
-            from pathlib import Path as _Path
-            _plugin_init = _Path(__file__).resolve().parent.parent / "plugins" / "model-providers" / "agy-cli" / "__init__.py"
-            _spec = _ilu.spec_from_file_location("_agy_plugin_validate", _plugin_init)
-            _mod = _ilu.module_from_spec(_spec)
-            _spec.loader.exec_module(_mod)
-            _slug_map = getattr(_mod, "AGY_SLUG_TO_DISPLAY", None) or {}
-            agy_known = [s for s in _slug_map.keys() if s and s != "default"]
-        except Exception:
-            agy_known = []
-        if agy_known:
-            if requested_for_lookup in set(agy_known):
-                return {"accepted": True, "persist": True, "recognized": True, "message": None}
-            auto = get_close_matches(requested_for_lookup, agy_known, n=1, cutoff=0.85)
-            if auto:
-                return {
-                    "accepted": True, "persist": True, "recognized": True,
-                    "corrected_model": auto[0],
-                    "message": f"Auto-corrected `{requested}` → `{auto[0]}`",
-                }
-            suggestions = get_close_matches(requested_for_lookup, agy_known, n=3, cutoff=0.5)
-            suggestion_text = "\n  Similar agy models: " + ", ".join(f"`{s}`" for s in suggestions) if suggestions else ""
-            # Allow but warn: agy may have added new models since the plugin
-            # was last refreshed; the AgyCliClient will surface the real
-            # error if the model is genuinely invalid.
-            return {
-                "accepted": True, "persist": True, "recognized": False,
-                "message": (
-                    f"Note: `{requested}` is not in the pinned agy-cli model list."
-                    f"{suggestion_text}"
-                    f"\n  Hermes will still send the request. If the model exists on this account's agy install it will work."
-                ),
-            }
-        # plugin model list unavailable; accept silently rather than nag with
-        # a misleading "could not reach the API" warning.
-        return {"accepted": True, "persist": True, "recognized": False, "message": None}
-
     if normalized == "custom" or normalized.startswith("custom:"):
         # Try probing with correct auth for the api_mode.
         if api_mode == "anthropic_messages":

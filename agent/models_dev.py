@@ -1181,22 +1181,6 @@ _PROBE_VERIFIED_OVERRIDES: Dict[Tuple[str, str], Dict[str, Any]] = {
     ("google", "gemini-3-flash-preview"):      {"context_window": 1_000_000, "max_output":  65_536},
     ("google", "gemini-3.1-flash-lite-preview"): {"context_window": 1_000_000, "max_output":  65_536},
 
-    # ─── provider=agy-cli (Antigravity CLI subprocess, Phase B 2026-06-04) ─
-    # Catalog from `agy models` v1.0.5 + ~/.gsd/agent/extensions/agy-cli/models.js.
-    # All zero-cost, 1M context (gpt-oss capped at 131,072). Reasoning level is
-    # baked into the slug (Low/Medium/High); no separate effort knob.
-    # output ceiling is 65,536 for gemini-3.x and gpt-oss; Anthropic models on
-    # Antigravity keep their vendor 64k/128k surface.
-    ("agy-cli", "default"):                       {"context_window": 1_000_000, "max_output":  65_536},
-    ("agy-cli", "gemini-3.5-flash-low"):          {"context_window": 1_000_000, "max_output":  65_536},
-    ("agy-cli", "gemini-3.5-flash-medium"):       {"context_window": 1_000_000, "max_output":  65_536},
-    ("agy-cli", "gemini-3.5-flash-high"):         {"context_window": 1_000_000, "max_output":  65_536},
-    ("agy-cli", "gemini-3.1-pro-low"):            {"context_window": 1_000_000, "max_output":  65_536},
-    ("agy-cli", "gemini-3.1-pro-high"):           {"context_window": 1_000_000, "max_output":  65_536},
-    ("agy-cli", "claude-sonnet-4.6-thinking"):    {"context_window": 1_000_000, "max_output":  64_000},
-    ("agy-cli", "claude-opus-4.6-thinking"):      {"context_window": 1_000_000, "max_output": 128_000},
-    ("agy-cli", "gpt-oss-120b"):                  {"context_window":   131_072, "max_output":  65_536},
-
     # ─── provider=anthropic (vendor-direct) ─────────────────────────────────
     # Pro/Max subscription via api.anthropic.com.
     ("anthropic", "claude-opus-4.8"):          {"context_window": 1_000_000, "max_output": 128_000},
@@ -1225,11 +1209,6 @@ _OVERRIDE_PROVIDER_ALIASES = {
     "google-vertex": "google",
     "anthropic": "anthropic",
     "claude": "anthropic",
-    # Antigravity CLI: its own override table (zero-cost, 1M ctx, agy slugs)
-    "agy-cli": "agy-cli",
-    "agy": "agy-cli",
-    "antigravity": "agy-cli",
-    "antigravity-cli": "agy-cli",
 }
 
 
