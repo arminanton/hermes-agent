@@ -380,7 +380,7 @@ def init_agent(
         agent.provider in {"copilot", "github-copilot"}
         or (
             agent.provider not in {"copilot-acp"}
-            and base_url_host_matches(agent._base_url_lower, "api.githubcopilot.com")
+            and base_url_host_matches(agent._base_url_lower, "githubcopilot.com")
         )
     )
     if (
@@ -866,7 +866,7 @@ def init_agent(
                 client_kwargs["default_headers"] = build_nvidia_nim_headers(effective_base)
             elif base_url_host_matches(effective_base, "api.routermint.com"):
                 client_kwargs["default_headers"] = _ra()._routermint_headers()
-            elif base_url_host_matches(effective_base, "api.githubcopilot.com"):
+            elif base_url_host_matches(effective_base, "githubcopilot.com"):
                 from hermes_cli.models import copilot_default_headers
 
                 client_kwargs["default_headers"] = copilot_default_headers()

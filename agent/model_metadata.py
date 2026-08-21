@@ -475,6 +475,12 @@ _URL_TO_PROVIDER: Dict[str, str] = {
     "inference-api.nousresearch.com": "nous",
     "api.deepseek.com": "deepseek",
     "api.githubcopilot.com": "copilot",
+    # Plan-scoped Copilot inference hosts (business / enterprise accounts resolve
+    # here from /copilot_internal/user.endpoints.api). The lookup below is a
+    # substring test, and "api.githubcopilot.com" is NOT a substring of
+    # "api.business.githubcopilot.com", so this bare-domain entry is what maps the
+    # business/enterprise hosts to the copilot provider.
+    "githubcopilot.com": "copilot",
     "models.github.ai": "copilot",
     # GitHub Models free tier (Azure-hosted prototyping endpoint) — same
     # canonical provider as the Copilot API.  Hard per-request token cap

@@ -235,7 +235,13 @@ def _is_copilot_base_url(base_url: Optional[str]) -> bool:
         host = (urlparse(base_url).hostname or "").lower()
     except Exception:
         return False
-    return host == "api.githubcopilot.com"
+    # Suffix-match so plan-scoped hosts are recognized, not just the shared
+    # front door: api.githubcopilot.com (individual), api.business.githubcopilot.com
+    # (business), api.enterprise.githubcopilot.com (enterprise), and any future
+    # dedicated *.githubcopilot.com deployment. An exact match on the individual
+    # host would silently disable all Copilot routing (effort ceilings,
+    # /v1/messages selection, proxy quirks) on business/enterprise accounts.
+    return host == "api.githubcopilot.com" or host.endswith(".githubcopilot.com")
 
 
 def _request_messages_have_image_parts(messages: Any) -> bool:

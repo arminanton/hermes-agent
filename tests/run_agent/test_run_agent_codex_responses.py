@@ -77,6 +77,56 @@ def _build_copilot_agent(monkeypatch, *, model="gpt-5.4"):
     return agent
 
 
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://api.githubcopilot.com",
+        "https://api.business.githubcopilot.com",
+        "https://api.enterprise.githubcopilot.com/v1",
+    ],
+)
+def test_copilot_host_checks_accept_plan_scoped_inference_hosts(
+    monkeypatch, base_url
+):
+    agent = _build_copilot_agent(monkeypatch)
+
+    assert agent._is_github_copilot_url(base_url)
+
+    agent._client_kwargs["base_url"] = base_url
+    created = {}
+    monkeypatch.setattr(
+        agent, "_ensure_primary_openai_client", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(
+        agent,
+        "_create_openai_client",
+        lambda kwargs, **options: created.update(kwargs) or object(),
+    )
+    agent._create_request_openai_client(reason="test", api_kwargs={"input": []})
+    assert created["default_headers"]["Copilot-Integration-Id"] == (
+        "copilot-developer-cli"
+    )
+
+    agent._client_kwargs.pop("default_headers", None)
+    agent._apply_client_headers_for_base_url(base_url)
+    assert agent._client_kwargs["default_headers"]["Copilot-Integration-Id"] == (
+        "copilot-developer-cli"
+    )
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://githubcopilot.com.evil.example",
+        "https://example.com/api.githubcopilot.com/v1",
+        "https://notgithubcopilot.com",
+    ],
+)
+def test_copilot_host_checks_reject_lookalikes(monkeypatch, base_url):
+    agent = _build_copilot_agent(monkeypatch)
+    assert not agent._is_github_copilot_url(base_url)
+
+
 def _codex_message_response(text: str):
     return SimpleNamespace(
         output=[

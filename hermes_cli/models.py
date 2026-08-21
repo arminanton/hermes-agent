@@ -26,6 +26,27 @@ _HERMES_USER_AGENT = f"hermes-cli/{_HERMES_VERSION}"
 
 COPILOT_BASE_URL = "https://api.githubcopilot.com"
 COPILOT_MODELS_URL = f"{COPILOT_BASE_URL}/models"
+
+
+def _is_copilot_host(base_url: Optional[str]) -> bool:
+    """True when *base_url* is any Copilot inference host (plan-aware).
+
+    Matches api.githubcopilot.com (individual) plus the plan-scoped
+    api.business.githubcopilot.com / api.enterprise.githubcopilot.com and any
+    future dedicated ``*.githubcopilot.com`` deployment. Used so Copilot header
+    injection and routing recognize business/enterprise hosts, not just the
+    shared individual front door.
+    """
+    normalized = (base_url or "").strip().lower()
+    if not normalized:
+        return False
+    try:
+        from urllib.parse import urlparse
+
+        host = (urlparse(normalized).hostname or "").lower()
+    except Exception:
+        return False
+    return host == "api.githubcopilot.com" or host.endswith(".githubcopilot.com")
 # Single Copilot CLI identity (the `copilot-developer-cli` integration that
 # unlocks the full 33-model catalog). copilot_auth.py is the authoritative
 # source; these mirror its fallback values for the degraded ImportError path in
@@ -3574,7 +3595,7 @@ def get_copilot_display_context(
 def _is_github_models_base_url(base_url: Optional[str]) -> bool:
     normalized = (base_url or "").strip().rstrip("/").lower()
     return (
-        normalized.startswith(COPILOT_BASE_URL)
+        _is_copilot_host(normalized)
         or normalized.startswith("https://models.github.ai/inference")
         or normalized.startswith("https://models.inference.ai.azure.com")
     )
@@ -4213,7 +4234,7 @@ def probe_api_models(
         headers["anthropic-version"] = "2023-06-01"
     elif api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    if normalized.startswith(COPILOT_BASE_URL):
+    if _is_copilot_host(normalized):
         headers.update(copilot_default_headers())
 
     for candidate_base, is_fallback in candidates:
