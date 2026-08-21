@@ -1155,8 +1155,7 @@ _PROBE_VERIFIED_OVERRIDES: Dict[Tuple[str, str], Dict[str, Any]] = {
     ("github-copilot", "gemini-2.5-pro"):      {"context_window":   128_000, "max_output":  65_536},
     ("github-copilot", "gemini-3-flash-preview"): {"context_window":   128_000, "max_output":  65_536},
     # gemini-3.1-pro-preview unreachable through Copilot proxy. Set to 0 so
-    # the UI shows "n/a"; users should pick provider=google instead, which
-    # unlocks the model via cloudcode-pa OAuth (Phase A9, 2026-06-04).
+    # the UI shows "n/a"; users should pick provider=google instead.
     ("github-copilot", "gemini-3.1-pro-preview"): {"context_window":         0, "max_output":       0},
     # gemini-3.5-flash on Copilot: live /models 1.0.79 reports window 1,000,000
     # / max_prompt 936,000 / long_context 936,000 (endpoint /chat/completions).
@@ -1167,13 +1166,9 @@ _PROBE_VERIFIED_OVERRIDES: Dict[Tuple[str, str], Dict[str, Any]] = {
     # gemini-3.6-flash (new in 1.0.79): same 1M window / 936k prompt tier.
     ("github-copilot", "gemini-3.6-flash"):    {"context_window": 1_000_000, "max_output":  65_536},
 
-    # ─── provider=google (cloudcode-pa OAuth, the "alternative token") ──
-    # Phase A9 unlock 2026-06-04: opus/sonnet/gemini-3.x reachable via the
-    # cloudcode-pa.googleapis.com Code Assist endpoint when we DON'T inject
-    # the Antigravity-internal X-Goog-User-Project header. Vendor-doc context
-    # caps used for context_window; output ceiling is the documented 65,536
-    # for all gemini-3.x families (per haimaker.ai/blog/best-gemini-models-for-openclaw
-    # and Google Code Assist docs).
+    # ─── provider=google (vendor-doc context caps) ─────────────────────────
+    # Vendor-doc context caps used for context_window; output ceiling is the
+    # documented 65,536 for all gemini-3.x families (per Google docs).
     ("google", "gemini-2.5-pro"):              {"context_window": 1_048_576, "max_output":  65_536},
     ("google", "gemini-2.5-flash"):            {"context_window": 1_048_576, "max_output":  65_536},
     ("google", "gemini-3-pro-preview"):        {"context_window": 1_000_000, "max_output":  65_536},
@@ -1205,7 +1200,6 @@ _OVERRIDE_PROVIDER_ALIASES = {
     "google": "google",
     "gemini": "google",
     "google-code-assist": "google",
-    "google-gemini-cli": "google",
     "google-vertex": "google",
     "anthropic": "anthropic",
     "claude": "anthropic",

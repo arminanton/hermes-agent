@@ -889,8 +889,7 @@ class GeminiNativeClient:
             "X-Goog-Api-Client": gemini_cli_x_goog_api_client(),
             "x-activity-request-id": str(uuid.uuid4()),
         }
-        # NOTE (Phase A9 fix, 2026-06-04): see gemini_cloudcode_adapter.py
-        # we do NOT inject the Antigravity-internal X-Goog-User-Project /
+        # NOTE: we do NOT inject the Antigravity-internal X-Goog-User-Project /
         # Ext binary headers. They cause 400 USER_PROJECT_DENIED on external
         # API-key accounts. Upstream main matches this shape.
         headers.update(self._default_headers)
