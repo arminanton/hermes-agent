@@ -59,6 +59,13 @@ CAPI_CHAT_URL = f"{CAPI_BASE_URL}/chat/completions"
 CAPI_RESPONSES_URL = f"{CAPI_BASE_URL}/responses"
 CAPI_MESSAGES_URL = f"{CAPI_BASE_URL}/v1/messages"
 
+# NOTE: the auto-mode control plane (``/models/session``, ``/models/session/intent``)
+# and the discounted inference endpoints are served ONLY on the default
+# ``api.githubcopilot.com`` host. The plan-aware business/enterprise bases
+# (``api.business.githubcopilot.com`` etc. from /copilot_internal/user) return
+# HTTP 421 "Misdirected Request" for the session endpoints, so the auto-router
+# deliberately pins ``CAPI_BASE_URL`` and does NOT route through the resolver.
+
 # Refresh JWT this many seconds before its ``exp`` claim to avoid mid-flight
 # expiry. Matches the 5-minute window observed in extension.js (``oUe`` /
 # ``dne`` cache logic).

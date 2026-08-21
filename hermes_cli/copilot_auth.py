@@ -21,6 +21,7 @@ credential pool and records skipped invalid sources for auditability.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
@@ -31,6 +32,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
 
@@ -906,6 +908,236 @@ def _latest_copilot_api_version() -> str:
 
     _copilot_api_version_memo = (ver, now)
     return ver
+
+
+# ─── Copilot API base URL (plan-aware: individual / business / enterprise) ────
+#
+# The account's provisioned inference host is NOT always api.githubcopilot.com.
+# The official CLI resolves it from GET api.github.com/copilot_internal/user,
+# whose JSON carries:
+#     "copilot_plan": "individual" | "business" | "enterprise"
+#     "endpoints": { "api": "https://api.business.githubcopilot.com", ... }
+# A business account, for example, can return
+# endpoints.api="https://api.business.githubcopilot.com". The CLI sends MCP and
+# telemetry to the *.business.githubcopilot.com hosts. api.githubcopilot.com is
+# a shared front door that still serves a business/enterprise token, but the
+# account-correct base is endpoints.api, and an enterprise account may be
+# provisioned on a dedicated host the generic gateway won't serve. Resolve it
+# once and cache it (keyed by token fingerprint so a credential swap re-resolves).
+_COPILOT_DEFAULT_BASE_URL = "https://api.githubcopilot.com"
+_COPILOT_USER_INFO_URL = "https://api.github.com/copilot_internal/user"
+# Test-only override retained for compatibility. Production resolves the path
+# from the active profile at call time.
+_COPILOT_BASE_URL_CACHE_PATH: Optional[Path] = None
+# (base_url, plan, fetched_at, token_fp, profile_cache_path) — process memo
+_copilot_base_url_memo: Optional[tuple[str, str, float, str, str]] = None
+
+
+def _copilot_base_url_cache_path() -> Path:
+    """Return the active profile's Copilot endpoint cache path."""
+    if _COPILOT_BASE_URL_CACHE_PATH is not None:
+        return _COPILOT_BASE_URL_CACHE_PATH
+    from hermes_constants import get_hermes_home
+
+    return Path(get_hermes_home()) / "cache" / "copilot_base_url.json"
+
+
+def _normalize_copilot_base_url(
+    value: str,
+    *,
+    operator_override: bool,
+) -> str:
+    """Validate and normalize a Copilot inference base URL."""
+    candidate = str(value or "").strip()
+    try:
+        parsed = urlsplit(candidate)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("invalid Copilot API base URL") from exc
+
+    host = (parsed.hostname or "").rstrip(".").lower()
+    if not parsed.scheme or not parsed.netloc or not host:
+        raise ValueError("Copilot API base URL must be absolute")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("Copilot API base URL must not contain user info")
+    if parsed.query or parsed.fragment:
+        raise ValueError("Copilot API base URL must not contain a query or fragment")
+    if any(ch.isspace() for ch in host) or "%" in host:
+        raise ValueError("Copilot API base URL contains an invalid host")
+
+    scheme = parsed.scheme.lower()
+    is_copilot_host = host == "githubcopilot.com" or host.endswith(
+        ".githubcopilot.com"
+    )
+    if operator_override:
+        loopback = host == "localhost"
+        if not loopback:
+            try:
+                loopback = ipaddress.ip_address(host).is_loopback
+            except ValueError:
+                loopback = False
+        if scheme != "https" and not (scheme == "http" and loopback):
+            raise ValueError(
+                "Copilot API override must use HTTPS, except on loopback"
+            )
+    elif scheme != "https" or not is_copilot_host:
+        raise ValueError(
+            "provisioned Copilot endpoint must use HTTPS on githubcopilot.com"
+        )
+
+    netloc = host
+    if ":" in host and not host.startswith("["):
+        netloc = f"[{host}]"
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    path = parsed.path.rstrip("/")
+    return urlunsplit((scheme, netloc, path, "", "")).rstrip("/")
+
+
+def _resolve_copilot_user_info(raw_token: str, *, timeout: float = 10.0) -> Optional[dict]:
+    """Fetch GET /copilot_internal/user and return the parsed JSON (or None)."""
+    if not raw_token:
+        return None
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(_COPILOT_USER_INFO_URL)
+        req.add_header("Authorization", f"token {raw_token}")
+        req.add_header("Editor-Version", f"CopilotCLI/{_latest_copilot_cli_version()}")
+        req.add_header(
+            "Editor-Plugin-Version", f"copilot-cli/{_latest_copilot_cli_version()}"
+        )
+        req.add_header("User-Agent", _copilot_user_agent())
+        req.add_header("Accept", "application/json")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            import gzip
+
+            body = resp.read()
+            if resp.headers.get("Content-Encoding") == "gzip":
+                body = gzip.decompress(body)
+            return json.loads(body.decode("utf-8"))
+    except Exception as exc:
+        logger.debug("copilot_internal/user fetch failed: %s", exc)
+        return None
+
+
+def resolve_copilot_plan_and_base_url(
+    raw_token: Optional[str] = None,
+    *,
+    timeout: float = 10.0,
+) -> tuple[str, str]:
+    """Return ``(base_url, plan)`` for the Copilot account behind *raw_token*.
+
+    ``plan`` is one of ``individual`` / ``business`` / ``enterprise`` / ``""``.
+    ``base_url`` is the account-provisioned inference host from
+    ``/copilot_internal/user.endpoints.api``, falling back to
+    ``api.githubcopilot.com``.
+
+    Resolution order:
+      1. ``HERMES_COPILOT_API_URL`` / ``COPILOT_API_URL`` env override (the
+         runtime itself honors ``COPILOT_API_URL``), plan reported as ``""``.
+      2. In-process memo + on-disk cache (TTL ``_VERSION_CACHE_TTL``), keyed by
+         token fingerprint so a credential swap forces a re-resolve.
+      3. Live ``GET /copilot_internal/user``.
+      4. Fallback ``api.githubcopilot.com`` (plan ``""``).
+    """
+    override = (
+        os.getenv("HERMES_COPILOT_API_URL", "").strip()
+        or os.getenv("COPILOT_API_URL", "").strip()
+        # ``COPILOT_API_BASE_URL`` is the provider registry's declared
+        # base_url_env_var (hermes_cli/auth.py) and the name upstream PR #78378
+        # standardizes on for GitHub Enterprise. Honor it here too so the
+        # plan-aware resolver and the generic provider path agree on one
+        # override name (previously only the provider path read it, so setting
+        # it did not steer this resolver).
+        or os.getenv("COPILOT_API_BASE_URL", "").strip()
+    )
+    if override:
+        return _normalize_copilot_base_url(
+            override,
+            operator_override=True,
+        ), ""
+
+    if raw_token is None:
+        try:
+            resolved = resolve_copilot_token()
+            raw_token = resolved[0] if isinstance(resolved, tuple) else resolved
+        except Exception:
+            raw_token = ""
+    if not raw_token:
+        return _COPILOT_DEFAULT_BASE_URL, ""
+
+    fp = _token_fingerprint(raw_token)
+    now = time.time()
+    cache_path = _copilot_base_url_cache_path()
+    profile_scope = str(cache_path)
+
+    global _copilot_base_url_memo
+    if (
+        _copilot_base_url_memo
+        and _copilot_base_url_memo[3] == fp
+        and _copilot_base_url_memo[4] == profile_scope
+        and now - _copilot_base_url_memo[2] < _VERSION_CACHE_TTL
+    ):
+        return _copilot_base_url_memo[0], _copilot_base_url_memo[1]
+
+    try:
+        if cache_path.is_file():
+            data = json.loads(cache_path.read_text())
+            if (
+                data.get("token_fp") == fp
+                and now - float(data.get("fetched_at") or 0) < _VERSION_CACHE_TTL
+            ):
+                base = _normalize_copilot_base_url(
+                    str(data.get("base_url") or "").strip()
+                    or _COPILOT_DEFAULT_BASE_URL,
+                    operator_override=False,
+                )
+                plan = str(data.get("plan") or "").strip()
+                _copilot_base_url_memo = (
+                    base,
+                    plan,
+                    float(data["fetched_at"]),
+                    fp,
+                    profile_scope,
+                )
+                return base, plan
+    except Exception as exc:
+        logger.debug("copilot base-url cache read failed: %s", exc)
+
+    info = _resolve_copilot_user_info(raw_token, timeout=timeout)
+    base = _COPILOT_DEFAULT_BASE_URL
+    plan = ""
+    if isinstance(info, dict):
+        plan = str(info.get("copilot_plan") or "").strip().lower()
+        endpoints = info.get("endpoints")
+        if isinstance(endpoints, dict):
+            api = str(endpoints.get("api") or "").strip()
+            try:
+                base = _normalize_copilot_base_url(
+                    api,
+                    operator_override=False,
+                )
+            except ValueError:
+                logger.warning("Ignoring invalid provisioned Copilot API endpoint")
+
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(
+            json.dumps(
+                {"base_url": base, "plan": plan, "fetched_at": now, "token_fp": fp}
+            )
+        )
+    except Exception as exc:
+        logger.debug("copilot base-url cache write failed: %s", exc)
+
+    _copilot_base_url_memo = (base, plan, now, fp, profile_scope)
+    return base, plan
+
+
+def resolve_copilot_base_url(raw_token: Optional[str] = None) -> str:
+    """Return just the account-provisioned Copilot inference base URL."""
+    return resolve_copilot_plan_and_base_url(raw_token)[0]
 
 
 def _token_fingerprint(raw_token: str) -> str:

@@ -420,7 +420,26 @@ def _resolve_runtime_from_pool_entry(
             getattr(entry, "runtime_api_key", ""),
             target_model=effective_model or None,
         )
-        base_url = base_url or PROVIDER_REGISTRY["copilot"].inference_base_url
+        # Resolve the account-provisioned inference host (individual →
+        # api.githubcopilot.com, business → api.business.githubcopilot.com,
+        # enterprise → api.enterprise.githubcopilot.com) from
+        # /copilot_internal/user.endpoints.api, honoring COPILOT_API_URL /
+        # HERMES_COPILOT_API_URL overrides. Resolved once at runtime-provider
+        # setup (cached, keyed by token fingerprint) so the base URL is stable
+        # for the whole conversation and prompt caching is preserved. Falls back
+        # to the profile default (api.githubcopilot.com) on any failure.
+        if not base_url:
+            base_url = PROVIDER_REGISTRY["copilot"].inference_base_url
+            try:
+                from hermes_cli.copilot_auth import resolve_copilot_base_url
+
+                resolved_base = resolve_copilot_base_url(
+                    getattr(entry, "runtime_api_key", "") or None
+                )
+                if resolved_base:
+                    base_url = resolved_base
+            except Exception:
+                pass
     elif provider == "azure-foundry":
         # Azure Foundry: read api_mode and base_url from config
         cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
@@ -1955,6 +1974,26 @@ def resolve_runtime_provider(
             api_mode = _copilot_runtime_api_mode(
                 model_cfg, creds.get("api_key", ""), target_model=target_model or None
             )
+            # Resolve the account-provisioned inference host (individual →
+            # api.githubcopilot.com, business → api.business.githubcopilot.com,
+            # enterprise → api.enterprise.githubcopilot.com) from
+            # /copilot_internal/user.endpoints.api, honoring COPILOT_API_URL /
+            # HERMES_COPILOT_API_URL overrides. Only when the user did not pin a
+            # base_url in config.yaml. Resolved once here (cached, keyed by token
+            # fingerprint) so the base URL is stable for the whole conversation
+            # and prompt caching is preserved. Falls back to the profile default
+            # on any failure.
+            if not cfg_base_url:
+                try:
+                    from hermes_cli.copilot_auth import resolve_copilot_base_url
+
+                    resolved_base = resolve_copilot_base_url(
+                        creds.get("api_key") or None
+                    )
+                    if resolved_base:
+                        base_url = resolved_base.rstrip("/")
+                except Exception:
+                    pass
         elif provider == "xai":
             api_mode = "codex_responses"
         else:

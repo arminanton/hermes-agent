@@ -4,6 +4,22 @@ import pytest
 from unittest.mock import patch
 
 
+@pytest.fixture
+def isolated_copilot_base_url_state(tmp_path, monkeypatch):
+    import hermes_cli.copilot_auth as copilot_auth
+
+    monkeypatch.setattr(copilot_auth, "_copilot_base_url_memo", None)
+    monkeypatch.setattr(copilot_auth, "_COPILOT_BASE_URL_CACHE_PATH", None)
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+    for name in (
+        "HERMES_COPILOT_API_URL",
+        "COPILOT_API_URL",
+        "COPILOT_API_BASE_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    return copilot_auth
+
+
 class TestTokenValidation:
     """Token type validation."""
 
@@ -34,6 +50,119 @@ class TestTokenValidation:
         valid, msg = validate_copilot_token("")
         assert valid is False
 
+
+class TestCopilotBaseUrlResolution:
+    def test_cache_is_scoped_to_active_profile(
+        self, isolated_copilot_base_url_state, tmp_path
+    ):
+        copilot_auth = isolated_copilot_base_url_state
+        assert copilot_auth._copilot_base_url_cache_path() == (
+            tmp_path / "cache" / "copilot_base_url.json"
+        )
+
+    def test_process_memo_does_not_cross_profile_scope(
+        self, isolated_copilot_base_url_state, tmp_path, monkeypatch
+    ):
+        copilot_auth = isolated_copilot_base_url_state
+        active_home = tmp_path / "profile-a"
+        calls = []
+        monkeypatch.setattr(
+            "hermes_constants.get_hermes_home", lambda: active_home
+        )
+        monkeypatch.setattr(
+            copilot_auth,
+            "_resolve_copilot_user_info",
+            lambda *args, **kwargs: calls.append(active_home) or {
+                "endpoints": {"api": "https://api.githubcopilot.com"}
+            },
+        )
+
+        copilot_auth.resolve_copilot_base_url("same-token")
+        active_home = tmp_path / "profile-b"
+        copilot_auth.resolve_copilot_base_url("same-token")
+
+        assert calls == [tmp_path / "profile-a", tmp_path / "profile-b"]
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "https://api.githubcopilot.com",
+            "https://api.business.githubcopilot.com/",
+            "https://api.enterprise.githubcopilot.com/inference",
+        ],
+    )
+    def test_accepts_strict_provisioned_endpoints(
+        self, isolated_copilot_base_url_state, monkeypatch, endpoint
+    ):
+        copilot_auth = isolated_copilot_base_url_state
+        monkeypatch.setattr(
+            copilot_auth,
+            "_resolve_copilot_user_info",
+            lambda *args, **kwargs: {
+                "copilot_plan": "business",
+                "endpoints": {"api": endpoint},
+            },
+        )
+        base, plan = copilot_auth.resolve_copilot_plan_and_base_url("token")
+        assert base == endpoint.rstrip("/")
+        assert plan == "business"
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "http://api.githubcopilot.com",
+            "https://githubcopilot.com.evil.example",
+            "https://user@api.githubcopilot.com",
+            "https://api.githubcopilot.com#fragment",
+            "file:///tmp/copilot",
+        ],
+    )
+    def test_rejects_invalid_provisioned_endpoints(
+        self, isolated_copilot_base_url_state, monkeypatch, endpoint
+    ):
+        copilot_auth = isolated_copilot_base_url_state
+        monkeypatch.setattr(
+            copilot_auth,
+            "_resolve_copilot_user_info",
+            lambda *args, **kwargs: {
+                "copilot_plan": "business",
+                "endpoints": {"api": endpoint},
+            },
+        )
+        base, _ = copilot_auth.resolve_copilot_plan_and_base_url("token")
+        assert base == "https://api.githubcopilot.com"
+
+    @pytest.mark.parametrize(
+        ("override", "expected"),
+        [
+            ("https://copilot.corp.example/api/", "https://copilot.corp.example/api"),
+            ("http://localhost:8642/v1", "http://localhost:8642/v1"),
+            ("http://127.0.0.1:8642/v1", "http://127.0.0.1:8642/v1"),
+        ],
+    )
+    def test_operator_override_allows_enterprise_https_and_loopback_http(
+        self, isolated_copilot_base_url_state, monkeypatch, override, expected
+    ):
+        copilot_auth = isolated_copilot_base_url_state
+        monkeypatch.setenv("HERMES_COPILOT_API_URL", override)
+        assert copilot_auth.resolve_copilot_base_url("token") == expected
+
+    @pytest.mark.parametrize(
+        "override",
+        [
+            "http://copilot.corp.example",
+            "http://localhost.evil.example",
+            "https://user:pass@copilot.corp.example",
+            "https://copilot.corp.example?endpoint=other",
+        ],
+    )
+    def test_operator_override_rejects_unsafe_urls(
+        self, isolated_copilot_base_url_state, monkeypatch, override
+    ):
+        copilot_auth = isolated_copilot_base_url_state
+        monkeypatch.setenv("HERMES_COPILOT_API_URL", override)
+        with pytest.raises(ValueError):
+            copilot_auth.resolve_copilot_base_url("token")
 
 
 class TestIdentityAudit:

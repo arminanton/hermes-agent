@@ -2047,6 +2047,21 @@ def _seed_from_env(provider: str, entries: List[PooledCredential]) -> Tuple[bool
             base_url = _resolve_kimi_base_url(token, pconfig.inference_base_url, env_url)
         elif provider == "zai":
             base_url = _resolve_zai_base_url(token, pconfig.inference_base_url, env_url)
+        elif provider == "copilot" and not env_url:
+            # Plan-aware inference host: business/enterprise accounts are served
+            # on api.business.githubcopilot.com / api.enterprise.githubcopilot.com
+            # (resolved from /copilot_internal/user.endpoints.api), not the shared
+            # api.githubcopilot.com front door. Only when the user did not pin a
+            # base_url via env. Cached (keyed by token fingerprint); falls back to
+            # the profile default on any failure.
+            try:
+                from hermes_cli.copilot_auth import resolve_copilot_base_url
+
+                resolved_base = resolve_copilot_base_url(token or None)
+                if resolved_base:
+                    base_url = resolved_base.rstrip("/")
+            except Exception:
+                pass
         changed |= _upsert_entry(
             entries,
             provider,
