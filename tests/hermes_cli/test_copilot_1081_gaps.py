@@ -15,6 +15,58 @@ from unittest.mock import patch
 import hermes_cli.models as M
 
 
+# ── GAP-1: /responses-only routing ──────────────────────────────────────────
+
+class TestResponsesOnlyRouting:
+    def test_grok_routes_to_responses_offline(self):
+        # No catalog (cold path): grok-4.5/4.6 must NOT fall through to
+        # chat_completions (the Copilot proxy 400s there).
+        for model in ("grok-4.5", "grok-4.6"):
+            assert M.copilot_model_api_mode(model, catalog=None) == "codex_responses"
+
+    def test_mai_code_routes_to_responses_offline(self):
+        for model in ("mai-code-1.1-flash", "mai-code-1-flash-picker"):
+            assert M.copilot_model_api_mode(model, catalog=None) == "codex_responses"
+
+    def test_catalog_responses_only_routes_to_responses(self):
+        # A catalog entry whose supported_endpoints is /responses-only (no
+        # /chat/completions) routes to codex_responses regardless of name.
+        catalog = [
+            {"id": "some-new-model", "supported_endpoints": ["/responses", "ws:/responses"]},
+        ]
+        assert (
+            M.copilot_model_api_mode("some-new-model", catalog=catalog)
+            == "codex_responses"
+        )
+
+    def test_catalog_dual_endpoint_still_chat_completions(self):
+        # A model that DOES list /chat/completions is not forced onto responses
+        # by the new branch (gemini-style).
+        catalog = [
+            {"id": "gemini-x-flash", "supported_endpoints": ["/chat/completions"]},
+        ]
+        assert (
+            M.copilot_model_api_mode("gemini-x-flash", catalog=catalog)
+            == "chat_completions"
+        )
+
+    def test_claude_still_anthropic_messages(self):
+        assert M.copilot_model_api_mode("claude-opus-5", catalog=None) == "anthropic_messages"
+
+    def test_gpt5_still_codex_responses(self):
+        assert M.copilot_model_api_mode("gpt-5.6-sol", catalog=None) == "codex_responses"
+
+    def test_helper_recognizes_responses_only_prefixes(self):
+        assert M._is_copilot_responses_only_model("grok-4.5")
+        assert M._is_copilot_responses_only_model("grok-4.6")
+        assert M._is_copilot_responses_only_model("mai-code-1.1-flash")
+        assert M._is_copilot_responses_only_model("x-ai/grok-4.6")  # aggregator prefix
+        # Non-responses-only models are not matched.
+        assert not M._is_copilot_responses_only_model("gemini-3.7-flash")
+        assert not M._is_copilot_responses_only_model("claude-opus-5")
+        assert not M._is_copilot_responses_only_model("grok-3")
+
+
 # ── GAP-7: plan-aware host recognition ──────────────────────────────────────
 
 class TestCopilotHostRecognition:

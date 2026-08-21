@@ -3986,6 +3986,39 @@ def _should_use_copilot_responses_api(model_id: str) -> bool:
     return major >= 5 and not model_id.startswith("gpt-5-mini")
 
 
+# Non-GPT Copilot models that are served ONLY on the Responses API
+# (``supported_endpoints == ["/responses"]`` in the live catalog, no
+# ``/chat/completions``).  These do NOT match the ``gpt-5`` prefix in
+# ``_should_use_copilot_responses_api`` above, so without this guard they fall
+# through to the ``chat_completions`` default and the Copilot proxy rejects them
+# with HTTP 400 ``unsupported_api_for_model`` ("not accessible via the
+# /chat/completions endpoint").  Live-verified 2026-08-20 against
+# api.githubcopilot.com (account e126380_magh):
+#   grok-4.5 / grok-4.6      -> /responses only (400 on /chat/completions)
+#   mai-code-1-flash-picker  -> /responses only
+#   mai-code-1.1-flash       -> /responses only
+# The live catalog's ``supported_endpoints`` is authoritative; this offline
+# prefix guard only fires when the catalog is unavailable (cold/empty/down), so
+# grok-4.5 (already shipped) and grok-4.6 / mai-code (new) route correctly even
+# without a catalog probe.  Grok on xAI-direct is handled separately (that path
+# is chat/completions-capable); this is the Copilot deployment only.
+_COPILOT_RESPONSES_ONLY_PREFIXES = (
+    "grok-4.5",
+    "grok-4.6",
+    "mai-code",
+)
+
+
+def _is_copilot_responses_only_model(model_id: str) -> bool:
+    """Return True for Copilot models served only on ``/responses`` (offline guard)."""
+    raw = (model_id or "").strip().lower()
+    if not raw:
+        return False
+    if "/" in raw:
+        raw = raw.rsplit("/", 1)[-1]
+    return any(raw.startswith(prefix) for prefix in _COPILOT_RESPONSES_ONLY_PREFIXES)
+
+
 def copilot_model_api_mode(
     model_id: Optional[str],
     *,
@@ -4009,6 +4042,16 @@ def copilot_model_api_mode(
 
     # Primary: model ID pattern (matches opencode's shouldUseCopilotResponsesApi)
     if _should_use_copilot_responses_api(normalized):
+        return "codex_responses"
+
+    # Non-GPT Responses-API-only models (grok-4.5/4.6, mai-code): the live
+    # catalog lists these with ``supported_endpoints == ["/responses"]`` and no
+    # ``/chat/completions``.  They don't match the ``gpt-5`` prefix above, so
+    # this offline prefix guard keeps them on the Responses API even when the
+    # catalog probe is cold; the catalog branch below is the authoritative path
+    # when a probe succeeds.  Without this, they route to chat_completions and
+    # the Copilot proxy 400s with ``unsupported_api_for_model``.
+    if _is_copilot_responses_only_model(normalized):
         return "codex_responses"
 
     # Claude models on Copilot ALWAYS use /v1/messages, regardless of whether
@@ -4035,6 +4078,14 @@ def copilot_model_api_mode(
             # For non-GPT-5 models, check if they only support messages API
             if "/v1/messages" in supported_endpoints and "/chat/completions" not in supported_endpoints:
                 return "anthropic_messages"
+            # Responses-API-only models (grok-4.5/4.6, mai-code, and any future
+            # slug the catalog marks the same way): serve on /responses.  Ignore
+            # the ``ws:/responses`` WebSocket variant when testing for a
+            # /chat/completions alternative — the presence of /responses without
+            # /chat/completions is what routes here.  Live-verified: grok-4.6
+            # 400s on /chat/completions, 200 on /responses.
+            if "/responses" in supported_endpoints and "/chat/completions" not in supported_endpoints:
+                return "codex_responses"
 
     return "chat_completions"
 

@@ -131,10 +131,20 @@ def endpoint_for_model(model: str) -> str:
     """Return the CAPI URL the chosen model must be POSTed to.
 
     The CAPI rejects cross-family requests (e.g. ``model: gpt-5.3-codex`` on
-    ``/chat/completions`` returns ``unsupported_api_for_model``).
+    ``/chat/completions`` returns ``unsupported_api_for_model``). grok-4.5 /
+    grok-4.6 and mai-code are ``/responses``-only too (live-verified: 400 on
+    /chat/completions). All served on the default ``api.githubcopilot.com``.
     """
     m = model.lower()
-    if "codex" in m or m.startswith("gpt-5.") or m.startswith("o1") or m.startswith("o3"):
+    if (
+        "codex" in m
+        or m.startswith("gpt-5.")
+        or m.startswith("o1")
+        or m.startswith("o3")
+        or m.startswith("grok-4.5")
+        or m.startswith("grok-4.6")
+        or m.startswith("mai-code")
+    ):
         return CAPI_RESPONSES_URL
     if "claude" in m:
         return CAPI_MESSAGES_URL
