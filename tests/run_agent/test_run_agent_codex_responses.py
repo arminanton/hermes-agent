@@ -15,10 +15,27 @@ import run_agent
 @pytest.fixture(autouse=True)
 def _no_codex_backoff(monkeypatch):
     """Short-circuit retry backoff so Codex retry tests don't block on real
-    wall-clock waits (5s jittered_backoff base delay + tight time.sleep loop)."""
+    wall-clock waits (5s jittered_backoff base delay + tight time.sleep loop).
+
+    Also resets the process-global auxiliary runtime-main state on teardown.
+    Constructing an ``AIAgent`` records the live provider/model into
+    ``agent.auxiliary_client._RUNTIME_MAIN_*`` (via ``set_runtime_main``) so
+    the aux auto-detect chain can reflect CLI/gateway overrides. Those globals
+    outlive the test unless cleared, which leaks this file's last-built agent
+    (e.g. ``custom`` / ``gpt-5-codex``) into unrelated suites — it made
+    ``test_auxiliary_client.py::TestGetTextAuxiliaryClient`` see a phantom main
+    provider and fail only in mixed batches. Clearing here keeps every test in
+    this file self-contained.
+    """
     import time as _time
     monkeypatch.setattr(run_agent, "jittered_backoff", lambda *a, **k: 0.0)
     monkeypatch.setattr(_time, "sleep", lambda *_a, **_k: None)
+    yield
+    try:
+        from agent.auxiliary_client import clear_runtime_main
+        clear_runtime_main()
+    except Exception:
+        pass
 
 
 def _patch_agent_bootstrap(monkeypatch):
