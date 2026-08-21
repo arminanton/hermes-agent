@@ -123,3 +123,16 @@ class TestRequestedEffort:
     def test_none_when_absent(self):
         assert requested_effort(None) is None
         assert requested_effort({}) is None
+
+
+class TestCopilotConstantsAlias:
+    """The Copilot offline constants in hermes_cli.models must stay in sync with
+    the canonical module (they are aliases of it)."""
+
+    def test_models_constants_match_canonical(self):
+        from hermes_cli import models as M
+
+        assert M.COPILOT_REASONING_EFFORTS_GPT56 == list(CODEX_GPT56_EFFORTS)
+        assert M.COPILOT_REASONING_EFFORTS_GPT5 == list(CODEX_LEGACY_EFFORTS)
+        assert M.COPILOT_REASONING_EFFORTS_GROK_46 == list(XAI_GROK46_EFFORTS)
+        assert M.COPILOT_REASONING_EFFORTS_GROK == list(XAI_LEGACY_EFFORTS)

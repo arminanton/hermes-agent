@@ -53,14 +53,31 @@ def _is_copilot_host(base_url: Optional[str]) -> bool:
 # copilot_default_headers() below, so the identity is identical everywhere.
 _COPILOT_INTEGRATION_ID = "copilot-developer-cli"
 _COPILOT_CLI_VERSION = "1.0.63"
-COPILOT_REASONING_EFFORTS_GPT5 = ["minimal", "low", "medium", "high", "xhigh"]
-# GPT-5.6 (Sol/Terra/Luna) additionally expose "max" as their top effort tier
-# per the live Copilot /models catalog (capabilities.supports.reasoning_effort =
-# [none, low, medium, high, xhigh, max]). Older gpt-5.5/gpt-5.4 top out at
-# "xhigh", so "max" must NOT go in the shared GPT5 list above (it would make an
-# offline gpt-5.5 request send an unsupported effort). Consulted only on the
-# offline fallback path; when the live catalog is reachable it is authoritative.
-COPILOT_REASONING_EFFORTS_GPT56 = ["none", "low", "medium", "high", "xhigh", "max"]
+# Offline reasoning-effort fallbacks (consulted ONLY when the live Copilot
+# /models catalog is unreachable; when reachable, capabilities.supports.
+# reasoning_effort is authoritative). These are now thin aliases of the
+# canonical vocabulary in agent/reasoning_effort.py (the single source of truth
+# ported from upstream f7d90c9410) so the per-vendor effort sets can't drift
+# apart across call sites. Live-verified 2026-08-20 against api.githubcopilot.com:
+#   gpt-5.4/5.5 reject "minimal" AND "max" (floor "none", top "xhigh")
+#   gpt-5.6 (Sol/Terra/Luna) additionally expose "max"
+#   grok-4.5 low/medium/high; grok-4.6 adds "xhigh"
+try:  # pragma: no cover - import guard for degraded partial-tree loads
+    from agent.reasoning_effort import (
+        CODEX_GPT56_EFFORTS as _CODEX_GPT56,
+        CODEX_LEGACY_EFFORTS as _CODEX_LEGACY,
+        XAI_GROK46_EFFORTS as _GROK46,
+        XAI_LEGACY_EFFORTS as _GROK_LEGACY,
+    )
+    COPILOT_REASONING_EFFORTS_GPT5 = list(_CODEX_LEGACY)
+    COPILOT_REASONING_EFFORTS_GPT56 = list(_CODEX_GPT56)
+    COPILOT_REASONING_EFFORTS_GROK = list(_GROK_LEGACY)
+    COPILOT_REASONING_EFFORTS_GROK_46 = list(_GROK46)
+except Exception:  # canonical module unavailable — inline the same data
+    COPILOT_REASONING_EFFORTS_GPT5 = ["none", "low", "medium", "high", "xhigh"]
+    COPILOT_REASONING_EFFORTS_GPT56 = ["none", "low", "medium", "high", "xhigh", "max"]
+    COPILOT_REASONING_EFFORTS_GROK = ["low", "medium", "high"]
+    COPILOT_REASONING_EFFORTS_GROK_46 = ["low", "medium", "high", "xhigh"]
 COPILOT_REASONING_EFFORTS_O_SERIES = ["low", "medium", "high"]
 
 # Account-usable Copilot models the live /models catalog OMITS (hidden/preview
@@ -3968,6 +3985,13 @@ def _github_reasoning_efforts_for_model_id(model_id: str) -> list[str]:
         return list(COPILOT_REASONING_EFFORTS_GPT56)
     if normalized.startswith("gpt-5"):
         return list(COPILOT_REASONING_EFFORTS_GPT5)
+    # Grok on Copilot supports a reasoning-effort dial on the /responses route
+    # (grok-4.6 adds "xhigh" over grok-4.5's low/medium/high). Offline fallback
+    # only; the live catalog's reasoning_effort list is authoritative.
+    if normalized.startswith("grok-4.6"):
+        return list(COPILOT_REASONING_EFFORTS_GROK_46)
+    if normalized.startswith("grok-4.5"):
+        return list(COPILOT_REASONING_EFFORTS_GROK)
     return []
 
 

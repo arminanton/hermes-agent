@@ -67,6 +67,38 @@ class TestResponsesOnlyRouting:
         assert not M._is_copilot_responses_only_model("grok-3")
 
 
+# ── GAP-3: offline effort floor ─────────────────────────────────────────────
+
+class TestOfflineEffortFloor:
+    def test_gpt5_floor_is_none_not_minimal(self):
+        # gpt-5.4 / gpt-5.5 reject "minimal" (HTTP 400); the offline list must
+        # lead with "none" (the true floor) so a catalog-cold default is valid.
+        for model in ("gpt-5.4", "gpt-5.5"):
+            efforts = M._github_reasoning_efforts_for_model_id(model)
+            assert efforts, f"{model} should have offline efforts"
+            assert efforts[0] == "none"
+            assert "minimal" not in efforts
+
+    def test_gpt56_has_max(self):
+        efforts = M._github_reasoning_efforts_for_model_id("gpt-5.6-sol")
+        assert efforts[0] == "none"
+        assert "max" in efforts
+
+    def test_grok_offline_efforts(self):
+        # grok-4.5: low/medium/high; grok-4.6 additionally xhigh.
+        e45 = M._github_reasoning_efforts_for_model_id("grok-4.5")
+        e46 = M._github_reasoning_efforts_for_model_id("grok-4.6")
+        assert e45 == ["low", "medium", "high"]
+        assert "xhigh" in e46
+        assert e46[0] == "low"  # grok has no "none"/"minimal" floor
+
+    def test_shared_gpt5_list_has_no_minimal(self):
+        # Invariant: the shared offline GPT5 effort list never contains the
+        # 400-triggering "minimal".
+        assert "minimal" not in M.COPILOT_REASONING_EFFORTS_GPT5
+        assert "minimal" not in M.COPILOT_REASONING_EFFORTS_GPT56
+
+
 # ── GAP-7: plan-aware host recognition ──────────────────────────────────────
 
 class TestCopilotHostRecognition:
