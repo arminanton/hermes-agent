@@ -236,6 +236,13 @@ DEFAULT_CONTEXT_LENGTHS = {
     # copilot/codex input-budget overrides (see get_copilot_model_context and
     # _resolve_codex_oauth_context_length, which intentionally report the safe
     # max_prompt_tokens input budget instead).
+    # GPT-5.6 (Sol/Terra/Luna): 1.05M vendor window, Copilot serves a 922k
+    # long_context input budget (live-verified 2026-08-20). Must precede the
+    # generic "gpt-5" (400k) so the longest-substring fallback doesn't
+    # under-report. The real inference path uses get_copilot_model_context
+    # (returns the 922k input budget); this vendor-window value is the offline /
+    # non-copilot last resort.
+    "gpt-5.6": 1050000,                # GPT-5.6 Sol/Terra/Luna (1.05M window)
     "gpt-5.5": 1050000,               # OpenAI vendor total window (1.05M)
     "gpt-5.4-nano": 400000,           # 400k window
     "gpt-5.4-mini": 400000,           # 400k window
@@ -331,6 +338,8 @@ DEFAULT_CONTEXT_LENGTHS = {
     # wall and 400. Display 628k is handled separately by
     # get_copilot_display_context. Must sort before the generic "grok-4" (256K)
     # catch-all so the substring fallback doesn't under-report.
+    "grok-4.6": 500000,         # grok-4.6 on Copilot: same 500k long_context
+                                # input cap as grok-4.5 (live-verified 2026-08-20)
     "grok-4.5": 500000,
     "grok-4": 256000,           # grok-4, grok-4-0709
     "grok-3": 131072,           # grok-3, grok-3-mini, grok-3-fast, grok-3-mini-fast

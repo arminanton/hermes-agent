@@ -3513,6 +3513,7 @@ _copilot_display_context_cache_time: float = 0.0
 #   accounting number and the meter would wrongly read /500k.
 _COPILOT_DISPLAY_CONTEXT_SUPPLEMENT: dict[str, int] = {
     "grok-4.5": 628000,
+    "grok-4.6": 628000,  # 500k input + 128k output display window, like grok-4.5
 }
 
 

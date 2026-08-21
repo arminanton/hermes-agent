@@ -137,6 +137,7 @@ class TestDefaultContextLengths:
                 ("grok-4.20-0309-reasoning", 2000000),
                 ("grok-4.20-0309-non-reasoning", 2000000),
                 ("grok-4.20-multi-agent-0309", 2000000),
+                ("grok-4.6", 500000),
                 ("grok-4-fast-reasoning", 2000000),
                 ("grok-4-fast-non-reasoning", 2000000),
                 ("grok-4", 256000),
@@ -157,6 +158,12 @@ class TestDefaultContextLengths:
                 assert actual == expected_ctx, (
                     f"{model_id}: expected {expected_ctx}, got {actual}"
                 )
+
+    def test_gpt56_resolver_uses_long_context_fallback(self):
+        with patch("agent.model_metadata.fetch_model_metadata", return_value={}), \
+             patch("agent.model_metadata.fetch_endpoint_model_metadata", return_value={}), \
+             patch("agent.model_metadata.get_cached_context_length", return_value=None):
+            assert get_model_context_length("gpt-5.6-sol") == 1_050_000
 
     def test_xai_oauth_grok_build_uses_xai_models_dev_context(self):
         """xAI OAuth should share the xAI provider metadata path.
@@ -763,6 +770,22 @@ class TestNousPortalContextResolution:
 # =========================================================================
 
 class TestGetModelContextLength:
+    @patch("agent.model_metadata.fetch_model_metadata")
+    def test_gpt56_offline_resolver_uses_specific_vendor_window(self, mock_fetch):
+        mock_fetch.return_value = {}
+        specific = get_model_context_length("openai/gpt-5.6-sol")
+        generic = get_model_context_length("openai/gpt-5")
+        assert specific == 1_050_000
+        assert specific > generic
+
+    @patch("agent.model_metadata.fetch_model_metadata")
+    def test_grok46_offline_resolver_uses_specific_input_budget(self, mock_fetch):
+        mock_fetch.return_value = {}
+        specific = get_model_context_length("x-ai/grok-4.6")
+        generic = get_model_context_length("x-ai/grok-4")
+        assert specific == 500_000
+        assert specific > generic
+
     @patch("agent.model_metadata.fetch_model_metadata")
     def test_known_model_from_api(self, mock_fetch):
         mock_fetch.return_value = {
