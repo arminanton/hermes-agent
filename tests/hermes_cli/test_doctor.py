@@ -1328,11 +1328,13 @@ class TestDoctorCodexCliHintPlacement:
 
     def test_hint_never_attaches_to_minimax_row(self, monkeypatch, tmp_path):
         out = self._run(monkeypatch, tmp_path, codex_logged_in=False, codex_cli_present=False)
-        lines = [line for line in out.splitlines() if line.strip()]
-        codex_idx = next(i for i, line in enumerate(lines) if "OpenAI Codex auth" in line)
-        hint_idx = next(i for i, line in enumerate(lines) if self._hint_line() in line)
-        minimax_idx = next(i for i, line in enumerate(lines) if "MiniMax OAuth" in line)
-        assert codex_idx < hint_idx < minimax_idx
+        # The hint belongs to the Codex auth row directly above it (#27975):
+        # it must appear immediately after "OpenAI Codex auth", not attach to
+        # whatever provider row happens to print next.
+        lines = [l for l in out.splitlines() if l.strip()]
+        codex_idx = next(i for i, l in enumerate(lines) if "OpenAI Codex auth" in l)
+        hint_idx = next(i for i, l in enumerate(lines) if self._hint_line() in l)
+        assert hint_idx == codex_idx + 1
 
 
 class TestDoctorStaleMaxIterationsDrift:
