@@ -3569,6 +3569,29 @@ DEFAULT_CONFIG = {
     "paste_collapse_threshold_fallback": 5,
     "paste_collapse_char_threshold": 2000,
 
+    # Oversized-paste ingestion offload (ALL input paths, not just the TUI).
+    #
+    # When a large paste enters the conversation through a non-interactive
+    # path (piped stdin, `-p`, the gateway, the HTTP API), persist the WHOLE
+    # paste to one file under $HERMES_HOME/pastes/ and replace it in the
+    # message with a single resolvable reference (an absolute path the
+    # read_file tool can open), BEFORE any downstream lossy `[... N chars ...]`
+    # elision. This closes the "content came broken with [...] references I
+    # can't retrieve" gap. The interactive TUI already collapses bracketed
+    # pastes; this makes the behaviour uniform.
+    "oversized_input": {
+        # Master switch. On by default: the reference is non-lossy (the file
+        # holds the complete bytes) and only triggers on genuinely large
+        # pastes, so the common case is handled well. Set False to fully
+        # restore the historical inline behaviour.
+        "enabled": True,
+        # A string user message at or above this many characters is offloaded.
+        # High enough to clear ordinary prose/code turns; low enough to catch
+        # the "dumped a whole log / minified JSON / giant file" blobs that
+        # produce the broken `[...]` references. Set 0 to disable.
+        "char_threshold": 50000,
+    },
+
     # Computer Use (cua-driver) toolset settings.
     "computer_use": {
         # cua-driver ships with anonymous usage telemetry (PostHog) ENABLED

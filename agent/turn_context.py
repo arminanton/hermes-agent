@@ -571,6 +571,35 @@ def build_turn_context(
     if isinstance(persist_user_message, str):
         persist_user_message = sanitize_surrogates(persist_user_message)
 
+    # Oversized-paste offload (ingestion chokepoint). This is the single point
+    # every non-interactive input path (piped stdin, ``-p``, gateway, HTTP API)
+    # funnels through before the turn's user message is built. When a user
+    # pastes a large blob, persist the WHOLE paste to one file under
+    # $HERMES_HOME/pastes/ and replace it in-place with a single resolvable
+    # reference (an absolute path read_file can open) BEFORE any downstream
+    # lossy ``[... N chars ...]`` elision can happen. The interactive TUI
+    # already collapses bracketed pastes (cli.py handle_paste); this closes the
+    # same gap for every other path. Fail-soft: on any error the original
+    # message flows through unchanged.
+    try:
+        from agent.oversized_paste import maybe_offload_oversized_message
+
+        user_message, persist_user_message, _spilled = (
+            maybe_offload_oversized_message(
+                agent, user_message, persist_user_message
+            )
+        )
+        if _spilled is not None:
+            try:
+                agent._emit_status(
+                    f"\U0001f4ce Large paste saved to {_spilled}; passed as a "
+                    f"file reference the agent can read on demand."
+                )
+            except Exception:
+                pass
+    except Exception:
+        logger.debug("oversized-paste offload skipped", exc_info=True)
+
     # Store stream callback for _interruptible_api_call to pick up.
     agent._stream_callback = stream_callback
     agent._persist_user_message_idx = None
