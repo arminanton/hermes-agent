@@ -2031,6 +2031,109 @@ class TestWebServerEndpoints:
         # Total must not be inflated by the duplicate physical DB.
         assert data["total"] == 1
 
+    def test_profiles_sessions_dedupes_template_derived_share(self):
+        """A profile-template whose state.db is shared by derived profiles must
+        contribute its rows exactly once, tagged to the template (scanned first
+        as the real-DB owner), not to each derivative.
+
+        ``create_profile`` clones with ``symlinks=True``, so a template whose
+        derivatives link back to one physical DB is the same shape as the
+        gsd-* fleet: three profile dirs (template + 2 derived) reach one file.
+        The aggregator must collapse all three to a single physical DB.
+        """
+        import pytest
+
+        from hermes_state import SessionDB
+        from hermes_cli import profiles as profiles_mod
+
+        # The template ("base") profile owns the REAL state.db with one row.
+        base_home = profiles_mod.get_profile_dir("tmpl-base")
+        base_home.mkdir(parents=True, exist_ok=True)
+        base_db_path = base_home / "state.db"
+        base_db = SessionDB(db_path=base_db_path)
+        try:
+            base_db.create_session(session_id="tmpl-row", source="cli")
+            base_db.append_message(session_id="tmpl-row", role="user", content="hi")
+        finally:
+            base_db.close()
+
+        # Two derived profiles that symlink their state.db back to the base's
+        # DB (what a symlink-preserving clone of a template produces).
+        derived_homes = []
+        for derived in ("tmpl-child-a", "tmpl-child-b"):
+            home = profiles_mod.get_profile_dir(derived)
+            home.mkdir(parents=True, exist_ok=True)
+            link = home / "state.db"
+            if link.exists() or link.is_symlink():
+                link.unlink()
+            try:
+                link.symlink_to(base_db_path)
+            except (OSError, NotImplementedError) as exc:
+                pytest.skip(f"symlinks unavailable in test environment: {exc}")
+            derived_homes.append(home)
+
+        resp = self.client.get(
+            "/api/profiles/sessions?profile=all&limit=20&min_messages=0"
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+
+        # Template row appears exactly once across template + 2 derivatives.
+        matched = [s for s in data["sessions"] if s["id"] == "tmpl-row"]
+        assert len(matched) == 1, (
+            f"template row scanned {len(matched)} times across derivatives"
+        )
+        # And it is owned by the template (the real-DB owner), because real DBs
+        # are scanned before symlink aliases.
+        assert matched[0]["profile"] == "tmpl-base"
+        # No derived profile double-counted into the aggregate total.
+        assert data["total"] == 1
+
+    def test_db_identity_key_windows_and_posix_semantics(self):
+        """``_db_identity_key`` collapses aliases to one physical DB on POSIX
+        (inode identity) and degrades to a case-normalized real path on Windows
+        / inode-less hosts without crashing.
+
+        This guards the Windows path directly (POSIX CI can't exercise
+        ``os.name == 'nt'`` at runtime) by patching the module flag, which is
+        the branch that turns off inode keys where ``st_ino`` is unreliable.
+        """
+        import pytest
+
+        from hermes_cli.web_routers import profiles as web_profiles
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            real_db = root / "real" / "state.db"
+            real_db.parent.mkdir(parents=True)
+            real_db.write_bytes(b"sqlite")
+
+            alias_dir = root / "alias"
+            alias_dir.mkdir()
+            alias_db = alias_dir / "state.db"
+            try:
+                alias_db.symlink_to(real_db)
+            except (OSError, NotImplementedError) as exc:
+                pytest.skip(f"symlinks unavailable: {exc}")
+
+            # POSIX branch: the alias and the real file share one identity.
+            key_real = web_profiles._db_identity_key(real_db)
+            key_alias = web_profiles._db_identity_key(alias_db)
+            assert key_real == key_alias
+
+            # Windows branch: force the nt guard on. Identity degrades to the
+            # normalized real path; the alias still resolves to the same
+            # physical file, so the two keys still match (dedupe still works),
+            # and neither call raises.
+            with patch.object(web_profiles, "_IS_WINDOWS", True):
+                wkey_real = web_profiles._db_identity_key(real_db)
+                wkey_alias = web_profiles._db_identity_key(alias_db)
+            assert isinstance(wkey_real, str)
+            assert wkey_real == wkey_alias
+            assert wkey_real == os.path.normcase(os.path.realpath(str(real_db)))
+
     def test_get_session_messages_rejects_negative_limit(self):
         """limit=-1 previously bypassed the documented 500-row clamp because
         min(-1, 500) == -1, which SQLite treats as 'no limit'."""
