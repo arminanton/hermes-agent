@@ -1176,6 +1176,7 @@ def _build_child_system_prompt(
     *,
     workspace_path: Optional[str] = None,
     role: str = "leaf",
+    persona: str = "",
     max_spawn_depth: int = 2,
     child_depth: int = 1,
 ) -> str:
@@ -1186,12 +1187,38 @@ def _build_child_system_prompt(
     inspiration/openclaw/src/agents/subagent-system-prompt.ts:63-95).
     The depth note is literal truth (grounded in the passed config) so
     the LLM doesn't confabulate nesting capabilities that don't exist.
+
+    When ``persona`` is a non-empty string, its body is prepended to the
+    default prompt with an explicit "AUTHORITATIVE PERSONA, follow these
+    rules over any default subagent guidance" delimiter. persona is any
+    authoritative role for a subagent (code-reviewer, skeptic,
+    domain-expert, ...), not tied to any one caller; it is the cleaner
+    replacement for stuffing a role prompt into ``context``, so the
+    persona text rides on the child's system prompt where it belongs,
+    ahead of the delegated goal.
     """
-    parts = [
-        "You are a focused subagent working on a specific delegated task.",
-        "",
-        f"YOUR TASK:\n{goal}",
-    ]
+    parts: List[str] = []
+    if persona and persona.strip():
+        parts.extend(
+            [
+                "=== AUTHORITATIVE PERSONA ===",
+                "Follow the persona rules below over any default subagent",
+                "guidance that appears later in this prompt. The persona's",
+                "output format, refusal rules, and tool-use constraints are",
+                "non-negotiable for this task.",
+                "",
+                persona.strip(),
+                "=== END PERSONA ===",
+                "",
+            ]
+        )
+    parts.extend(
+        [
+            "You are a focused subagent working on a specific delegated task.",
+            "",
+            f"YOUR TASK:\n{goal}",
+        ]
+    )
     if context and context.strip():
         parts.append(f"\nCONTEXT:\n{context}")
     if workspace_path and str(workspace_path).strip():
@@ -1626,6 +1653,12 @@ def _build_child_agent(
     # 'leaf' (default) cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
     role: str = "leaf",
+    # Persona system-prompt prepend. persona is any authoritative role for
+    # a subagent (code-reviewer, skeptic, domain-expert, ...). When set, the
+    # body is hoisted to the top of the child's system prompt with an
+    # explicit AUTHORITATIVE PERSONA delimiter. Default empty preserves
+    # today's behavior exactly.
+    persona: str = "",
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -1733,6 +1766,7 @@ def _build_child_agent(
         context,
         workspace_path=workspace_hint,
         role=effective_role,
+        persona=persona,
         max_spawn_depth=max_spawn,
         child_depth=child_depth,
     )
@@ -3628,6 +3662,7 @@ def delegate_task(
     tasks: Optional[List[Dict[str, Any]]] = None,
     max_iterations: Optional[int] = None,
     role: Optional[str] = None,
+    persona: Optional[str] = None,
     background: Optional[bool] = None,
     output_schema: Optional[Dict[str, Any]] = None,
     action: Optional[str] = None,
@@ -3654,6 +3689,14 @@ def delegate_task(
     'leaf' (default) cannot; 'orchestrator' retains the delegation
     toolset and can spawn its own workers, bounded by
     delegation.max_spawn_depth.  Per-task role beats the top-level one.
+
+    The 'persona' parameter, when set, is prepended to the child's system
+    prompt with an authoritative delimiter (see
+    ``_build_child_system_prompt``). persona is any authoritative role for
+    a subagent (code-reviewer, skeptic, domain-expert, ...), not tied to
+    any one caller. Per-task ``persona`` inside ``tasks=[...]`` beats the
+    top-level one; empty/omitted preserves the default subagent prompt
+    exactly.
 
     Returns JSON with results array, one entry per task.
     """
@@ -3768,6 +3811,8 @@ def delegate_task(
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
         single_task: Dict[str, Any] = {"goal": goal, "context": context, "role": top_role}
+        if persona:
+            single_task["persona"] = persona
         if output_schema is not None:
             single_task["output_schema"] = output_schema
         task_list = [single_task]
@@ -3895,6 +3940,11 @@ def delegate_task(
                 override_acp_command=creds.get("command"),
                 override_acp_args=creds.get("args"),
                 role=effective_role,
+                persona=(
+                    t.get("persona")
+                    if t.get("persona") is not None
+                    else (persona or "")
+                ),
             )
         except ValueError as exc:
             # Explicit-pin preflight failures (e.g. pinned delegation.command
@@ -4813,6 +4863,15 @@ DELEGATE_TASK_SCHEMA = {
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
                         },
+                        "persona": {
+                            "type": "string",
+                            "description": (
+                                "Per-task persona override. See top-level "
+                                "'persona' for semantics; prepended to this "
+                                "task's subagent system prompt with an "
+                                "AUTHORITATIVE PERSONA delimiter."
+                            ),
+                        },
                         "output_schema": {
                             "type": "object",
                             "description": (
@@ -4838,6 +4897,21 @@ DELEGATE_TASK_SCHEMA = {
                 "type": "string",
                 "enum": ["leaf", "orchestrator"],
                 "description": "(rebuilt at get_definitions() time)",
+            },
+            "persona": {
+                "type": "string",
+                "description": (
+                    "Optional persona for the subagent, any authoritative "
+                    "role such as code-reviewer, skeptic, or domain-expert "
+                    "(not tied to any one caller). When set, its body is "
+                    "prepended to the child's system prompt with an "
+                    "AUTHORITATIVE PERSONA delimiter, ahead of the goal, so "
+                    "the persona's output format, refusal rules, and "
+                    "tool-use constraints take precedence over the default "
+                    "subagent guidance. Cleaner than stuffing persona text "
+                    "into 'context'. Ignored when empty. In batch mode a "
+                    "per-task 'persona' overrides this top-level value."
+                ),
             },
             "output_schema": {
                 "type": "object",
@@ -4950,6 +5024,7 @@ registry.register(
         tasks=_strip_model_hidden_task_fields(args.get("tasks")),
         max_iterations=args.get("max_iterations"),
         role=args.get("role"),
+        persona=args.get("persona"),
         background=_model_background_value(args, kw.get("parent_agent")),
         output_schema=args.get("output_schema"),
         action=args.get("action"),
