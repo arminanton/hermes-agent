@@ -6285,7 +6285,16 @@ def _session_info(agent, session: dict | None = None) -> dict:
     # per-session flag. Reporting only the per-session flag here would lie to
     # the desktop status bar (it would show YOLO "off" while approvals.mode=off
     # silently auto-approves every dangerous command).
+    #
+    # `yolo` stays the honest OR of all three sources so the badge can never
+    # hide a live bypass. `yolo_source` disambiguates *why* it is on so the UI
+    # can label it accurately — a per-session/process YOLO ("⚠ YOLO", the user
+    # opted in for this run) reads differently from a standing config
+    # approvals.mode=off ("⚠ APPROVALS OFF", every session auto-approves). When
+    # both are active, "session" wins the label since it is the stronger,
+    # explicitly-chosen signal.
     yolo = False
+    yolo_source = ""
     approval_mode = "manual"
     try:
         from tools.approval import _YOLO_MODE_FROZEN, is_session_yolo_enabled
@@ -6294,9 +6303,25 @@ def _session_info(agent, session: dict | None = None) -> dict:
             bool(is_session_yolo_enabled(session_key)) if session_key else False
         )
         approval_mode = _load_approval_mode()
-        yolo = bool(_YOLO_MODE_FROZEN) or session_yolo or approval_mode == "off"
+        frozen = bool(_YOLO_MODE_FROZEN)
+        config_off = approval_mode == "off"
+        yolo = frozen or session_yolo or config_off
+        if frozen or session_yolo:
+            yolo_source = "session"
+        elif config_off:
+            yolo_source = "config"
     except Exception:
         yolo = False
+        yolo_source = ""
+    # Purely visual opt-out for the status-bar badge. Hiding the reminder does
+    # NOT change `yolo`/`approval_mode` or any approval behavior — the bypass
+    # still applies. The TUI reads this flag to suppress only the badge.
+    try:
+        hide_yolo_badge = bool(
+            ((_load_cfg().get("display") or {}).get("tui_hide_yolo_badge"))
+        )
+    except Exception:
+        hide_yolo_badge = False
     # A model switch queued mid-turn (pending_model_switch) applies at the next
     # turn start, so agent.model still reads the OLD model until then. Report the
     # pending pick instead — it's the model the next turn will run, and it stops
@@ -6323,6 +6348,8 @@ def _session_info(agent, session: dict | None = None) -> dict:
         "service_tier": service_tier,
         "fast": service_tier == "priority",
         "yolo": yolo,
+        "yolo_source": yolo_source,
+        "hide_yolo_badge": hide_yolo_badge,
         "approval_mode": approval_mode,
         "tools": dict(mirror.get("tools") or {}) if isinstance(mirror.get("tools"), dict) else {},
         "skills": dict(mirror.get("skills") or {}) if isinstance(mirror.get("skills"), dict) else {},

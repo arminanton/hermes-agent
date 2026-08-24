@@ -491,3 +491,81 @@ describe('StatusRule idle-since read-out', () => {
     expect(findComponentByName(element, 'IdleSince')).toBeNull()
   })
 })
+
+describe('StatusRule YOLO / approval-bypass reminder', () => {
+  it('shows "⚠ YOLO" for a session bypass (--yolo / /yolo on)', () => {
+    const element = StatusRule({
+      ...baseProps,
+      yolo: true,
+      yoloSource: 'session'
+    })
+
+    const rendered = textContent(element)
+
+    expect(rendered).toContain('⚠ YOLO')
+    expect(rendered).not.toContain('APPROVALS OFF')
+  })
+
+  it('shows "⚠ APPROVALS OFF" for a config approvals.mode=off bypass', () => {
+    const element = StatusRule({
+      ...baseProps,
+      yolo: true,
+      yoloSource: 'config'
+    })
+
+    const rendered = textContent(element)
+
+    // The config source is labelled distinctly so a standing
+    // approvals.mode=off never masquerades as a per-session /yolo toggle.
+    expect(rendered).toContain('⚠ APPROVALS OFF')
+    expect(rendered).not.toContain('⚠ YOLO')
+  })
+
+  it('falls back to "⚠ YOLO" when the source is unknown but bypass is on', () => {
+    const element = StatusRule({
+      ...baseProps,
+      yolo: true
+    })
+
+    expect(textContent(element)).toContain('⚠ YOLO')
+  })
+
+  it('renders the badge in the warn colour', () => {
+    const element = StatusRule({
+      ...baseProps,
+      yolo: true,
+      yoloSource: 'session'
+    })
+
+    const badge = findElementWithText(element, '⚠ YOLO')
+    expect(badge?.props.color).toBe(DEFAULT_THEME.color.warn)
+  })
+
+  it('omits the badge entirely when no bypass is active', () => {
+    const element = StatusRule({
+      ...baseProps,
+      yolo: false
+    })
+
+    const rendered = textContent(element)
+
+    expect(rendered).not.toContain('YOLO')
+    expect(rendered).not.toContain('APPROVALS OFF')
+  })
+
+  it('hides the badge when hideYoloBadge is set, even though bypass is ON', () => {
+    const element = StatusRule({
+      ...baseProps,
+      hideYoloBadge: true,
+      yolo: true,
+      yoloSource: 'session'
+    })
+
+    const rendered = textContent(element)
+
+    // The visual reminder is suppressed by user config. This is display-only:
+    // the gateway still reports yolo=true; approval behaviour is unchanged.
+    expect(rendered).not.toContain('YOLO')
+    expect(rendered).not.toContain('APPROVALS OFF')
+  })
+})

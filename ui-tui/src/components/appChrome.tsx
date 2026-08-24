@@ -484,6 +484,9 @@ export function StatusRule({
   sessionStartedAt,
   turnStartedAt,
   voiceLabel,
+  yolo,
+  yoloSource,
+  hideYoloBadge,
   onSessionCountClick,
   t
 }: StatusRuleProps) {
@@ -670,6 +673,12 @@ export function StatusRule({
             <Text color={t.color.muted} wrap="truncate-end">
               {' │ '}
               {ctxLabel}
+            </Text>
+          ) : null}
+          {yolo && !hideYoloBadge ? (
+            <Text color={t.color.warn} wrap="truncate-end">
+              {' │ '}
+              {yoloSource === 'config' ? '⚠ APPROVALS OFF' : '⚠ YOLO'}
             </Text>
           ) : null}
         </Box>
@@ -877,6 +886,9 @@ interface StatusRuleProps {
   turnStartedAt?: null | number
   usage: Usage
   voiceLabel?: string
+  yolo?: boolean
+  yoloSource?: string
+  hideYoloBadge?: boolean
   onSessionCountClick?: () => void
 }
 

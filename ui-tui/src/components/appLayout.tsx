@@ -511,6 +511,9 @@ const StatusRulePane = memo(function StatusRulePane({
         turnStartedAt={status.turnStartedAt}
         usage={ui.usage}
         voiceLabel={status.voiceLabel}
+        yolo={ui.info?.yolo}
+        yoloSource={ui.info?.yolo_source}
+        hideYoloBadge={ui.info?.hide_yolo_badge}
       />
     </Box>
   )

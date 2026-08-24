@@ -1345,6 +1345,14 @@ DEFAULT_CONFIG = {
         # starts delegating, nudging the user toward the live spawn-tree
         # dashboard. Set false to suppress the hint.
         "tui_agents_nudge": True,
+        # The TUI status bar shows a "⚠ YOLO" / "⚠ APPROVALS OFF" badge
+        # whenever this session bypasses approval prompts (process --yolo,
+        # a per-session /yolo toggle, or approvals.mode=off). It is a
+        # deliberate, always-on safety reminder that dangerous commands run
+        # without asking. Set true to hide only that badge. This is a purely
+        # visual change: hiding the reminder does NOT alter approval behavior,
+        # the bypass still applies exactly as configured.
+        "tui_hide_yolo_badge": False,
         "bell_on_complete": False,
         # Stream the model's reasoning/thinking live before the response.
         # Default ON: on thinking models the reasoning phase can run tens of
