@@ -4496,6 +4496,86 @@ def _session(agent=None, **extra):
     }
 
 
+@pytest.mark.parametrize(
+    "frozen, session_yolo, approval_mode, expected_yolo, expected_source",
+    [
+        # A global `approvals.mode: off` auto-approves every dangerous command
+        # (tools/approval.py is_approval_bypass_active_for_session ORs it in),
+        # so the badge MUST report a bypass even when /yolo was never toggled.
+        # It is surfaced as source="config" so the UI can label it distinctly
+        # ("⚠ APPROVALS OFF") from an explicit per-session/process YOLO.
+        (False, False, "off", True, "config"),
+        # A real process-start --yolo / HERMES_YOLO_MODE (frozen at import).
+        (True, False, "manual", True, "session"),
+        # An explicit per-session `/yolo on` toggle.
+        (False, True, "manual", True, "session"),
+        # Both a session toggle AND config off: "session" wins the label since
+        # it is the stronger, explicitly-chosen signal (badge still on).
+        (False, True, "off", True, "session"),
+        (True, False, "off", True, "session"),
+        # Normal approvals: no bypass anywhere -> badge stays off, no source.
+        (False, False, "manual", False, ""),
+        (False, False, "smart", False, ""),
+    ],
+)
+def test_session_info_yolo_reflects_effective_bypass(
+    monkeypatch, frozen, session_yolo, approval_mode,
+    expected_yolo, expected_source,
+):
+    """_session_info().yolo mirrors the canonical three-source bypass check.
+
+    The TUI YOLO badge surfaces the *effective* approval-bypass state, the
+    same three sources tools.approval.is_approval_bypass_active_for_session()
+    ORs together: the frozen process --yolo flag, the per-session /yolo toggle,
+    and `approvals.mode: off`. Regression guard: `approvals.mode: off` must
+    keep lighting the badge (it silently auto-approves dangerous commands), so
+    it may NOT be dropped from the yolo calc. `yolo_source` disambiguates the
+    reason without ever hiding a real bypass.
+    """
+    import tools.approval as approval
+
+    monkeypatch.setattr(approval, "_YOLO_MODE_FROZEN", frozen)
+    monkeypatch.setattr(
+        approval, "is_session_yolo_enabled", lambda _key: session_yolo
+    )
+    monkeypatch.setattr(server, "_load_approval_mode", lambda: approval_mode)
+
+    info = server._session_info(None, _session())
+
+    assert info["yolo"] is expected_yolo
+    assert info["yolo_source"] == expected_source
+    assert info["approval_mode"] == approval_mode
+
+
+@pytest.mark.parametrize("hide", [True, False])
+def test_session_info_hide_yolo_badge_is_display_only(monkeypatch, hide):
+    """`display.tui_hide_yolo_badge` toggles only the reported UI flag.
+
+    Hiding the badge is a purely visual opt-out: `_session_info` still reports
+    the honest bypass state (`yolo`/`yolo_source`), it just also forwards the
+    user's request to suppress the reminder. Nothing about the approval-bypass
+    calc changes when the badge is hidden.
+    """
+    import tools.approval as approval
+
+    monkeypatch.setattr(approval, "_YOLO_MODE_FROZEN", True)
+    monkeypatch.setattr(
+        approval, "is_session_yolo_enabled", lambda _key: False
+    )
+    monkeypatch.setattr(server, "_load_approval_mode", lambda: "manual")
+    monkeypatch.setattr(
+        server, "_load_cfg", lambda: {"display": {"tui_hide_yolo_badge": hide}}
+    )
+
+    info = server._session_info(None, _session())
+
+    # Approval-bypass truth is unaffected by the visibility toggle.
+    assert info["yolo"] is True
+    assert info["yolo_source"] == "session"
+    # Only the display flag tracks the config.
+    assert info["hide_yolo_badge"] is hide
+
+
 def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):
     calls = {"hooks": []}
 

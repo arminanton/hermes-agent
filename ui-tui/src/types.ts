@@ -201,6 +201,9 @@ export interface SessionInfo {
   update_command?: string
   usage?: Usage
   version?: string
+  yolo?: boolean
+  yolo_source?: string
+  hide_yolo_badge?: boolean
 }
 
 export interface Usage {
