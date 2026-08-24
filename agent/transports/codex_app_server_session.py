@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from agent.codex_responses_adapter import _format_responses_error
+from agent.codex_version import get_codex_cli_version
 from agent.redact import redact_sensitive_text
 from agent.transports.codex_app_server import (
     CodexAppServerClient,
@@ -325,7 +326,7 @@ class CodexAppServerSession:
         self._client.initialize(
             client_name="hermes",
             client_title="Hermes Agent",
-            client_version=_get_hermes_version(),
+            client_version=get_codex_cli_version(),
         )
         # Permission selection is intentionally NOT sent on thread/start.
         # Two reasons (live-tested against codex 0.130.0):
@@ -1281,12 +1282,3 @@ def _has_turn_aborted_marker(text: str) -> bool:
             return True
     return False
 
-
-def _get_hermes_version() -> str:
-    """Best-effort Hermes version string for codex's userAgent line."""
-    try:
-        from importlib.metadata import version
-
-        return version("hermes-agent")
-    except Exception:  # pragma: no cover
-        return "0.0.0"

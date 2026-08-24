@@ -161,7 +161,7 @@ class CodexAppServerClient:
         self,
         client_name: str = "hermes",
         client_title: str = "Hermes Agent",
-        client_version: str = "0.1",
+        client_version: Optional[str] = None,
         capabilities: Optional[dict] = None,
         timeout: float = 10.0,
     ) -> dict:
@@ -169,6 +169,10 @@ class CodexAppServerClient:
         InitializeResponse (userAgent, codexHome, platformFamily, platformOs)."""
         if self._initialized:
             raise RuntimeError("already initialized")
+        if client_version is None:
+            from agent.codex_version import get_codex_cli_version
+
+            client_version = get_codex_cli_version()
         params = {
             "clientInfo": {
                 "name": client_name,
