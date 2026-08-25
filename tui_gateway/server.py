@@ -4683,7 +4683,22 @@ def _(rid, params: dict) -> dict:
             touch=True,
             transport=current_transport() or _stdio_transport,
         )
-        payload["resumed"] = target
+        # Report the LIVE session's current durable key as `resumed`, not the
+        # id the renderer asked for. When a session auto-compressed while the
+        # renderer was detached (long autopilot runs, 3-min-stall reconnect,
+        # orchestrator recycle), it is held live under the rotated continuation
+        # key (session["session_key"] == the tip), but the resume request still
+        # carries the STALE pre-rotation id. The renderer pins storedSid /
+        # rewrites the active-session file from `resumed` (useSessionLifecycle),
+        # so echoing the requested id back re-pinned it to the stale ancestor:
+        # the status bar kept showing the old segment, the shell exit summary
+        # printed `--resume <old id>`, and — because that id then went back into
+        # the active file — every subsequent renderer recycle re-resumed the
+        # SAME stale id, a self-reinforcing lock onto the pre-compaction segment.
+        # The live session_key is authoritative for a still-running session, so
+        # surface it (fall back to live_tip, then target) to break the loop.
+        live_key = str(session.get("session_key") or "").strip()
+        payload["resumed"] = live_key or live_tip or target
         # A lazy watch session never owns a run loop, so its payload's running
         # flag is always False — overlay the child-run registry so a reconnecting
         # watch window keeps its busy indicator while the child is still mid-run.

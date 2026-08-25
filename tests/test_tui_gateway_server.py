@@ -1158,6 +1158,109 @@ def test_session_resume_reuses_live_session_rotated_to_tip(monkeypatch, tmp_path
     # Reused the live session (its runtime sid), reported under the tip key.
     assert resp["result"]["session_id"] == live_sid
     assert resp["result"]["session_key"] == "cont_tip"
+    # `resumed` must ALSO advance to the live continuation key, not echo the
+    # stale requested id. The renderer pins storedSid / rewrites the active-
+    # session file from `resumed`; echoing "parent_root" back re-pinned the bar,
+    # the shell exit summary, and the next recycle's resume onto the pre-
+    # compaction segment (the stale-session-id bug). See _reuse_live_payload.
+    assert resp["result"]["resumed"] == "cont_tip"
+
+
+def test_session_resume_reattach_reports_tip_not_stale_requested_id(
+    monkeypatch, tmp_path
+):
+    """Regression: a live-reattach must report the tip as `resumed`.
+
+    Reproduces the self-reinforcing stale-session-id loop: a long session auto-
+    compressed while the renderer was detached, so the active-session file (and
+    thus the resume request on the next recycle) still carried the pre-rotation
+    id. The gateway holds the session live under the rotated continuation key.
+    Before the fix, ``session.resume`` echoed the requested id back in
+    ``resumed``, so the renderer re-pinned storedSid + rewrote the active file to
+    the STALE id — the status bar kept showing the old segment, the shell exit
+    summary printed ``--resume <stale>``, and every subsequent recycle re-locked
+    onto the same stale id. The fix returns the live session's own key so the
+    renderer advances to the continuation the user is actually on.
+    """
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    base = int(time.time()) - 10_000
+    # #14 -> #15 -> #16: a two-hop compression chain, each hop a real new id,
+    # mirroring the observed d20e0e -> 03e5b3 -> dc80c4 dashboard lineage.
+    db.create_session("seg14", source="tui")
+    db.append_message("seg14", role="user", content="seg14 work")
+    db.end_session("seg14", "compression")
+    db.create_session("seg15", source="tui", parent_session_id="seg14")
+    db.append_message("seg15", role="assistant", content="seg15 work")
+    db.end_session("seg15", "compression")
+    db.create_session("seg16", source="tui", parent_session_id="seg15")
+    db.append_message("seg16", role="assistant", content="seg16 live tail")
+    conn = db._conn
+    assert conn is not None
+    conn.execute(
+        "UPDATE sessions SET started_at = ?, ended_at = ? WHERE id = 'seg14'",
+        (base, base + 50),
+    )
+    conn.execute(
+        "UPDATE sessions SET started_at = ?, ended_at = ? WHERE id = 'seg15'",
+        (base + 100, base + 150),
+    )
+    conn.execute(
+        "UPDATE sessions SET started_at = ? WHERE id = 'seg16'", (base + 200,)
+    )
+    conn.commit()
+
+    # The gateway holds the session live under the TIP key (seg16); the renderer
+    # is about to resume the STALE #14 id it had pinned before the compactions.
+    live_sid = "live5678"
+    server._sessions[live_sid] = {
+        "agent": types.SimpleNamespace(model="test", provider="test"),
+        "session_key": "seg16",
+        "history": [{"role": "assistant", "content": "seg16 live tail"}],
+        "history_lock": threading.Lock(),
+        "cols": 80,
+        "transport": None,
+        "last_active": time.time(),
+    }
+
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
+    monkeypatch.setattr(server, "_set_session_context", lambda target: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda tokens: None)
+    monkeypatch.setattr(
+        server,
+        "_session_info",
+        lambda agent, *a: {"model": "test", "tools": {}, "skills": {}},
+    )
+
+    def _boom(*a, **k):
+        raise AssertionError("cold build must not run: reuse the live session")
+
+    monkeypatch.setattr(server, "_make_agent", _boom)
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "session.resume",
+                "params": {"session_id": "seg14"},
+            }
+        )
+    finally:
+        server._sessions.pop(live_sid, None)
+        db.close()
+
+    result = resp["result"]
+    # Reattached to the live session; every id the renderer consumes for pinning
+    # (session_key AND resumed) points at the live continuation, NOT stale #14.
+    assert result["session_id"] == live_sid
+    assert result["session_key"] == "seg16"
+    assert result["resumed"] == "seg16", (
+        "resumed must advance to the live tip so the renderer re-pins storedSid "
+        "+ the active-session file to the continuation, not the stale requested id"
+    )
+    assert result["resumed"] != "seg14"
 
 
 
