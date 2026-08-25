@@ -1247,12 +1247,21 @@ export function useMainApp(gw: GatewayClient) {
       stickyPrompt,
       turnStartedAt: ui.sid ? turnStartedAt : null,
       // CLI parity: the classic prompt_toolkit status bar shows a red dot
-      // on REC (cli.py:_get_voice_status_fragments line 2344).
+      // on REC (cli.py:_get_voice_status_fragments line 2344). An INACTIVE
+      // voice (off, and not mid record/STT) is rendered as zero width — an
+      // empty label the status rule drops entirely — so a disabled voice
+      // subsystem never consumes columns that could push the pinned YOLO
+      // safety badge off-screen on a narrow terminal. Only a live/enabled
+      // voice (or a standing TTS flag) earns a segment.
       voiceLabel: voiceRecording
         ? '● REC'
         : voiceProcessing
           ? '◉ STT'
-          : `voice ${voiceEnabled ? 'on' : 'off'}${voiceTts ? ' [tts]' : ''}`
+          : voiceEnabled
+            ? `voice on${voiceTts ? ' [tts]' : ''}`
+            : voiceTts
+              ? 'voice off [tts]'
+              : ''
     }),
     [
       cwd,
