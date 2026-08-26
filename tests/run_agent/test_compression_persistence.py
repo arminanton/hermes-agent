@@ -22,6 +22,8 @@ import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +113,50 @@ class TestFlushAfterCompression:
                     "recent answer",
                 ]
 
+                assert agent.finalize_session_persistence("tui_close") == child_id
+                parent_row = db.get_session("original-session")
+                child_row = db.get_session(child_id)
+                assert parent_row is not None
+                assert child_row is not None
+                assert parent_row["end_reason"] == "compression"
+                assert child_row["end_reason"] == "tui_close"
+            finally:
+                db.close()
+
+    def test_compression_child_preserves_checkpoint_metadata(self):
+        """Compression uses the same normalized metadata contract as checkpoints."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            try:
+                agent = self._make_agent(db)
+                db.create_session("original-session", source="tui")
+                agent._session_db_created = True
+                original = [{"role": "user", "content": "parent"}]
+                compacted = [
+                    {
+                        "role": "assistant",
+                        "content": "compressed answer",
+                        "token_count": 23,
+                        "message_id": "platform-alias-2",
+                        "observed": True,
+                        "timestamp": 1_725_000_100.5,
+                    }
+                ]
+                self._install_compressor(agent, compacted)
+
+                result, _ = agent._compress_context(
+                    original, "system", approx_tokens=120_000
+                )
+
+                assert result == compacted
+                rows = db.get_messages(getattr(agent, "session_id"))
+                assert len(rows) == 1
+                assert rows[0]["token_count"] == 23
+                assert rows[0]["platform_message_id"] == "platform-alias-2"
+                assert rows[0]["observed"] == 1
+                assert rows[0]["timestamp"] == 1_725_000_100.5
             finally:
                 db.close()
 
@@ -147,6 +193,114 @@ class TestFlushAfterCompression:
                     ("original-session",),
                 ).fetchall()
                 assert children == []
+            finally:
+                db.close()
+
+    def test_memory_extraction_runs_outside_the_persistence_lock(self):
+        """Slow memory callbacks must not hold the SessionDB rotation lock."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            try:
+                agent = self._make_agent(db)
+                db.create_session("original-session", source="tui")
+                agent._session_db_created = True
+                original = [{"role": "user", "content": "preserve this turn"}]
+                compacted = [
+                    {"role": "user", "content": "[CONTEXT COMPACTION] summary"}
+                ]
+                self._install_compressor(agent, compacted)
+                acquired = []
+
+                def commit_memory(_messages):
+                    def probe():
+                        ok = agent._session_persist_lock.acquire(timeout=1)
+                        acquired.append(ok)
+                        if ok:
+                            agent._session_persist_lock.release()
+
+                    thread = threading.Thread(target=probe)
+                    thread.start()
+                    thread.join(timeout=2)
+
+                agent.commit_memory_session = commit_memory
+
+                agent._compress_context(original, "system", approx_tokens=120_000)
+
+                assert acquired == [True]
+            finally:
+                db.close()
+
+    def test_postcommit_publication_error_adopts_the_committed_child(self):
+        """A committed split must never be hidden by restoring its ended parent."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            try:
+                agent = self._make_agent(db)
+                db.create_session("original-session", source="tui")
+                agent._session_db_created = True
+                original = [{"role": "user", "content": "durable parent"}]
+                compacted = [
+                    {"role": "user", "content": "[CONTEXT COMPACTION] summary"}
+                ]
+                self._install_compressor(agent, compacted)
+                real_split = db.split_session_for_compression
+
+                def commit_then_raise(**kwargs):
+                    real_split(**kwargs)
+                    raise RuntimeError("publication interrupted after commit")
+
+                db.split_session_for_compression = commit_then_raise
+
+                result, _ = agent._compress_context(
+                    original, "system", approx_tokens=120_000
+                )
+
+                resolved = db.resolve_resume_session_id(
+                    "original-session", follow_compression_tip=True
+                )
+                assert resolved != "original-session"
+                assert agent.session_id == resolved
+                assert result == compacted
+                assert db.get_session("original-session")["end_reason"] == "compression"
+                assert db.get_session(resolved) is not None
+            finally:
+                db.close()
+
+    def test_finalization_checkpoint_failure_keeps_session_retryable(self):
+        """A finalizer may end a session only after its tail is durable."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            try:
+                agent = self._make_agent(db)
+                db.create_session("original-session", source="tui")
+                agent._session_db_created = True
+                agent._session_messages = [
+                    {"role": "user", "content": "must remain retryable"}
+                ]
+
+                with patch.object(
+                    agent,
+                    "_checkpoint_messages_to_db",
+                    return_value=False,
+                ):
+                    with pytest.raises(
+                        RuntimeError, match="final transcript checkpoint failed"
+                    ):
+                        agent.finalize_session_persistence("tui_close")
+
+                assert db.get_session("original-session")["ended_at"] is None
+                assert agent._session_persist_finalizing is False
+
+                assert agent.finalize_session_persistence("tui_close") == (
+                    "original-session"
+                )
+                assert db.get_session("original-session")["end_reason"] == "tui_close"
             finally:
                 db.close()
 
@@ -207,6 +361,65 @@ class TestFlushAfterCompression:
                 assert resumed_id == "original-session"
                 resumed = db.get_messages_as_conversation(resumed_id)
                 assert "inspect the stale browser" in str(resumed)
+            finally:
+                db.close()
+
+    def test_finalization_winning_during_summary_prevents_ghost_child(self):
+        """A compressor that loses to finalization must not reopen the session."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            try:
+                agent = self._make_agent(db)
+                db.create_session("original-session", source="tui")
+                agent._session_db_created = True
+                original = [{"role": "user", "content": "visible tail"}]
+                agent._session_messages = original
+                compacted = [
+                    {"role": "user", "content": "[CONTEXT COMPACTION] summary"}
+                ]
+                self._install_compressor(agent, compacted)
+                summary_started = threading.Event()
+                allow_summary = threading.Event()
+
+                def slow_summary(*args, **kwargs):
+                    del args, kwargs
+                    summary_started.set()
+                    assert allow_summary.wait(timeout=5)
+                    return compacted
+
+                compressor = getattr(agent, "context_compressor")
+                compressor.compress.side_effect = slow_summary
+                result = {}
+
+                def run_compression():
+                    result["messages"], _ = agent._compress_context(
+                        original, "system", approx_tokens=120_000
+                    )
+
+                worker = threading.Thread(target=run_compression)
+                worker.start()
+                assert summary_started.wait(timeout=5)
+                assert agent.finalize_session_persistence("tui_close") == (
+                    "original-session"
+                )
+                allow_summary.set()
+                worker.join(timeout=5)
+
+                assert not worker.is_alive()
+                assert result["messages"] is original
+                assert getattr(agent, "session_id") == "original-session"
+                parent_row = db.get_session("original-session")
+                assert parent_row is not None
+                assert parent_row["end_reason"] == "tui_close"
+                conn = db._conn
+                assert conn is not None
+                children = conn.execute(
+                    "SELECT id FROM sessions WHERE parent_session_id = ?",
+                    ("original-session",),
+                ).fetchall()
+                assert children == []
             finally:
                 db.close()
 

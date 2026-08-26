@@ -2033,12 +2033,8 @@ def test_finalize_session_flushes_agent_tail_before_end(monkeypatch):
     )
 
 
-def test_finalize_session_does_not_flush_a_running_turn(monkeypatch):
-    """A still-running turn owns the message list and persists on its own exit.
-
-    Flushing underneath a live turn would race the loop's own writes, so the
-    finalize-time flush is guarded on ``not session['running']``.
-    """
+def test_finalize_session_flushes_a_running_turn_before_shutdown(monkeypatch):
+    """Shutdown must preserve a turn even when it has not reached finalization."""
     flushed = {"count": 0}
 
     class _Agent:
@@ -2057,7 +2053,82 @@ def test_finalize_session_does_not_flush_a_running_turn(monkeypatch):
     session = _session(agent=_Agent(), running=True)
     server._finalize_session(session)
 
-    assert flushed["count"] == 0, "must not flush a running turn"
+    assert flushed["count"] == 1, "running turn was discarded during shutdown"
+
+
+def test_finalize_releases_resume_lock_before_agent_persistence(monkeypatch):
+    """Finalization must not nest resume-lock then persistence-lock work."""
+    acquired = []
+
+    class _Agent:
+        session_id = "session-key"
+
+        def commit_memory_session(self, history):
+            pass
+
+        def finalize_session_persistence(self, end_reason):
+            del end_reason
+
+            def probe():
+                ok = server._session_resume_lock.acquire(timeout=1)
+                acquired.append(ok)
+                if ok:
+                    server._session_resume_lock.release()
+
+            thread = threading.Thread(target=probe)
+            thread.start()
+            thread.join(timeout=2)
+            return self.session_id
+
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    server._finalize_session(_session(agent=_Agent(), running=True))
+
+    assert acquired == [True]
+
+
+def test_atomic_finalizer_failure_does_not_fall_back_or_publish_finalized(
+    monkeypatch,
+):
+    """A failed durable finalizer stays open and can be retried."""
+    attempts = []
+    fallback = []
+
+    class _Agent:
+        session_id = "session-key"
+
+        def commit_memory_session(self, history):
+            pass
+
+        def finalize_session_persistence(self, end_reason):
+            attempts.append(end_reason)
+            if len(attempts) == 1:
+                raise RuntimeError("final checkpoint failed")
+            return self.session_id
+
+        def flush_pending_to_db(self):
+            fallback.append("flush")
+            return True
+
+    class _DB:
+        def end_session(self, session_id, end_reason):
+            fallback.append((session_id, end_reason))
+
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+
+    session = _session(agent=_Agent(), running=True)
+
+    assert server._finalize_session(session) is False
+    assert session.get("_finalized") is not True
+    assert session.get("_finalizing") is not True
+    assert fallback == []
+
+    assert server._finalize_session(session) is True
+    assert session["_finalized"] is True
+    assert attempts == ["tui_close", "tui_close"]
+    assert fallback == []
 
 
 def test_ws_orphan_reap_spares_reattached_session(monkeypatch):
@@ -7876,6 +7947,7 @@ def test_close_session_by_id_is_idempotent_and_full(monkeypatch):
         w = s.get("slash_worker")
         if w:
             w.close()
+        return True
 
     monkeypatch.setattr(server, "_finalize_session", _fake_finalize)
     monkeypatch.setattr(

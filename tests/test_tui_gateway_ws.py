@@ -24,6 +24,7 @@ def _run_disconnect(monkeypatch, seed):
         w = s.get("slash_worker")
         if w:
             w.close()
+        return True
 
     monkeypatch.setattr(server, "_finalize_session", _fake_finalize)
 

@@ -1569,7 +1569,38 @@ class AIAgent:
             return False
         return self._checkpoint_messages_to_db(messages)
 
-    def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
+    def finalize_session_persistence(self, end_reason: str) -> Optional[str]:
+        """Flush and end the current session, or leave it retryable on failure."""
+        lock = getattr(self, "_session_persist_lock", None)
+        if lock is not None:
+            lock.acquire()
+        try:
+            self._session_persist_finalizing = True
+            messages = getattr(self, "_session_messages", None)
+            session_id = getattr(self, "session_id", None)
+            session_db = getattr(self, "_session_db", None)
+            persistence_required = bool(
+                messages
+                and session_db is not None
+                and not getattr(self, "_persist_disabled", False)
+            )
+            if persistence_required:
+                assert isinstance(messages, list)
+                if not self._checkpoint_messages_to_db(messages):
+                    raise RuntimeError("final transcript checkpoint failed")
+            if session_db is not None and session_id:
+                session_db.end_session(session_id, end_reason)
+            return session_id
+        except BaseException:
+            # Do not latch finalization before both the checkpoint and end write
+            # succeed. The same live agent can retry when storage recovers.
+            self._session_persist_finalizing = False
+            raise
+        finally:
+            if lock is not None:
+                lock.release()
+
+    def _persist_session(self, messages: List[Dict], conversation_history: Optional[List[Dict]] = None):
         """Save session state to both JSON log and SQLite on any exit path.
 
         Ensures conversations are never lost, even on errors or early returns.

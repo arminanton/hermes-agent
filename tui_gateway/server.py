@@ -136,7 +136,7 @@ _prompt_lock = threading.Lock()
 _cfg_cache: dict | None = None
 _cfg_mtime: float | None = None
 _cfg_path = None
-_session_resume_lock = threading.Lock()
+_session_resume_lock = threading.RLock()
 try:
     _slash_timeout = float(os.environ.get("HERMES_TUI_SLASH_TIMEOUT_S") or "45")
 except (ValueError, TypeError):
@@ -418,17 +418,72 @@ def _release_active_session_slot(session: dict | None) -> None:
         logger.debug("Failed to release active session slot", exc_info=True)
 
 
-def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> None:
-    """Best-effort finalize hook + memory commit for a session."""
-    if not session or session.get("_finalized"):
-        return
-    session["_finalized"] = True
+def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> bool:
+    """Durably finalize a session, leaving failures open for retry."""
+    with _session_resume_lock:
+        if not session:
+            return False
+        if session.get("_finalized"):
+            return True
+        if session.get("_finalizing"):
+            return False
+        session["_finalizing"] = True
+
+    agent = session.get("agent")
+    session_key = session.get("session_key")
+    session_id = getattr(agent, "session_id", None) or session_key
+
+    # A real AIAgent owns one atomic flush-and-end operation. It pairs the live
+    # message snapshot with the current session ID under the same lock used by
+    # compression rotation, so a finalizer can never end the parent while a
+    # concurrently-created continuation remains open.
+    if agent is not None and hasattr(agent, "finalize_session_persistence"):
+        try:
+            session_id = (
+                agent.finalize_session_persistence(end_reason)
+                or getattr(agent, "session_id", None)
+                or session_key
+            )
+        except Exception:
+            logger.warning(
+                "Atomic session finalization failed; leaving session retryable",
+                exc_info=True,
+            )
+            with _session_resume_lock:
+                session.pop("_finalizing", None)
+            return False
+    else:
+        # Compatibility path for lightweight test agents and older in-memory
+        # AIAgent instances loaded before finalize_session_persistence existed.
+        if agent is not None and hasattr(agent, "flush_pending_to_db"):
+            try:
+                agent.flush_pending_to_db()
+            except Exception:
+                logger.warning("Legacy session checkpoint failed", exc_info=True)
+                with _session_resume_lock:
+                    session.pop("_finalizing", None)
+                return False
+        session_id = getattr(agent, "session_id", None) or session_key
+        if session_id:
+            try:
+                db = _get_db()
+                if db is not None and hasattr(db, "end_session"):
+                    db.end_session(session_id, end_reason)
+            except Exception:
+                logger.warning("Legacy session end failed", exc_info=True)
+                with _session_resume_lock:
+                    session.pop("_finalizing", None)
+                return False
+
+    with _session_resume_lock:
+        session["_finalized"] = True
+        session.pop("_finalizing", None)
+
     _release_active_session_slot(session)
     stop_event = session.get("_notif_stop")
     if stop_event is not None:
         stop_event.set()
 
-    agent = session.get("agent")
     lock = session.get("history_lock")
     if lock is not None:
         with lock:
@@ -441,38 +496,7 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
         except Exception:
             pass
 
-    session_key = session.get("session_key")
-    session_id = getattr(agent, "session_id", None) or session_key
     _notify_session_boundary("on_session_finalize", session_id)
-
-    # Durability net: flush the agent's in-flight message tail to the DB BEFORE
-    # we mark the session ended. Between the loop's periodic _persist_session
-    # checkpoints, a long turn (deep delegation, many tool calls) accumulates
-    # assistant/tool messages that live only on the in-process agent. Every
-    # teardown path funnels through here (session.close, idle reaper, and — the
-    # bug this fixes — the WS orphan reaper firing after a transient stream
-    # drop). Without this flush those messages die with the agent and a later
-    # resume silently rewinds to the last checkpoint (the "landed in a totally
-    # different place" report). Guarded to not run under a live turn: a running
-    # turn owns the message list and its own exit path persists it, so flushing
-    # underneath it would race the loop's own writes.
-    if agent is not None and not session.get("running") and hasattr(agent, "flush_pending_to_db"):
-        try:
-            agent.flush_pending_to_db()
-        except Exception:
-            pass
-
-    # Mark session ended in DB so it doesn't linger as a ghost row in /resume.
-    # Use session_id (from agent.session_id) not session_key — after compression,
-    # session_key may be stale (the ended parent) while session_id is the live
-    # continuation. Fix for #20001.
-    if session_id:
-        try:
-            db = _get_db()
-            if db is not None:
-                db.end_session(session_id, end_reason)
-        except Exception:
-            pass
 
     # Close the slash-worker subprocess as part of finalize itself, not just
     # in the callers. Defense-in-depth: every session-end path goes through
@@ -488,10 +512,13 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
             worker.close()
     except Exception:
         pass
+    return True
 
 
-def _teardown_session(session: dict | None, *, end_reason: str = "tui_close") -> None:
-    """Fully tear down a session: finalize, unregister, close agent + worker.
+def _teardown_session(
+    session: dict | None, *, end_reason: str = "tui_close"
+) -> bool:
+    """Finalize a session and release resources only after durability succeeds.
 
     Shared by ``session.close`` and the orphaned-WS-session reaper. The
     slash-worker subprocess is closed inside ``_finalize_session`` (the single
@@ -501,8 +528,9 @@ def _teardown_session(session: dict | None, *, end_reason: str = "tui_close") ->
     make repeat calls harmless.
     """
     if not session:
-        return
-    _finalize_session(session, end_reason=end_reason)
+        return False
+    if not _finalize_session(session, end_reason=end_reason):
+        return False
     try:
         from tools.approval import unregister_gateway_notify
 
@@ -516,10 +544,7 @@ def _teardown_session(session: dict | None, *, end_reason: str = "tui_close") ->
             agent.close()
     except Exception:
         pass
-    # NOTE: the slash-worker is closed inside _finalize_session (the single
-    # _finalized-guarded chokepoint that main folded it into), exactly once.
-    # We deliberately do NOT re-close it here — _teardown_session's job beyond
-    # finalize is unregistering the notifier and closing the in-process agent.
+    return True
 
 
 def _attach_worker(sid: str, session: dict, worker) -> None:
@@ -534,16 +559,16 @@ def _attach_worker(sid: str, session: dict, worker) -> None:
 
 
 def _close_session_by_id(sid: str, *, end_reason: str = "tui_close") -> bool:
-    """Single idempotent teardown for one session: pop it under the sessions
-    lock, then finalize, unregister notify, close agent + slash worker via the
-    shared ``_teardown_session`` path. Returns True iff it closed a live
-    session. The ``_finalized`` / worker ``_closed`` guards make concurrent or
-    repeat calls (e.g. session.close racing the WS-orphan reaper) harmless."""
+    """Finalize one mapped session, removing it only after durable success."""
     with _sessions_lock:
-        session = _sessions.pop(sid, None)
+        session = _sessions.get(sid)
     if session is None:
         return False
-    _teardown_session(session, end_reason=end_reason)
+    if not _teardown_session(session, end_reason=end_reason):
+        return False
+    with _sessions_lock:
+        if _sessions.get(sid) is session:
+            _sessions.pop(sid, None)
     return True
 
 
@@ -614,8 +639,8 @@ def _close_sessions_for_transport(
     detached = 0
     for sid, session in owned:
         if session.get("close_on_disconnect"):
-            _close_session_by_id(sid, end_reason=end_reason)
-            reaped += 1
+            if _close_session_by_id(sid, end_reason=end_reason):
+                reaped += 1
         else:
             # Point detached sessions at the drop sentinel (NOT real stdio) so
             # _ws_session_is_orphaned recognizes them and the grace-reap can
@@ -2496,6 +2521,25 @@ def _compress_session_history(
 
 
 def _sync_session_key_after_compress(
+    sid: str,
+    session: dict,
+    *,
+    clear_pending_title: bool = True,
+    restart_slash_worker: bool = True,
+) -> bool:
+    """Serialize continuation rekeying against resume and finalization."""
+    with _session_resume_lock:
+        if session.get("_finalized"):
+            return False
+        return _sync_session_key_after_compress_locked(
+            sid,
+            session,
+            clear_pending_title=clear_pending_title,
+            restart_slash_worker=restart_slash_worker,
+        )
+
+
+def _sync_session_key_after_compress_locked(
     sid: str,
     session: dict,
     *,
