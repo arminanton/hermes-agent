@@ -959,6 +959,34 @@ _CONTENT_WRITE_TOOLS = frozenset({
 })
 
 
+_CODEX_READABLE_REPLAY_FIELDS = frozenset({"content", "refusal", "summary", "text"})
+
+
+def _redact_codex_readable_value(value: Any) -> Any:
+    """Redact string leaves below a known readable Responses field."""
+    from agent.redact import redact_sensitive_text
+
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    if isinstance(value, list):
+        return [_redact_codex_readable_value(part) for part in value]
+    if not isinstance(value, dict):
+        return value
+
+    copied = dict(value)
+    for field in _CODEX_READABLE_REPLAY_FIELDS:
+        if field in copied:
+            copied[field] = _redact_codex_readable_value(copied[field])
+    return copied
+
+
+def _redact_codex_visible_items(items: Any) -> Any:
+    """Redact every readable Codex field while preserving opaque replay fields."""
+    if not isinstance(items, list):
+        return items
+    return [_redact_codex_readable_value(item) for item in items]
+
+
 def build_assistant_message(agent, assistant_message, finish_reason: str) -> dict:
     """Build a normalized assistant message dict from an API response message.
 
@@ -978,6 +1006,13 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
         if think_blocks:
             combined = "\n\n".join(b.strip() for b in think_blocks if b.strip())
             reasoning_text = combined or None
+
+    if reasoning_text:
+        from agent.redact import redact_sensitive_text
+
+        reasoning_text = redact_sensitive_text(
+            _sanitize_surrogates(reasoning_text)
+        )
 
     if reasoning_text and agent.verbose_logging:
         logging.debug(f"Captured reasoning ({len(reasoning_text)} chars): {reasoning_text}")
@@ -1001,8 +1036,6 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     # can return invalid surrogate code points that crash json.dumps() on persist.
     _raw_content = assistant_message.content or ""
     _san_content = _sanitize_surrogates(_raw_content)
-    if reasoning_text:
-        reasoning_text = _sanitize_surrogates(reasoning_text)
 
     # Strip inline reasoning tags (<think>…</think> etc.) from the stored
     # assistant content.  Reasoning was already captured into
@@ -1042,7 +1075,14 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
         if isinstance(model_extra, dict) and "reasoning_content" in model_extra:
             raw_reasoning_content = model_extra["reasoning_content"]
     if raw_reasoning_content is not None:
-        msg["reasoning_content"] = _sanitize_surrogates(raw_reasoning_content)
+        sanitized_reasoning_content = _sanitize_surrogates(raw_reasoning_content)
+        if isinstance(sanitized_reasoning_content, str):
+            from agent.redact import redact_sensitive_text
+
+            sanitized_reasoning_content = redact_sensitive_text(
+                sanitized_reasoning_content
+            )
+        msg["reasoning_content"] = sanitized_reasoning_content
     elif assistant_tool_calls and agent._needs_thinking_reasoning_pad():
         # DeepSeek v4 thinking mode and Kimi / Moonshot thinking mode
         # both require reasoning_content on every assistant tool-call
@@ -1115,14 +1155,16 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     # multi-turn continuity. These get replayed as input on the next turn.
     codex_items = getattr(assistant_message, "codex_reasoning_items", None)
     if codex_items:
-        msg["codex_reasoning_items"] = codex_items
+        msg["codex_reasoning_items"] = _redact_codex_visible_items(codex_items)
 
     # Codex Responses API: preserve exact assistant message items (with
     # id/phase) so follow-up turns can replay structured items instead of
     # flattening to plain text. This is required for prefix cache hits.
     codex_message_items = getattr(assistant_message, "codex_message_items", None)
     if codex_message_items:
-        msg["codex_message_items"] = codex_message_items
+        msg["codex_message_items"] = _redact_codex_visible_items(
+            codex_message_items
+        )
 
     if assistant_tool_calls:
         tool_calls = []

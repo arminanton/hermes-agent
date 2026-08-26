@@ -2652,3 +2652,122 @@ def test_normalize_codex_response_preserves_raw_dict_function_call():
     assert normalized.tool_calls[0].function.arguments == '{"command":"pwd"}'
 
 
+def test_codex_visible_reasoning_is_redacted_before_persistence(
+    monkeypatch,
+    tmp_path,
+):
+    """Readable Codex fields must not bypass assistant-output redaction."""
+    from agent.codex_responses_adapter import _normalize_codex_response
+    from hermes_state import SessionDB
+
+    monkeypatch.setattr("agent.redact._REDACT_ENABLED", True)
+    secret = "sk-" + ("A" * 32)
+    response = SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="reasoning",
+                id="rs_secret",
+                encrypted_content="opaque-replay-state",
+                summary=[
+                    SimpleNamespace(
+                        type="summary_text",
+                        text=f"Reasoned with {secret}.",
+                    )
+                ],
+                status="completed",
+            ),
+            SimpleNamespace(
+                type="message",
+                id="msg_commentary_secret",
+                phase="commentary",
+                status="completed",
+                content=[
+                    SimpleNamespace(
+                        type="output_text",
+                        text=f"Checking {secret}.",
+                    )
+                ],
+            ),
+            SimpleNamespace(
+                type="message",
+                id="msg_final_secret",
+                phase="final_answer",
+                status="completed",
+                content=[
+                    SimpleNamespace(
+                        type="output_text",
+                        text=f"Final {secret}.",
+                    )
+                ],
+            ),
+        ],
+        status="completed",
+        output_text="",
+    )
+    normalized, finish_reason = _normalize_codex_response(
+        response,
+        issuer_kind="copilot",
+    )
+
+    agent = _build_agent(monkeypatch)
+    setattr(agent, "reasoning_callback", None)
+    message = agent._build_assistant_message(normalized, finish_reason)
+
+    assert secret not in json.dumps(message)
+    assert message["codex_reasoning_items"][0]["encrypted_content"] == (
+        "opaque-replay-state"
+    )
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("redacted-codex", source="test")
+        agent._session_db = db
+        setattr(agent, "session_id", "redacted-codex")
+        agent._session_db_created = True
+        agent._last_flushed_db_idx = 0
+        assert agent.checkpoint_session_messages(
+            [{"role": "user", "content": "probe"}, message]
+        )
+        rows = db.get_messages("redacted-codex")
+        assert secret not in json.dumps(rows)
+        persisted_items = rows[-1]["codex_reasoning_items"]
+        if isinstance(persisted_items, str):
+            persisted_items = json.loads(persisted_items)
+        assert persisted_items[0]["encrypted_content"] == "opaque-replay-state"
+    finally:
+        db.close()
+
+
+def test_codex_replay_redaction_recurses_without_touching_opaque_fields(monkeypatch):
+    from agent.chat_completion_helpers import _redact_codex_visible_items
+
+    monkeypatch.setattr("agent.redact._REDACT_ENABLED", True)
+    secret = "sk-" + ("B" * 32)
+    items = [
+        {
+            "type": "reasoning",
+            "id": secret,
+            "encrypted_content": secret,
+            "summary": [
+                {
+                    "type": "summary_text",
+                    "text": f"nested {secret}",
+                    "metadata": {"opaque": secret},
+                }
+            ],
+        },
+        {"type": "message", "content": f"direct {secret}"},
+        {"type": "message", "refusal": f"refusal {secret}"},
+    ]
+
+    redacted = _redact_codex_visible_items(items)
+
+    assert secret not in redacted[0]["summary"][0]["text"]
+    assert secret not in redacted[1]["content"]
+    assert secret not in redacted[2]["refusal"]
+    assert redacted[0]["id"] == secret
+    assert redacted[0]["encrypted_content"] == secret
+    assert redacted[0]["summary"][0]["metadata"] == {"opaque": secret}
+    assert items[0]["summary"][0]["text"] == f"nested {secret}"
+
+
