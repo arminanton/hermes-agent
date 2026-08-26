@@ -178,6 +178,71 @@ class TestCamofoxNavigate:
         assert "Cannot connect" in result["error"]
 
 
+def _http_error(status):
+    """Build a requests.HTTPError whose response carries the given status."""
+    import requests
+    resp = MagicMock()
+    resp.status_code = status
+    resp.text = '{"error":"Tab not found"}'
+    return requests.HTTPError(f"{status} Client Error", response=resp)
+
+
+class TestCamofoxStaleTabSelfHeal:
+    """A cached tab that died server-side (404/410) must self-heal, not loop."""
+
+    @patch("tools.browser_camofox.requests.post")
+    def test_navigate_recreates_stale_tab(self, mock_post, monkeypatch):
+        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
+        # 1. First navigate creates a tab.
+        mock_post.return_value = _mock_response(json_data={"tabId": "good_tab", "url": "https://a.com"})
+        camofox_navigate("https://a.com", task_id="stale1")
+
+        # 2. Second navigate: the existing-tab POST 404s (dead tab), then the
+        #    recreate-tab POST succeeds. Must end successful, not error.
+        recreate = _mock_response(json_data={"tabId": "fresh_tab", "url": "https://b.com"})
+        mock_post.side_effect = [_http_error(404), recreate]
+        result = json.loads(camofox_navigate("https://b.com", task_id="stale1"))
+
+        assert result["success"] is True
+        # The cached tab_id must have been replaced with the fresh one.
+        import tools.browser_camofox as cf
+        assert cf._sessions["stale1"]["tab_id"] == "fresh_tab"
+
+    @patch("tools.browser_camofox.requests.get")
+    @patch("tools.browser_camofox.requests.post")
+    def test_snapshot_recovers_at_last_url(self, mock_post, mock_get, monkeypatch):
+        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
+        # Establish a session + last_url via navigate.
+        mock_post.return_value = _mock_response(json_data={"tabId": "t", "url": "https://a.com"})
+        mock_get.return_value = _mock_response(json_data={"snapshot": "- text: hi", "refsCount": 1})
+        camofox_navigate("https://a.com", task_id="stale2")
+
+        # Snapshot: first GET 404s (dead tab); recovery recreates tab (POST) then
+        # the retry GET returns content.
+        mock_post.return_value = _mock_response(json_data={"tabId": "t_new", "url": "https://a.com"})
+        mock_get.side_effect = [
+            _http_error(404),
+            _mock_response(json_data={"snapshot": "- text: recovered", "refsCount": 2}),
+        ]
+        result = json.loads(camofox_snapshot(task_id="stale2"))
+        assert result["success"] is True
+        assert "recovered" in result["snapshot"]
+
+    @patch("tools.browser_camofox.requests.post")
+    def test_click_clears_stale_tab_and_hints(self, mock_post, monkeypatch):
+        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
+        mock_post.return_value = _mock_response(json_data={"tabId": "t", "url": "https://a.com"})
+        camofox_navigate("https://a.com", task_id="stale3")
+
+        # Click hits a dead tab: cleared + retryable message, tab_id set to None.
+        mock_post.side_effect = _http_error(410)
+        result = json.loads(camofox_click("@e1", task_id="stale3"))
+        assert result["success"] is False
+        assert "navigate" in result["error"].lower()
+        import tools.browser_camofox as cf
+        assert cf._sessions["stale3"]["tab_id"] is None
+
+
 # ---------------------------------------------------------------------------
 # Snapshot
 # ---------------------------------------------------------------------------

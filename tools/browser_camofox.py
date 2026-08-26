@@ -363,6 +363,88 @@ def _drop_session(task_id: Optional[str]) -> Optional[Dict[str, Any]]:
         return _sessions.pop(task_id, None)
 
 
+def _is_stale_tab_error(exc: Exception) -> bool:
+    """True when an HTTP error means the cached tab_id is dead server-side.
+
+    Camofox returns 404 ``{"error":"Tab not found"}`` (and, depending on the
+    tab's lifecycle state, 410 Gone) when a previously-created tab has been
+    closed or expired. The in-memory session cache still holds that dead
+    ``tab_id``, so without this every subsequent call keeps hammering the dead
+    tab and fails forever. Detect it so the caller can clear the tab and retry.
+    """
+    resp = getattr(exc, "response", None)
+    status = getattr(resp, "status_code", None)
+    if status in (404, 410):
+        return True
+    # Fall back to matching the body text in case the status is proxied/masked.
+    body = ""
+    try:
+        body = (resp.text or "") if resp is not None else ""
+    except Exception:
+        body = ""
+    body = f"{body} {exc}".lower()
+    return "tab not found" in body or "gone" in body
+
+
+def _clear_tab(task_id: Optional[str]) -> None:
+    """Forget the cached tab_id for a session so the next call recreates one.
+
+    Keeps the session (user_id / session_key / managed profile) intact; only the
+    dead tab handle is dropped. Cheap and safe: a fresh tab is created on the
+    next _ensure_tab / navigate.
+    """
+    task_id = task_id or "default"
+    with _sessions_lock:
+        sess = _sessions.get(task_id)
+        if sess is not None and sess.get("tab_id"):
+            logger.debug("Clearing stale Camofox tab %s for task %s", sess.get("tab_id"), task_id)
+            sess["tab_id"] = None
+
+
+def _op_error(exc: Exception, task_id: Optional[str], action: str) -> str:
+    """Shared error path for camofox tab operations (click/type/snapshot/...).
+
+    If the failure is a dead cached tab (404/410), clear the stale tab so the
+    NEXT browser_navigate starts a fresh one, and return a clear, retryable
+    message telling the model to re-navigate. Otherwise return the raw error.
+    This is what stops the "stuck on a stale tab -> 410/404 forever" loop: a
+    tab op can't meaningfully retry itself (the element refs died with the tab),
+    but clearing the handle lets the very next navigate self-heal.
+    """
+    if isinstance(exc, requests.HTTPError) and _is_stale_tab_error(exc):
+        _clear_tab(task_id)
+        return tool_error(
+            f"{action} failed: the browser tab was closed or expired "
+            "(stale tab cleared). Call browser_navigate to open a fresh tab, "
+            "then retry.",
+            success=False,
+        )
+    return tool_error(str(exc), success=False)
+
+
+def _recover_tab_for_read(task_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Silently recreate a stale tab at the session's last URL, for READ ops.
+
+    Read-only operations (snapshot / get_images / vision) can self-heal without
+    the model doing anything: if the tab died but we know the last URL that was
+    loaded, reopen a fresh tab there and return the refreshed session. Returns
+    None if there's no last URL to recover to (then the caller falls back to the
+    retryable _op_error message so the model re-navigates explicitly).
+    """
+    task_id = task_id or "default"
+    with _sessions_lock:
+        sess = _sessions.get(task_id)
+        last_url = sess.get("last_url") if sess else None
+    if not last_url or last_url == "about:blank":
+        return None
+    _clear_tab(task_id)
+    try:
+        return _ensure_tab(task_id, last_url)
+    except Exception as exc:
+        logger.debug("Camofox read-op tab recovery failed for %s: %s", task_id, exc)
+        return None
+
+
 def camofox_soft_cleanup(task_id: Optional[str] = None) -> bool:
     """Release the in-memory session without destroying the server-side context.
 
@@ -430,17 +512,37 @@ def camofox_navigate(url: str, task_id: Optional[str] = None) -> str:
             session = _ensure_tab(task_id, browser_url)
             data = {"ok": True, "url": browser_url}
         else:
-            # Navigate existing tab
-            data = _post(
-                f"/tabs/{session['tab_id']}/navigate",
-                {"userId": session["user_id"], "url": browser_url},
-                timeout=60,
-            )
+            # Navigate existing tab. If the cached tab died server-side (404
+            # Tab not found / 410 Gone), clear it and recreate a fresh tab with
+            # the target URL instead of failing on the dead handle forever.
+            try:
+                data = _post(
+                    f"/tabs/{session['tab_id']}/navigate",
+                    {"userId": session["user_id"], "url": browser_url},
+                    timeout=60,
+                )
+            except requests.HTTPError as nav_exc:
+                if not _is_stale_tab_error(nav_exc):
+                    raise
+                logger.info(
+                    "Camofox tab %s is stale (%s); recreating tab and retrying navigation",
+                    session.get("tab_id"),
+                    getattr(getattr(nav_exc, "response", None), "status_code", "?"),
+                )
+                _clear_tab(task_id)
+                session = _ensure_tab(task_id, browser_url)
+                data = {"ok": True, "url": browser_url}
         result = {
             "success": True,
             "url": data.get("url", browser_url),
             "title": data.get("title", ""),
         }
+        # Remember where we are so read-only ops (snapshot/images/vision) can
+        # silently recreate a fresh tab at this URL if the tab dies later.
+        with _sessions_lock:
+            _sess = _sessions.get(task_id or "default")
+            if _sess is not None:
+                _sess["last_url"] = result["url"] or browser_url
         if rewrite_info:
             result["requested_url"] = url
             result["url_rewrite"] = rewrite_info
@@ -496,10 +598,23 @@ def camofox_snapshot(full: bool = False, task_id: Optional[str] = None,
         if not session["tab_id"]:
             return tool_error("No browser session. Call browser_navigate first.", success=False)
 
-        data = _get(
-            f"/tabs/{session['tab_id']}/snapshot",
-            params={"userId": session["user_id"]},
-        )
+        try:
+            data = _get(
+                f"/tabs/{session['tab_id']}/snapshot",
+                params={"userId": session["user_id"]},
+            )
+        except requests.HTTPError as snap_exc:
+            if not _is_stale_tab_error(snap_exc):
+                raise
+            # Tab died. Silently reopen it at the last URL and retry once.
+            recovered = _recover_tab_for_read(task_id)
+            if recovered is None:
+                return _op_error(snap_exc, task_id, "Snapshot")
+            session = recovered
+            data = _get(
+                f"/tabs/{session['tab_id']}/snapshot",
+                params={"userId": session["user_id"]},
+            )
 
         snapshot = data.get("snapshot", "")
         refs_count = data.get("refsCount", 0)
@@ -523,7 +638,7 @@ def camofox_snapshot(full: bool = False, task_id: Optional[str] = None,
             "element_count": refs_count,
         })
     except Exception as e:
-        return tool_error(str(e), success=False)
+        return _op_error(e, task_id, "Snapshot")
 
 
 def camofox_click(ref: str, task_id: Optional[str] = None) -> str:
@@ -546,7 +661,7 @@ def camofox_click(ref: str, task_id: Optional[str] = None) -> str:
             "url": data.get("url", ""),
         })
     except Exception as e:
-        return tool_error(str(e), success=False)
+        return _op_error(e, task_id, "Click")
 
 
 def camofox_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
@@ -568,7 +683,7 @@ def camofox_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
             "element": clean_ref,
         })
     except Exception as e:
-        return tool_error(str(e), success=False)
+        return _op_error(e, task_id, "Type")
 
 
 def camofox_scroll(direction: str, task_id: Optional[str] = None) -> str:
@@ -584,7 +699,7 @@ def camofox_scroll(direction: str, task_id: Optional[str] = None) -> str:
         )
         return json.dumps({"success": True, "scrolled": direction})
     except Exception as e:
-        return tool_error(str(e), success=False)
+        return _op_error(e, task_id, "Scroll")
 
 
 def camofox_back(task_id: Optional[str] = None) -> str:
@@ -600,7 +715,7 @@ def camofox_back(task_id: Optional[str] = None) -> str:
         )
         return json.dumps({"success": True, "url": data.get("url", "")})
     except Exception as e:
-        return tool_error(str(e), success=False)
+        return _op_error(e, task_id, "Back")
 
 
 def camofox_press(key: str, task_id: Optional[str] = None) -> str:
@@ -616,7 +731,7 @@ def camofox_press(key: str, task_id: Optional[str] = None) -> str:
         )
         return json.dumps({"success": True, "pressed": key})
     except Exception as e:
-        return tool_error(str(e), success=False)
+        return _op_error(e, task_id, "Press")
 
 
 def camofox_close(task_id: Optional[str] = None) -> str:
@@ -647,10 +762,22 @@ def camofox_get_images(task_id: Optional[str] = None) -> str:
 
         import re
 
-        data = _get(
-            f"/tabs/{session['tab_id']}/snapshot",
-            params={"userId": session["user_id"]},
-        )
+        try:
+            data = _get(
+                f"/tabs/{session['tab_id']}/snapshot",
+                params={"userId": session["user_id"]},
+            )
+        except requests.HTTPError as img_exc:
+            if not _is_stale_tab_error(img_exc):
+                raise
+            recovered = _recover_tab_for_read(task_id)
+            if recovered is None:
+                return _op_error(img_exc, task_id, "Get images")
+            session = recovered
+            data = _get(
+                f"/tabs/{session['tab_id']}/snapshot",
+                params={"userId": session["user_id"]},
+            )
         snapshot = data.get("snapshot", "")
 
         # Parse img elements from the accessibility tree.
@@ -678,7 +805,7 @@ def camofox_get_images(task_id: Optional[str] = None) -> str:
             "count": len(images),
         })
     except Exception as e:
-        return tool_error(str(e), success=False)
+        return _op_error(e, task_id, "Get images")
 
 
 def camofox_vision(question: str, annotate: bool = False,
@@ -690,10 +817,22 @@ def camofox_vision(question: str, annotate: bool = False,
             return tool_error("No browser session. Call browser_navigate first.", success=False)
 
         # Get screenshot as binary PNG
-        resp = _get_raw(
-            f"/tabs/{session['tab_id']}/screenshot",
-            params={"userId": session["user_id"]},
-        )
+        try:
+            resp = _get_raw(
+                f"/tabs/{session['tab_id']}/screenshot",
+                params={"userId": session["user_id"]},
+            )
+        except requests.HTTPError as vis_exc:
+            if not _is_stale_tab_error(vis_exc):
+                raise
+            recovered = _recover_tab_for_read(task_id)
+            if recovered is None:
+                return _op_error(vis_exc, task_id, "Vision")
+            session = recovered
+            resp = _get_raw(
+                f"/tabs/{session['tab_id']}/screenshot",
+                params={"userId": session["user_id"]},
+            )
 
         # Save screenshot to cache
         from hermes_constants import get_hermes_home
@@ -771,7 +910,7 @@ def camofox_vision(question: str, annotate: bool = False,
             "screenshot_path": screenshot_path,
         })
     except Exception as e:
-        return tool_error(str(e), success=False)
+        return _op_error(e, task_id, "Vision")
 
 
 def camofox_console(clear: bool = False, task_id: Optional[str] = None) -> str:
