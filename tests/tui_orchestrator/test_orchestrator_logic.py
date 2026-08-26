@@ -348,6 +348,36 @@ def test_build_config_defaults_active_file_without_launcher_env(monkeypatch):
     assert "hermes-tui-orch-active-" in cfg.active_session_file
 
 
+def test_gateway_spawn_does_not_share_renderer_terminal(monkeypatch, tmp_path):
+    """Only the Ink renderer may own the interactive TTY.
+
+    The WebSocket gateway is a sibling process. If it inherits fd 1 or fd 2,
+    lifecycle notices such as context compaction and provider errors write raw
+    text into Ink's alternate screen, moving the physical cursor behind Ink's
+    back and corrupting subsequent incremental frames.
+    """
+    captured = {}
+    proc = object()
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return proc
+
+    monkeypatch.setattr(orch_mod.subprocess, "Popen", fake_popen)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    result = orch_mod._default_spawn_gateway("127.0.0.1", 12345, "credential")
+
+    assert result is proc
+    assert captured["kwargs"]["stdin"] is orch_mod.subprocess.DEVNULL
+    assert captured["kwargs"]["stderr"] is orch_mod.subprocess.STDOUT
+    gateway_log = captured["kwargs"]["stdout"]
+    assert gateway_log is not orch_mod.subprocess.DEVNULL
+    assert gateway_log.name == str(tmp_path / "logs" / "tui_gateway_stdio.log")
+    assert gateway_log.closed
+
+
 if __name__ == "__main__":
     test_budget_unit()
     test_kill_renderer_keeps_gateway()

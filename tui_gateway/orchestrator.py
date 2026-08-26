@@ -45,6 +45,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from hermes_constants import get_hermes_home
+
 
 # ── Bounded respawn policy (mirrors gatewayRecovery.planGatewayRecovery on the
 # TS side so a crash-loop can't fork-bomb). Window + limit are deliberately the
@@ -347,10 +349,31 @@ def _default_spawn_gateway(host: str, port: int, internal_credential: str) -> "s
     # can positively identify our children in a /proc scan (never a PID guess).
     env["HERMES_TUI_ORCH_OWNER_PID"] = str(os.getpid())
     env["HERMES_TUI_ORCH_ROLE"] = "gateway"
-    return subprocess.Popen(
-        [sys.executable, "-m", "tui_gateway.ws_host"],
-        env=env,
-    )
+    # The Ink renderer is the sole owner of the interactive terminal. The
+    # gateway communicates over WebSocket and never needs terminal stdio.
+    # Inheriting these descriptors lets any Python print, warning, traceback,
+    # or uvicorn log write directly into Ink's alternate screen. That moves the
+    # physical cursor behind Ink's frame model and corrupts later incremental
+    # paints. Preserve those diagnostics in a profile-local file instead.
+    stdio_log = None
+    try:
+        stdio_path = get_hermes_home() / "logs" / "tui_gateway_stdio.log"
+        stdio_path.parent.mkdir(parents=True, exist_ok=True)
+        stdio_log = stdio_path.open("ab", buffering=0)
+    except OSError:
+        pass
+
+    try:
+        return subprocess.Popen(
+            [sys.executable, "-m", "tui_gateway.ws_host"],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=stdio_log if stdio_log is not None else subprocess.DEVNULL,
+            stderr=subprocess.STDOUT if stdio_log is not None else subprocess.DEVNULL,
+        )
+    finally:
+        if stdio_log is not None:
+            stdio_log.close()
 
 
 def _make_default_spawn_renderer(active_session_file: str, heartbeat_file: str = ""):

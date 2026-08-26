@@ -45,7 +45,7 @@ def test_make_agent_passes_resolved_provider():
 
         from tui_gateway.server import _make_agent
 
-        _make_agent("sid-1", "key-1")
+        agent = _make_agent("sid-1", "key-1")
 
         # target_model comes from _resolve_startup_runtime() which reads
         # _load_cfg().  Due to module-level caching in tui_gateway.server,
@@ -59,6 +59,34 @@ def test_make_agent_passes_resolved_provider():
         assert call_kwargs.kwargs["base_url"] == "https://api.anthropic.com"
         assert call_kwargs.kwargs["api_key"] == "sk-test-key"
         assert call_kwargs.kwargs["api_mode"] == "anthropic_messages"
+        # Lifecycle and warning text reaches the TUI through structured
+        # callbacks. Raw _vprint output would bypass Ink and corrupt its screen.
+        assert agent.suppress_status_output is True
+        assert getattr(agent, "_print_fn")("must not reach the renderer tty") is None
+
+
+def test_tui_output_sink_keeps_structured_statuses_without_raw_stdio(capsys):
+    """Direct prints are silent while status callbacks remain functional."""
+    from run_agent import AIAgent
+
+    agent = object.__new__(AIAgent)
+    events = []
+    setattr(agent, "_print_fn", lambda *args, **kwargs: None)
+    setattr(agent, "suppress_status_output", True)
+    setattr(agent, "status_callback", lambda kind, text=None: events.append((kind, text)))
+    setattr(agent, "log_prefix", "")
+
+    agent._safe_print("direct compaction output")
+    agent._emit_status("structured lifecycle")
+    agent._emit_warning("structured warning")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    assert events == [
+        ("lifecycle", "structured lifecycle"),
+        ("warn", "structured warning"),
+    ]
 
 
 def test_make_agent_forwards_provider_routing():

@@ -44,12 +44,11 @@ load_hermes_dotenv(
 # ── Panic logger ─────────────────────────────────────────────────────
 # Gateway crashes in a TUI session leave no forensics: stdout is the
 # JSON-RPC pipe (TUI side parses it, doesn't log raw), the root logger
-# only catches handled warnings, and the subprocess exits before stderr
-# flushes through the stderr->gateway.stderr event pump. This hook
-# appends every unhandled exception to ~/.hermes/logs/tui_gateway_crash.log
-# AND re-emits a one-line summary to stderr so the TUI can surface it in
-# Activity — exactly what was missing when the voice-mode turns started
-# exiting the gateway mid-TTS.
+# only catches handled warnings. This hook appends every unhandled exception to
+# ~/.hermes/logs/tui_gateway_crash.log and re-emits a one-line summary to stderr.
+# The legacy stdio transport surfaces that summary in Activity. The durable
+# WebSocket orchestrator deliberately isolates gateway stdio from Ink's TTY, so
+# its crash log is the source of truth after a gateway exit.
 _CRASH_LOG = os.path.join(_hermes_home, "logs", "tui_gateway_crash.log")
 
 
@@ -66,9 +65,9 @@ def _panic_hook(exc_type, exc_value, exc_tb):
             f.write(trace)
     except Exception:
         pass
-    # Stderr goes through to the TUI as a gateway.stderr Activity line —
-    # the first line here is what the user will see without opening any
-    # log files.  Rest of the stack is still in the log for full context.
+    # Stdio mode forwards this as a gateway.stderr Activity line. Orchestrated
+    # WebSocket mode keeps it off the renderer TTY; the full trace remains in
+    # the crash log for diagnosis.
     first = (
         str(exc_value).strip().splitlines()[0]
         if str(exc_value).strip()
@@ -3893,7 +3892,7 @@ def _make_agent(
             target_model=model or None,
         )
     _pr = _load_provider_routing()
-    return AIAgent(
+    agent = AIAgent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 90),
         provider=runtime.get("provider"),
@@ -3940,6 +3939,13 @@ def _make_agent(
         fallback_model=_load_fallback_model(),
         **_agent_cbs(sid),
     )
+    # Every user-visible TUI update has a structured callback above. Raw
+    # _safe_print/_vprint output bypasses Ink and can desynchronize its physical
+    # cursor from the virtual frame. Keep the gateway agent silent even when a
+    # caller uses _safe_print directly; the WebSocket event remains visible.
+    setattr(agent, "suppress_status_output", True)
+    setattr(agent, "_print_fn", lambda *args, **kwargs: None)
+    return agent
 
 
 def _init_session(
