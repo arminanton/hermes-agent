@@ -334,9 +334,11 @@ class TestFetchApiModels:
             probe = probe_api_models("gh-token", "https://api.githubcopilot.com")
 
         assert mock_urlopen.call_args[0][0].full_url == "https://api.githubcopilot.com/models"
-        # claude-sonnet-4.6 also surfaces its synthetic "-fast" variant (Anthropic Fast
-        # Mode is selectable directly from the catalog); gpt-5.4 gets no fast variant.
-        assert probe["models"] == ["gpt-5.4", "claude-sonnet-4.6", "claude-sonnet-4.6-fast"]
+        # No synthetic "-fast" companion is manufactured: on Copilot a "-fast" id is a
+        # REAL catalog model (only claude-opus-4.8-fast exists live), and synthesizing
+        # e.g. claude-sonnet-4.6-fast would 400 "model_not_supported". Only what the
+        # catalog actually returns is surfaced.
+        assert probe["models"] == ["gpt-5.4", "claude-sonnet-4.6"]
         assert probe["resolved_base_url"] == "https://api.githubcopilot.com"
         assert probe["used_fallback"] is False
 

@@ -453,33 +453,26 @@ class TestAnthropicFastModeAdapter(unittest.TestCase):
         assert "extra_headers" in kwargs
         assert _FAST_MODE_BETA in kwargs["extra_headers"].get("anthropic-beta", "")
 
-    def test_fast_suffix_stripped_from_wire_model(self):
-        # Regression: a `-fast` model id is the Fast Mode KNOB, not a real model.
-        # The wire `model` MUST be the base id (sending `...-fast` 400s "model not
-        # supported"); the speed param is attached separately. Covers the bug
-        # where selecting claude-opus-4.8-fast in the TUI sent the literal
-        # `-fast` id and Copilot's /v1/messages rejected it.
+    def test_fast_id_kept_verbatim_on_copilot_wire(self):
+        # Live wire truth (2026-08-21): on Copilot /v1/messages a "-fast" id is a
+        # REAL catalog model. It MUST be sent VERBATIM (HTTP 200, bills 2x = real
+        # fast mode); stripping it would send the base id and silently bill 1x.
+        # The inert speed=fast param must NOT be attached on Copilot.
         from agent.anthropic_adapter import build_anthropic_kwargs
 
-        for mid in (
-            "claude-opus-4.8-fast",
-            "claude-sonnet-4.6-fast",
-            "claude-haiku-4.5-fast",
-        ):
-            kwargs = build_anthropic_kwargs(
-                model=mid,
-                messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
-                tools=None,
-                max_tokens=None,
-                reasoning_config=None,
-                base_url="https://api.githubcopilot.com",
-                fast_mode=True,
-            )
-            self.assertNotIn("-fast", kwargs["model"], f"{mid}: wire model kept -fast")
-            self.assertEqual(
-                kwargs.get("extra_body", {}).get("speed"), "fast",
-                f"{mid}: speed knob not attached",
-            )
+        kwargs = build_anthropic_kwargs(
+            model="claude-opus-4.8-fast",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            tools=None,
+            max_tokens=None,
+            reasoning_config=None,
+            base_url="https://api.githubcopilot.com",
+            fast_mode=True,
+        )
+        # -fast id preserved verbatim on the wire, DOT intact (hyphenated 400s).
+        self.assertEqual(kwargs["model"], "claude-opus-4.8-fast")
+        # speed=fast is INERT on Copilot → never attached.
+        self.assertIsNone(kwargs.get("extra_body", {}).get("speed"))
 
     def test_fast_mode_off_no_speed(self):
         from agent.anthropic_adapter import build_anthropic_kwargs
@@ -561,14 +554,18 @@ class TestSyntheticFastVariant(unittest.TestCase):
             resolve_fast_mode_overrides("claude-opus-4.8-fast"), {"speed": "fast"}
         )
 
-    def test_catalog_injects_fast_variants(self):
-        # build_copilot_inventory path uses fetch_github_model_catalog; here we exercise
-        # the synthetic-injection logic directly on a stub catalog via the public fetch
-        # by monkeypatching the live-items fetch.
+    def test_catalog_does_not_synthesize_fast_variants(self):
+        # Live wire truth (2026-08-21): Copilot's "-fast" is a REAL catalog id, not
+        # a synthetic knob. Hermes must NOT manufacture "<model>-fast" companions —
+        # any id lacking a real Copilot -fast catalog entry 400s "model_not_supported".
+        # Only real "-fast" ids present in the live fetch survive; nothing is injected.
         import hermes_cli.models as M
 
         base_items = [
             {"id": "claude-opus-4.8", "name": "Claude Opus 4.8",
+             "model_picker_enabled": True, "capabilities": {"type": "chat"}},
+            # A REAL -fast catalog id, as the live Copilot catalog actually returns.
+            {"id": "claude-opus-4.8-fast", "name": "Claude Opus 4.8 (Fast)",
              "model_picker_enabled": True, "capabilities": {"type": "chat"}},
             {"id": "claude-sonnet-5", "name": "Claude Sonnet 5",
              "model_picker_enabled": True, "capabilities": {"type": "chat"}},
@@ -582,14 +579,14 @@ class TestSyntheticFastVariant(unittest.TestCase):
         finally:
             M._fetch_github_model_catalog_items = orig
         ids = [c["id"] for c in (cat or [])]
-        # fast variants injected for BOTH claude families (incl. the new
-        # sonnet-5, proving family-agnostic injection); gpt-5 gets none.
+        # The REAL -fast id from the live fetch is preserved.
         self.assertIn("claude-opus-4.8-fast", ids)
-        self.assertIn("claude-sonnet-5-fast", ids)
+        # No synthetic companions manufactured for families lacking a real -fast entry.
+        self.assertNotIn("claude-sonnet-5-fast", ids)
+        self.assertNotIn("claude-opus-4.8-fast-fast", ids)
         self.assertNotIn("gpt-5-fast", ids)
-        # synthetic companions are tagged so wire-resolution can strip them.
-        s5f = next(c for c in (cat or []) if c["id"] == "claude-sonnet-5-fast")
-        self.assertTrue(s5f.get("_hermes_synthetic_fast"))
+        # And no entry is tagged as a Hermes synthetic companion anymore.
+        self.assertFalse(any(c.get("_hermes_synthetic_fast") for c in (cat or [])))
 
     def test_synthetic_fast_id_strips_to_base_on_wire(self):
         # A synthetic -fast id (claude-sonnet-5-fast, NOT a real catalog id) must
@@ -612,7 +609,10 @@ class TestSyntheticFastVariant(unittest.TestCase):
             "claude-opus-4.8-fast",
         )
 
-    def test_adapter_attaches_speed_for_copilot_opus48(self):
+    def test_adapter_omits_inert_speed_for_copilot_opus48(self):
+        # Live wire truth (2026-08-21): speed=fast is INERT on Copilot (bills 1x).
+        # Real fast mode comes only from the -fast catalog model id. So for a BASE
+        # id + fast_mode=True on Copilot, the adapter must NOT attach speed=fast.
         from agent.anthropic_adapter import build_anthropic_kwargs
 
         kwargs = build_anthropic_kwargs(
@@ -621,7 +621,10 @@ class TestSyntheticFastVariant(unittest.TestCase):
             tools=None, max_tokens=None, reasoning_config=None,
             base_url="https://api.githubcopilot.com", fast_mode=True,
         )
-        self.assertEqual(kwargs.get("extra_body", {}).get("speed"), "fast")
+        self.assertIsNone(kwargs.get("extra_body", {}).get("speed"))
+        # Base id keeps its established normalized wire form (no synthetic -fast).
+        self.assertEqual(kwargs["model"], "claude-opus-4-8")
+        self.assertNotIn("-fast", kwargs["model"])
 
     def test_adapter_refuses_speed_for_native_opus48(self):
         from agent.anthropic_adapter import build_anthropic_kwargs

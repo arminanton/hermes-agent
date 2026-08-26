@@ -2085,24 +2085,31 @@ def model_supports_fast_mode(model_id: Optional[str]) -> bool:
 
 
 def _is_anthropic_fast_model(model_id: Optional[str]) -> bool:
-    """Return True if the model accepts the Anthropic Fast Mode ``speed`` param.
+    """Return True if Hermes should expose the ``/fast`` toggle for this Claude id.
+
+    This is an endpoint-AGNOSTIC UI gate: it decides whether the ``/fast`` command
+    and ``resolve_fast_mode_overrides`` apply. The AUTHORITATIVE, endpoint-aware
+    decision about what actually ships on the wire lives in
+    ``agent.anthropic_adapter`` (``_supports_fast_mode`` / ``_strip_fast_suffix``):
+
+      * **Native Anthropic**: fast mode = strip any ``-fast`` suffix and attach
+        ``speed:"fast"`` + the fast-mode beta header. Currently honored on Opus 4.6
+        (the adapter gates the param to 4.6; 4.7/4.8 400 on it).
+      * **GitHub Copilot** (/v1/messages): fast mode = select the REAL ``-fast``
+        CATALOG model id (e.g. ``claude-opus-4.8-fast``), which is sent VERBATIM and
+        bills 2x. The ``speed:"fast"`` param is INERT there (live-verified 2026-08-21)
+        and the adapter never attaches it on Copilot. So on Copilot the toggle is a
+        no-op; real fast mode comes from picking the ``-fast`` model.
 
     Two routes return True:
-      1. A ``-fast`` id (e.g. ``claude-opus-4.8-fast``) — the synthetic fast variant
-         Hermes exposes; selecting it MEANS "send speed=fast on the base model".
-      2. Any base ``claude-*`` model. Native Anthropic currently honors speed=fast
-         on Opus 4.6 only (others 400 there), but **Copilot's /v1/messages proxy
-         passes speed=fast through for every claude family** (empirically verified
-         on opus-4.x and sonnet-5). This layer is intentionally family-agnostic and
-         permissive: the per-endpoint gate in
-         ``anthropic_adapter.build_anthropic_kwargs`` / ``_supports_fast_mode``
-         makes the final call and refuses where the endpoint truly rejects it.
+      1. A ``-fast`` id (e.g. ``claude-opus-4.8-fast``) — selecting it means "fast".
+      2. Any base ``claude-*`` model from the 4.x line onward.
 
     Family-agnostic on purpose: hardcoding a family allow-list
     (``opus-4``/``sonnet-4``/``haiku-4``) silently dropped every NEW family
-    (claude-sonnet-5, future opus-5, …) out of fast mode until someone edited the
-    list. Matching all ``claude-*`` here keeps new models working without a
-    per-release code change; the endpoint gate remains the real guard.
+    (claude-sonnet-5, future opus-5, …) until someone edited the list. Matching all
+    ``claude-*`` (excluding genuinely-legacy 2.x/3.x) keeps new models working; the
+    adapter's endpoint-aware gate remains the real guard for wire behavior.
     """
     raw = _strip_vendor_prefix(str(model_id or ""))
     base = raw.split(":")[0]
@@ -3279,35 +3286,19 @@ def fetch_github_model_catalog(
         seen_ids.add(model_id)
         models.append(item)
     
-    # Inject synthetic "-fast" companion entries for Claude models so the
-    # Anthropic Fast Mode variant is selectable directly from /models (the way OpenRouter
-    # exposes e.g. "claude-opus-4.8-fast"). These are NOT real catalog ids — selecting one
-    # normalizes back to the base model on the wire (normalize_copilot_model_id strips
-    # "-fast") and auto-attaches extra_body.speed="fast" (the ~2.5x throughput knob).
-    # Copilot's /v1/messages proxy passes speed=fast through for EVERY claude family
-    # (family-agnostic on purpose — a hardcoded opus-4/sonnet-4/haiku-4 list silently
-    # dropped new families like sonnet-5). A base model that is already itself a real
-    # "-fast" catalog id (e.g. claude-opus-4.8-fast) is skipped by the -fast guard.
-    if os.environ.get("HERMES_COPILOT_HIDE_FAST_VARIANTS") not in ("1", "true", "yes"):
-        for item in list(models):
-            base_id = str(item.get("id") or "").strip()
-            low = base_id.lower()
-            if low.startswith("claude-") and not low.endswith("-fast"):
-                fast_id = f"{base_id}-fast"
-                if fast_id not in seen_ids:
-                    fast_item = dict(item)
-                    fast_item["id"] = fast_id
-                    name = str(item.get("name") or base_id)
-                    fast_item["name"] = f"{name} (Fast)"
-                    fast_item["model_picker_enabled"] = True
-                    # Tag as a Hermes synthetic companion (NOT a real Copilot
-                    # catalog id). normalize_copilot_model_id uses this to decide
-                    # whether a "-fast" id should be sent verbatim on the wire
-                    # (real catalog id, e.g. claude-opus-4.8-fast) or stripped to
-                    # its base (synthetic, e.g. claude-sonnet-5-fast → claude-sonnet-5).
-                    fast_item["_hermes_synthetic_fast"] = True
-                    models.append(fast_item)
-                    seen_ids.add(fast_id)
+    # NOTE: Hermes used to SYNTHESIZE a ``<model>-fast`` companion for every
+    # Claude family here. That was WRONG for Copilot and is removed. Live wire
+    # truth (2026-08-21): Copilot's /v1/messages ``-fast`` mechanism is a REAL,
+    # first-class CATALOG model id, NOT a synthetic ``speed=fast`` knob. Only ids
+    # that actually have a ``-fast`` entry in the live Copilot /models catalog
+    # work (currently just ``claude-opus-4.8-fast``); every synthesized id like
+    # ``claude-sonnet-4.6-fast`` / ``claude-haiku-4.5-fast`` 400s with
+    # ``model_not_supported``. The real ``-fast`` catalog ids already arrive in
+    # ``models`` from the live fetch above (and are deduped by ``seen_ids``), so
+    # there is nothing to inject — surfacing anything else would offer users
+    # unusable, billing-confusing picks. (This is the OPPOSITE of native
+    # Anthropic, where ``-fast`` is a synthetic knob handled in the adapter by
+    # stripping the suffix and attaching ``speed:"fast"``.)
 
     # Inject test/preview slugs to force availability for empirical probing.
     # Gated behind HERMES_COPILOT_INJECT_PROBE_SLUGS so it stays opt-in:
@@ -3938,10 +3929,18 @@ def normalize_copilot_model_id(
         candidates.append(raw[:-5])
     if raw.endswith("-chat"):
         candidates.append(raw[:-5])
-    # "-fast" is the Anthropic Fast Mode KNOB (extra_body speed=fast), NOT a real
-    # catalog id — copilot's /models has no "...-fast" entry. Strip it so the wire
-    # model resolves to the real base id; the speed=fast param is attached separately
-    # by the anthropic adapter (gated on the request_overrides the -fast id sets).
+    # "-fast" wire resolution (endpoint = Copilot /v1/messages). Live truth
+    # (2026-08-21): a "-fast" id is a REAL Copilot catalog model, NOT a synthetic
+    # knob. The candidate order below already resolves this correctly:
+    #   * A REAL "-fast" catalog id (e.g. claude-opus-4.8-fast) is present in
+    #     catalog_ids, so the ``raw`` candidate matches FIRST and is returned
+    #     VERBATIM — it must go on the wire unchanged (bills 2x = real fast mode).
+    #   * A "-fast" id that is NOT in the catalog (e.g. a hand-typed
+    #     claude-sonnet-4.6-fast, which 400s "model_not_supported") falls back to
+    #     the stripped base id below so the request still succeeds at 1x rather
+    #     than erroring. Hermes no longer SYNTHESIZES such ids into the picker.
+    # (This is the OPPOSITE of native Anthropic, where the adapter strips "-fast"
+    # and attaches speed:"fast"; that lives in agent/anthropic_adapter.py.)
     if raw.endswith("-fast"):
         base_fast = raw[:-5]
         candidates.append(base_fast)

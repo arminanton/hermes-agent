@@ -758,16 +758,45 @@ def _forbids_sampling_params(model: str) -> bool:
     return not any(v in m for v in _LEGACY_MANUAL_THINKING_CLAUDE_SUBSTRINGS)
 
 
-def _strip_fast_suffix(model: str) -> str:
-    """Strip a trailing ``-fast`` (the synthetic fast-variant id) so the BASE
-    model id goes on the wire.
+def _strip_fast_suffix(
+    model: str,
+    base_url: Optional[str] = None,
+    raw_model: Optional[str] = None,
+) -> str:
+    """Normalize a ``-fast`` id to the correct WIRE model, endpoint-aware.
 
-    ``-fast`` is the Anthropic Fast Mode KNOB (extra_body.speed="fast"), NOT a
-    real model id — neither native Anthropic nor Copilot's /v1/messages has a
-    ``...-fast`` model, so sending it verbatim 400s "model not supported". The
-    speed param is attached separately (see the fast-mode block below), so here
-    we only need the base id. A vendor prefix (``copilot/``) is preserved.
+    The ``-fast`` suffix means opposite things on the two endpoints:
+
+      * **GitHub Copilot** (``api.githubcopilot.com/v1/messages``): ``-fast`` is a
+        REAL, first-class, entitled CATALOG model id (e.g. ``claude-opus-4.8-fast``).
+        Sent VERBATIM it returns HTTP 200 and bills 2x = genuine fast mode. Stripping
+        it would send the base id, which bills 1x and silently loses fast mode. So on
+        Copilot we MUST NOT strip — the ``-fast`` id itself is the entitlement. (Only
+        ids that actually exist in the live Copilot /models catalog are ever offered;
+        currently just ``claude-opus-4.8-fast``.)
+
+        The DOT also matters on Copilot: live-verified 2026-08-21,
+        ``claude-opus-4.8-fast`` → HTTP 200 (2x) but the hyphenated
+        ``claude-opus-4-8-fast`` → 400 "model_not_supported". Since the caller's
+        ``model`` has usually been dot→hyphen normalized already, pass ``raw_model``
+        (the pre-normalization id) so the dotted catalog id survives to the wire.
+      * **Native Anthropic** (``api.anthropic.com``) and everything else: ``-fast`` is
+        a SYNTHETIC knob — there is no ``...-fast`` model server-side, so we strip the
+        suffix to the base id and attach ``speed:"fast"`` + the fast-mode beta header
+        separately (see the fast-mode block below). A vendor prefix (``copilot/``) is
+        preserved.
     """
+    if _is_copilot_base_url(base_url):
+        # Copilot: a ``-fast`` id is a real catalog model — send it VERBATIM (bills
+        # 2x), keeping the dotted form the catalog uses (the hyphenated -fast id
+        # 400s). Base (non -fast) ids keep the established normalized wire form.
+        raw = raw_model if raw_model is not None else model
+        if (raw or "").endswith("-fast"):
+            # Mirror normalize_model_name's vendor-prefix strip (but keep the dot).
+            if raw.lower().startswith("anthropic/"):
+                raw = raw[len("anthropic/"):]
+            return raw
+        return model or ""
     raw = model or ""
     if raw.endswith("-fast"):
         return raw[:-5]
@@ -775,32 +804,24 @@ def _strip_fast_suffix(model: str) -> str:
 
 
 def _supports_fast_mode(model: str, base_url: Optional[str] = None) -> bool:
-    """Return True for models that support Anthropic Fast Mode (speed=fast).
+    """Return True when the ``speed:"fast"`` REQUEST PARAM should be attached.
 
     Endpoint-aware:
       * **Native Anthropic** (``api.anthropic.com``): per Anthropic docs, fast mode is
         currently Opus 4.6 only. Sending ``speed:"fast"`` to other Claude models 400s.
-      * **GitHub Copilot** (``api.githubcopilot.com/v1/messages``): the proxy passes
-        ``speed:"fast"`` through for EVERY claude family and forwards it upstream
-        (empirically verified on opus-4.x and sonnet-5 — returns clean, no 400). So
-        fast mode is unlocked for any ``claude-*`` on the Copilot endpoint. This is
-        deliberately family-agnostic: a hardcoded ``opus-4``/``sonnet-4``/``haiku-4``
-        allow-list silently dropped every new family (sonnet-5, future opus-5, …).
+        The synthetic ``-fast`` suffix is normalized away before the base check.
+      * **GitHub Copilot** (``api.githubcopilot.com/v1/messages``): the ``speed`` param
+        is INERT — the proxy accepts it (top-level) but ignores it and bills 1x
+        (live-verified 2026-08-21 via the copilot cost_per_batch signal; the nested
+        extra_body form actually 400s). Fast mode on Copilot is delivered SOLELY by the
+        ``-fast`` catalog model id, NOT by this param, so we NEVER attach it on Copilot
+        (it would never buy real fast mode and only risks a 400).
       * **Other third-party proxies**: conservatively keep the native rule (4.6-only),
         since an unknown proxy may reject the unknown param/beta header.
-
-    The ``-fast`` suffix (the synthetic fast variant id) is normalized away before the
-    base check by the time we reach here.
     """
-    m = _strip_fast_suffix((model or "").lower())
     if _is_copilot_base_url(base_url):
-        # Family-agnostic for current claude families; exclude only the
-        # genuinely-legacy claude-2.x / claude-3.x (no fast offering anywhere).
-        base = m.split("/")[-1]
-        if not base.startswith("claude-"):
-            return False
-        rest = base[len("claude-"):]
-        return rest[:1] not in ("2", "3")
+        return False
+    m = _strip_fast_suffix((model or "").lower())
     return any(v in m for v in _FAST_MODE_SUPPORTED_SUBSTRINGS)
 
 
@@ -2935,6 +2956,13 @@ def build_anthropic_kwargs(
     )
     anthropic_tools = convert_tools_to_anthropic(tools) if tools else []
 
+    # Capture the caller's model id BEFORE dot→hyphen normalization. On Copilot a
+    # ``-fast`` catalog id must keep its DOT on the wire: live-verified 2026-08-21,
+    # ``claude-opus-4.8-fast`` returns HTTP 200 + usage.speed="fast" (bills 2x) while
+    # the hyphenated ``claude-opus-4-8-fast`` 400s "model_not_supported". The base id
+    # is unaffected (Copilot echoes claude-opus-4-8 for both forms). See
+    # _strip_fast_suffix, which uses this raw value for the Copilot -fast case.
+    _pre_normalize_model = model
     model = normalize_model_name(model, preserve_dots=preserve_dots)
     # effective_max_tokens = output cap for this call (≠ total context window)
     # Use the resolver helper so non-positive values (negative ints,
@@ -3018,7 +3046,12 @@ def build_anthropic_kwargs(
                             pass  # tool_result uses ID, not name
 
     kwargs: Dict[str, Any] = {
-        "model": _strip_fast_suffix(model),
+        # Endpoint-aware: on Copilot a ``-fast`` id is a REAL catalog model and is
+        # sent VERBATIM keeping its dot (claude-opus-4.8-fast → HTTP 200, bills 2x =
+        # real fast mode; the hyphenated form 400s). On native Anthropic ``-fast`` is
+        # a synthetic knob: strip to the base id (speed:fast attached below).
+        # ``_pre_normalize_model`` is the caller id before dot→hyphen normalization.
+        "model": _strip_fast_suffix(model, base_url, raw_model=_pre_normalize_model),
         "messages": anthropic_messages,
         "max_tokens": effective_max_tokens,
     }
@@ -3134,15 +3167,19 @@ def build_anthropic_kwargs(
         for _sampling_key in ("temperature", "top_p", "top_k"):
             kwargs.pop(_sampling_key, None)
 
-    # ── Fast mode (Opus 4.6 only) ────────────────────────────────────
-    # Adds extra_body.speed="fast" + the fast-mode beta header for ~2.5x
-    # output speed. Per Anthropic docs, fast mode is only supported on
-    # Opus 4.6 — Opus 4.7 and other models 400 on the speed parameter.
-    # Native Anthropic: only for native endpoints (Opus 4.6). Copilot's /v1/messages
-    # proxy ALSO accepts speed=fast on opus/sonnet/haiku 4.x and passes it upstream
-    # (empirically verified), so allow it there too. _supports_fast_mode is now
-    # endpoint-aware and makes the per-endpoint call; other unknown third-party proxies
-    # still get refused (they may reject the unknown beta header + param).
+    # ── Fast mode (native Anthropic speed=fast param; Opus 4.6 only) ─────────
+    # Adds extra_body.speed="fast" + the fast-mode beta header for ~2.5x output
+    # speed. This path is for NATIVE ANTHROPIC ONLY. Per Anthropic docs, the
+    # speed param is honored on Opus 4.6 (4.7/4.8 400 on it), so _supports_fast_mode
+    # gates it to 4.6 on native endpoints.
+    #
+    # GitHub Copilot is deliberately EXCLUDED here: its /v1/messages proxy treats
+    # speed=fast as INERT (accepts top-level, bills 1x; nested extra_body 400s) —
+    # live-verified 2026-08-21. Real fast mode on Copilot comes SOLELY from the
+    # ``-fast`` catalog MODEL ID (e.g. claude-opus-4.8-fast), which is sent verbatim
+    # by _strip_fast_suffix above and bills 2x on its own. So _supports_fast_mode
+    # returns False for Copilot and no speed param / beta header is attached.
+    # Other unknown third-party proxies stay refused (they may reject the param).
     _fast_endpoint_ok = (
         not _is_third_party_anthropic_endpoint(base_url)
         or _is_copilot_base_url(base_url)
