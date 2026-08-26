@@ -3261,6 +3261,23 @@ def _mirror_subagent_to_child(event_type: str, payload: dict) -> None:
             _child_mirrors.pop(child_key, None)
 
 
+def _on_agent_event(sid: str, event_type: str, payload: dict | None = None) -> None:
+    """Apply agent lifecycle events that must reach the TUI during a live turn."""
+    if event_type != "session:compress":
+        return
+    with _sessions_lock:
+        session = _sessions.get(sid)
+    if session is None:
+        return
+    if _sync_session_key_after_compress(
+        sid,
+        session,
+        clear_pending_title=False,
+        restart_slash_worker=True,
+    ):
+        _emit("session.info", sid, _session_info(session.get("agent"), session))
+
+
 def _agent_cbs(sid: str) -> dict:
     return {
         "tool_start_callback": lambda tc_id, name, args: _on_tool_start(
@@ -3300,6 +3317,9 @@ def _agent_cbs(sid: str) -> dict:
         ),
         "notice_clear_callback": lambda key: _emit(
             "notification.clear", sid, {"key": key}
+        ),
+        "event_callback": lambda event_type, payload=None: _on_agent_event(
+            sid, str(event_type), payload if isinstance(payload, dict) else None
         ),
         "clarify_callback": lambda q, c: _block(
             "clarify.request", sid, {"question": q, "choices": c},
@@ -4724,6 +4744,15 @@ def _(rid, params: dict) -> dict:
     )
 
     def _reuse_live_payload(sid: str, session: dict) -> dict:
+        # A compression may have rotated agent.session_id before its lifecycle
+        # callback updated the gateway-side key. Reconcile that transition under
+        # the same reentrant lock held by session.resume before exposing IDs.
+        _sync_session_key_after_compress(
+            sid,
+            session,
+            clear_pending_title=False,
+            restart_slash_worker=True,
+        )
         payload = _live_session_payload(
             sid,
             session,
@@ -4745,7 +4774,11 @@ def _(rid, params: dict) -> dict:
         # SAME stale id, a self-reinforcing lock onto the pre-compaction segment.
         # The live session_key is authoritative for a still-running session, so
         # surface it (fall back to live_tip, then target) to break the loop.
-        live_key = str(session.get("session_key") or "").strip()
+        live_key = str(
+            getattr(session.get("agent"), "session_id", None)
+            or session.get("session_key")
+            or ""
+        ).strip()
         payload["resumed"] = live_key or live_tip or target
         # A lazy watch session never owns a run loop, so its payload's running
         # flag is always False — overlay the child-run registry so a reconnecting
@@ -4915,6 +4948,16 @@ def _(rid, params: dict) -> dict:
     # discard our just-built agent and reuse theirs (no worker/poller wired yet).
     with _session_resume_lock:
         live = _find_live_session_by_key(target)
+        if live is None:
+            # The winning session can compress while this slower builder is
+            # outside the lock. Recompute the tip now rather than consulting
+            # the snapshot captured before _make_agent blocked.
+            try:
+                race_tip = db.get_compression_tip(target)
+            except Exception:
+                race_tip = live_tip
+            if race_tip and race_tip != target:
+                live = _find_live_session_by_key(race_tip)
         if live is not None:
             try:
                 if hasattr(agent, "close"):
@@ -4923,16 +4966,7 @@ def _(rid, params: dict) -> dict:
                 pass
             if lease is not None:
                 lease.release()
-            other_sid, other_session = live
-            payload = _live_session_payload(
-                other_sid,
-                other_session,
-                cols=cols,
-                touch=True,
-                transport=current_transport() or _stdio_transport,
-            )
-            payload["resumed"] = target
-            return _ok(rid, payload)
+            return _ok(rid, _reuse_live_payload(*live))
         try:
             init_home_token = (
                 set_hermes_home_override(str(profile_home))
@@ -5080,7 +5114,13 @@ def _find_live_session_by_key(session_key: str) -> tuple[str, dict] | None:
     for sid, session in list(_sessions.items()):
         if session.get("_finalized"):
             continue
-        if str(session.get("session_key") or "") == session_key:
+        agent_session_id = str(
+            getattr(session.get("agent"), "session_id", None) or ""
+        )
+        if (
+            str(session.get("session_key") or "") == session_key
+            or agent_session_id == session_key
+        ):
             return sid, session
     return None
 

@@ -200,6 +200,49 @@ class TestSyncSessionKeyAfterAutoCompress:
         finally:
             server._sessions.pop("test-sid", None)
 
+    def test_session_key_rekeys_during_long_turn_on_compression_event(self, monkeypatch):
+        """A detached renderer must rekey before run_conversation returns."""
+        from tui_gateway import server
+
+        agent = types.SimpleNamespace(session_id="continuation-session")
+        session = _tui_session(
+            agent=agent,
+            session_key="parent-session",
+            running=True,
+            transport=server._detached_ws_transport,
+        )
+        emitted = []
+        monkeypatch.setattr(server, "_restart_slash_worker", lambda *a, **kw: None)
+        monkeypatch.setattr(
+            server,
+            "_emit",
+            lambda event, sid, payload=None: emitted.append((event, sid, payload)),
+        )
+        monkeypatch.setattr(server, "_session_info", lambda _agent, sess=None: {
+            "session_key": sess.get("session_key") if sess else "",
+        })
+        server._sessions["test-sid"] = session
+
+        try:
+            callback = server._agent_cbs("test-sid")["event_callback"]
+            callback(
+                "session:compress",
+                {
+                    "old_session_id": "parent-session",
+                    "session_id": "continuation-session",
+                },
+            )
+        finally:
+            server._sessions.pop("test-sid", None)
+
+        assert session["session_key"] == "continuation-session"
+        assert any(
+            event == "session.info"
+            and sid == "test-sid"
+            and payload["session_key"] == "continuation-session"
+            for event, sid, payload in emitted
+        )
+
     def test_sync_returns_true_on_rotation_false_when_unchanged(self, monkeypatch):
         """_sync_session_key_after_compress must report whether the id rotated.
 

@@ -1263,6 +1263,102 @@ def test_session_resume_reattach_reports_tip_not_stale_requested_id(
     assert result["resumed"] != "seg14"
 
 
+def test_session_resume_creation_race_adopts_newly_rotated_live_tip(
+    monkeypatch, tmp_path
+):
+    """A cold-build loser must adopt a winner that compressed during the build."""
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session("parent", source="tui")
+    db.append_message("parent", role="user", content="original prompt")
+
+    winner_sid = "winner-live"
+    loser_agents = []
+
+    class _LoserAgent:
+        model = "test"
+        provider = "test"
+
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    def fake_make_agent(*args, **kwargs):
+        del args, kwargs
+        # The first resume was building outside _session_resume_lock. A second
+        # resume won that race and then compressed before the first builder
+        # reacquired the lock, so its durable key is now the continuation.
+        db.end_session("parent", "compression")
+        db.create_session("rotated-tip", source="tui", parent_session_id="parent")
+        db.append_message(
+            "rotated-tip", role="assistant", content="new live continuation"
+        )
+        server._sessions[winner_sid] = {
+            "agent": types.SimpleNamespace(
+                model="test", provider="test", session_id="rotated-tip"
+            ),
+            # Model the transition before session:compress rekeys the gateway.
+            "session_key": "parent",
+            "history": [
+                {"role": "assistant", "content": "new live continuation"}
+            ],
+            "history_lock": threading.Lock(),
+            "cols": 80,
+            "transport": None,
+            "last_active": time.time(),
+        }
+        loser = _LoserAgent()
+        loser_agents.append(loser)
+        return loser
+
+    def fake_init_session(sid, key, agent, history, cols=80, **kwargs):
+        del key, history, cols, kwargs
+        server._sessions[sid] = {
+            "agent": agent,
+            "session_key": "parent",
+            "history": [],
+            "history_lock": threading.Lock(),
+        }
+
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(
+        server, "_claim_active_session_slot", lambda *a, **k: (None, None)
+    )
+    monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
+    monkeypatch.setattr(server, "_set_session_context", lambda target: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda tokens: None)
+    monkeypatch.setattr(server, "_make_agent", fake_make_agent)
+    monkeypatch.setattr(server, "_init_session", fake_init_session)
+    monkeypatch.setattr(server, "_restart_slash_worker", lambda *a, **k: None)
+    monkeypatch.setattr(
+        server,
+        "_session_info",
+        lambda agent, *a: {"model": "test", "tools": {}, "skills": {}},
+    )
+
+    before = set(server._sessions)
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "session.resume",
+                "params": {"session_id": "parent"},
+            }
+        )
+    finally:
+        for sid in set(server._sessions) - before:
+            server._sessions.pop(sid, None)
+        db.close()
+
+    result = resp["result"]
+    assert result["session_id"] == winner_sid
+    assert result["session_key"] == "rotated-tip"
+    assert result["resumed"] == "rotated-tip"
+    assert loser_agents and loser_agents[0].closed is True
+
 
 def test_session_resume_passes_stored_runtime_to_agent(monkeypatch):
     captured = {}
