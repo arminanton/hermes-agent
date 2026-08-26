@@ -4297,6 +4297,11 @@ def run_conversation(
 
                 messages.append(assistant_msg)
                 agent._emit_interim_assistant_message(assistant_msg)
+                # Persist the assistant's tool intent before execution begins.
+                # A terminal/browser/delegation call can run for minutes; if the
+                # gateway exits during it, a cold resume must still land on the
+                # commentary and tool call the user last saw.
+                agent.checkpoint_session_messages(messages, conversation_history)
 
                 # Close any open streaming display (response box, reasoning
                 # box) before tool execution begins.  Intermediate turns may
@@ -4311,6 +4316,11 @@ def run_conversation(
                         pass
 
                 agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
+                # Persist completed tool results before the next model call.
+                # This bounds crash loss to the currently executing batch rather
+                # than the entire multi-hour tool loop. For concurrent batches,
+                # individual results remain in memory until the batch returns.
+                agent.checkpoint_session_messages(messages, conversation_history)
 
                 if agent._tool_guardrail_halt_decision is not None:
                     decision = agent._tool_guardrail_halt_decision

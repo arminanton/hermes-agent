@@ -1235,7 +1235,7 @@ def test_run_conversation_codex_tool_round_trip(monkeypatch):
     responses = [_codex_tool_call_response(), _codex_message_response("done")]
     monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0))
 
-    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id):
+    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, *_args):
         for call in assistant_message.tool_calls:
             messages.append(
                 {
@@ -1253,6 +1253,65 @@ def test_run_conversation_codex_tool_round_trip(monkeypatch):
     assert result["final_response"] == "done"
     assert any(msg.get("tool_calls") for msg in result["messages"] if msg.get("role") == "assistant")
     assert any(msg.get("role") == "tool" and msg.get("tool_call_id") == "call_1" for msg in result["messages"])
+
+
+def test_tool_round_is_checkpointed_before_next_model_call(monkeypatch, tmp_path):
+    """A restart between tool rounds must not rewind the completed batch."""
+    from hermes_state import SessionDB
+
+    agent = _build_agent(monkeypatch)
+    db = SessionDB(db_path=tmp_path / "state.db")
+    agent._session_db = db
+    setattr(agent, "session_id", "tool-checkpoint")
+    agent._session_db_created = False
+    agent._last_flushed_db_idx = 0
+    agent._ensure_db_session()
+
+    responses = [_codex_tool_call_response(), _codex_message_response("done")]
+    api_calls = 0
+    checkpoint_seen = {"before_tool": False, "before_next_model": False}
+
+    def _rows_have_tool_round():
+        rows = db.get_messages("tool-checkpoint")
+        has_assistant = any(
+            row["role"] == "assistant" and row["tool_calls"] for row in rows
+        )
+        has_result = any(
+            row["role"] == "tool"
+            and row["tool_call_id"] == "call_1"
+            and row["content"] == '{"ok":true}'
+            for row in rows
+        )
+        return has_assistant, has_result
+
+    def _api_call(_api_kwargs):
+        nonlocal api_calls
+        api_calls += 1
+        if api_calls == 2:
+            checkpoint_seen["before_next_model"] = all(_rows_have_tool_round())
+        return responses.pop(0)
+
+    def _fake_execute_tool_calls(assistant_message, messages, *_args):
+        checkpoint_seen["before_tool"] = _rows_have_tool_round()[0]
+        for call in assistant_message.tool_calls:
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": '{"ok":true}',
+                }
+            )
+
+    monkeypatch.setattr(agent, "_interruptible_api_call", _api_call)
+    monkeypatch.setattr(agent, "_execute_tool_calls", _fake_execute_tool_calls)
+
+    try:
+        result = agent.run_conversation("run a command")
+        assert result["final_response"] == "done"
+        assert checkpoint_seen["before_tool"], "assistant tool intent was not durable"
+        assert checkpoint_seen["before_next_model"], "completed tool result was not durable"
+    finally:
+        db.close()
 
 
 def test_chat_messages_to_responses_input_uses_call_id_for_function_call(monkeypatch):
