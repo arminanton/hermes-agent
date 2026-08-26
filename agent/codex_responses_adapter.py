@@ -1177,15 +1177,27 @@ def _normalize_codex_response(
         if item_type == "message":
             item_phase = _response_field(item, "phase")
             normalized_phase = None
+            is_public_commentary = False
+            is_analysis_phase = False
             if isinstance(item_phase, str):
                 normalized_phase = item_phase.strip().lower()
                 if normalized_phase in {"commentary", "analysis"}:
                     saw_commentary_phase = True
+                    is_public_commentary = normalized_phase == "commentary"
+                    is_analysis_phase = normalized_phase == "analysis"
                 elif normalized_phase in {"final_answer", "final"}:
                     saw_final_answer_phase = True
             message_text = _extract_responses_message_text(item)
             if message_text:
-                content_parts.append(message_text)
+                # Commentary and analysis are mid-turn narration, not the final
+                # answer. Preserve the exact item for replay while exposing its
+                # readable text only through the reasoning/commentary surfaces.
+                if is_public_commentary:
+                    commentary_parts.append(message_text)
+                elif is_analysis_phase:
+                    reasoning_parts.append(message_text)
+                else:
+                    content_parts.append(message_text)
                 raw_message_item: Dict[str, Any] = {
                     "type": "message",
                     "role": "assistant",
@@ -1324,6 +1336,7 @@ def _normalize_codex_response(
         content=final_text,
         tool_calls=tool_calls,
         reasoning="\n\n".join(reasoning_parts).strip() if reasoning_parts else None,
+        commentary="\n\n".join(commentary_parts).strip() if commentary_parts else None,
         reasoning_content=None,
         reasoning_details=None,
         codex_reasoning_items=reasoning_items_raw or None,

@@ -392,6 +392,7 @@ def _consume_codex_event_stream(
     model: str,
     on_text_delta=None,
     on_reasoning_delta=None,
+    on_commentary_message=None,
     on_first_delta=None,
     on_event=None,
     interrupt_check=None,
@@ -423,7 +424,8 @@ def _consume_codex_event_stream(
     * ``on_text_delta(str)`` — fires per ``response.output_text.delta``, suppressed
       once a function_call event is seen (so tool-call turns don't bleed text
       into the chat).
-    * ``on_reasoning_delta(str)`` — fires per ``response.reasoning.*.delta``.
+    * ``on_reasoning_delta(str)`` — fires per reasoning delta and analysis text.
+    * ``on_commentary_message(str)`` — fires once per completed commentary item.
     * ``on_first_delta()`` — one-shot, fires on the first text delta only.
     * ``on_event(event)`` — fires for every event before any other processing.
       Used for watchdog activity, debug logging, anything wire-shape-agnostic.
@@ -433,6 +435,9 @@ def _consume_codex_event_stream(
     collected_text_deltas: List[str] = []
     has_tool_calls = False
     first_delta_fired = False
+    active_message_phase: str | None = None
+    commentary_text_deltas: List[str] = []
+    active_summary_index: Any = None
     terminal_status: str = "completed"
     terminal_usage: Any = None
     terminal_response_id: str = None
@@ -466,9 +471,41 @@ def _consume_codex_event_stream(
         if event_type == "error":
             _raise_stream_error(event)
 
+        # Message phases carry different semantics on the Responses wire.
+        # Commentary is public mid-turn progress, analysis is reasoning, and
+        # only final-answer text belongs in the assistant response buffer.
+        if event_type == "response.output_item.added":
+            item = _event_field(event, "item")
+            item_type = _item_field(item, "type", "")
+            if item_type == "message":
+                phase = _item_field(item, "phase", None)
+                active_message_phase = (
+                    phase.strip().lower() if isinstance(phase, str) else None
+                )
+                if active_message_phase == "commentary":
+                    commentary_text_deltas = []
+            else:
+                active_message_phase = None
+            if "function_call" in str(item_type):
+                has_tool_calls = True
+            continue
+
         if "output_text.delta" in event_type or event_type == "response.output_text.delta":
             delta_text = _event_field(event, "delta", "")
-            if delta_text:
+            if delta_text and active_message_phase == "commentary":
+                commentary_text_deltas.append(delta_text)
+                if on_commentary_message is None and on_reasoning_delta is not None:
+                    try:
+                        on_reasoning_delta(delta_text)
+                    except Exception:
+                        logger.debug("Codex stream on_reasoning_delta raised", exc_info=True)
+            elif delta_text and active_message_phase == "analysis":
+                if on_reasoning_delta is not None:
+                    try:
+                        on_reasoning_delta(delta_text)
+                    except Exception:
+                        logger.debug("Codex stream on_reasoning_delta raised", exc_info=True)
+            elif delta_text:
                 collected_text_deltas.append(delta_text)
                 if not has_tool_calls:
                     if not first_delta_fired:
@@ -502,6 +539,31 @@ def _consume_codex_event_stream(
             done_item = _event_field(event, "item")
             if done_item is not None:
                 collected_output_items.append(done_item)
+                done_phase = _item_field(done_item, "phase", None)
+                done_phase = (
+                    done_phase.strip().lower()
+                    if isinstance(done_phase, str)
+                    else None
+                )
+                if done_phase == "commentary" and on_commentary_message is not None:
+                    commentary_text = "".join(commentary_text_deltas).strip()
+                    if not commentary_text:
+                        content_parts = _item_field(done_item, "content", [])
+                        if isinstance(content_parts, list):
+                            commentary_text = "".join(
+                                str(_item_field(part, "text", "") or "")
+                                for part in content_parts
+                                if _item_field(part, "type", "") == "output_text"
+                            ).strip()
+                    if commentary_text:
+                        try:
+                            on_commentary_message(commentary_text)
+                        except Exception:
+                            logger.debug(
+                                "Codex stream on_commentary_message raised",
+                                exc_info=True,
+                            )
+                    commentary_text_deltas = []
             continue
 
         if event_type in _TERMINAL_EVENT_TYPES:
@@ -602,6 +664,9 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
     def _on_reasoning_delta(text: str) -> None:
         agent._fire_reasoning_delta(text)
 
+    def _on_commentary_message(text: str) -> None:
+        agent._fire_streamed_codex_commentary(text)
+
     def _on_event(event: Any) -> None:
         # TTFB watchdog and activity touch — runs once per SSE event.
         agent._codex_stream_last_event_ts = time.time()
@@ -641,6 +706,12 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     model=api_kwargs.get("model"),
                     on_text_delta=_on_text_delta,
                     on_reasoning_delta=_on_reasoning_delta,
+                    on_commentary_message=(
+                        _on_commentary_message
+                        if getattr(agent, "interim_assistant_callback", None) is not None
+                        and getattr(agent, "show_commentary", True)
+                        else None
+                    ),
                     on_first_delta=on_first_delta,
                     on_event=_on_event,
                     interrupt_check=_interrupt_check,

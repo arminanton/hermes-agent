@@ -1574,6 +1574,10 @@ DEFAULT_CONFIG = {
         "tui_agents_nudge": True,
         "bell_on_complete": False,
         "show_reasoning": False,
+        # Show provider-authored public progress narration separately from
+        # private reasoning. Set false to route Codex commentary through the
+        # reasoning display instead.
+        "show_commentary": True,
         # Background self-improvement review notifications surfaced in chat.
         #   "off"     — no chat notification (the review still runs and writes)
         #   "on"      — generic "💾 Memory updated" line (default)

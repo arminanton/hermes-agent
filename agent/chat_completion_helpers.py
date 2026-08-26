@@ -997,6 +997,26 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     reasoning_text = agent._extract_reasoning(assistant_message)
     _from_structured = bool(reasoning_text)
 
+    # Public Codex commentary is stored in structured message items, not in
+    # the reasoning field. When commentary display is disabled, deliberately
+    # fold it into reasoning as the legacy fallback. Otherwise keep the two
+    # surfaces distinct and let the interim callback deliver commentary.
+    if not getattr(agent, "show_commentary", True):
+        codex_message_items = getattr(
+            assistant_message,
+            "codex_message_items",
+            None,
+        )
+        if codex_message_items:
+            commentary_text = agent._extract_codex_interim_visible_text(
+                {"codex_message_items": codex_message_items},
+                include_when_hidden=True,
+            )
+            if commentary_text:
+                reasoning_text = "\n\n".join(
+                    part for part in (commentary_text, reasoning_text) if part
+                )
+
     # Fallback: extract inline <think> blocks from content when no structured
     # reasoning fields are present (some models/providers embed thinking
     # directly in the content rather than returning separate API fields).
