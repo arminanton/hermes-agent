@@ -5124,7 +5124,13 @@ class AIAgent:
                 requested, self.model, supported_efforts, effective,
             )
 
-        return {"effort": effective}
+        # Copilot performs reasoning without this field but returns only opaque
+        # encrypted state. Request the provider-authored visible summary so the
+        # existing reasoning callback and persistence paths have text to carry.
+        return {
+            "effort": effective,
+            "summary": getattr(self, "reasoning_summary", "auto"),
+        }
 
     def _build_assistant_message(self, assistant_message, finish_reason: str) -> dict:
         """Forwarder — see ``agent.chat_completion_helpers.build_assistant_message``."""

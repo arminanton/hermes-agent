@@ -452,9 +452,71 @@ def test_build_api_kwargs_copilot_responses_omits_openai_only_fields(monkeypatch
     assert kwargs["store"] is False
     assert kwargs["tool_choice"] == "auto"
     assert kwargs["parallel_tool_calls"] is True
-    assert kwargs["reasoning"] == {"effort": "medium"}
+    assert kwargs["reasoning"] == {"effort": "medium", "summary": "auto"}
     assert "prompt_cache_key" not in kwargs
     assert "include" not in kwargs
+
+
+def test_build_api_kwargs_copilot_responses_honors_detailed_summary_config(
+    monkeypatch,
+):
+    from hermes_cli import config as config_module
+
+    monkeypatch.setattr(
+        config_module,
+        "load_config",
+        lambda: {"agent": {"reasoning_summary": "detailed"}},
+    )
+    agent = _build_copilot_agent(monkeypatch)
+    kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
+
+    assert kwargs["reasoning"] == {
+        "effort": "medium",
+        "summary": "detailed",
+    }
+
+
+def test_copilot_reasoning_summary_follows_active_profile_home(
+    monkeypatch,
+    tmp_path,
+):
+    from hermes_cli import config as config_module
+
+    auto_home = tmp_path / "auto-profile"
+    detailed_home = tmp_path / "detailed-profile"
+
+    monkeypatch.setenv("HERMES_HOME", str(auto_home))
+    config_module.save_config({"agent": {"reasoning_summary": "auto"}})
+    auto_agent = _build_copilot_agent(monkeypatch)
+
+    monkeypatch.setenv("HERMES_HOME", str(detailed_home))
+    config_module.save_config({"agent": {"reasoning_summary": "detailed"}})
+    detailed_agent = _build_copilot_agent(monkeypatch)
+
+    auto_reasoning = auto_agent._github_models_reasoning_extra_body()
+    detailed_reasoning = detailed_agent._github_models_reasoning_extra_body()
+    assert auto_reasoning is not None
+    assert detailed_reasoning is not None
+    assert auto_reasoning["summary"] == "auto"
+    assert detailed_reasoning["summary"] == "detailed"
+
+
+def test_invalid_copilot_reasoning_summary_warns_and_uses_auto(
+    monkeypatch,
+    caplog,
+):
+    from hermes_cli import config as config_module
+
+    monkeypatch.setattr(
+        config_module,
+        "load_config",
+        lambda: {"agent": {"reasoning_summary": "verbose"}},
+    )
+    with caplog.at_level("WARNING"):
+        agent = _build_copilot_agent(monkeypatch)
+
+    assert getattr(agent, "reasoning_summary", None) == "auto"
+    assert "Unknown agent.reasoning_summary 'verbose'; using 'auto'" in caplog.text
 
 
 def test_build_api_kwargs_copilot_responses_omits_reasoning_for_non_reasoning_model(monkeypatch):

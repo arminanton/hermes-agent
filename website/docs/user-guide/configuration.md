@@ -1202,10 +1202,13 @@ Control how much "thinking" the model does before responding:
 
 ```yaml
 agent:
-  reasoning_effort: ""   # empty = medium (default). Options: none, minimal, low, medium, high, xhigh (max)
+  reasoning_effort: ""   # empty = medium (default). Options: none, minimal, low, medium, high, xhigh, max
+  reasoning_summary: auto # Provider-authored summary: auto, concise, or detailed
 ```
 
 When unset (default), reasoning effort defaults to "medium" — a balanced level that works well for most tasks. Setting a value overrides it — higher reasoning effort gives better results on complex tasks at the cost of more tokens and latency.
+
+`reasoning_summary` controls the public reasoning summary requested from GitHub Copilot Responses models. It does not expose private model scratchpads or change reasoning effort. Use `detailed` for fuller explanations, `concise` for shorter summaries, or `auto` to let Copilot choose.
 
 :::note Adaptive-thinking models (Claude 4.6+, Fable/Mythos-class) over OpenRouter
 These models use *adaptive* thinking and don't accept the usual `reasoning.effort`

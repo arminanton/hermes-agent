@@ -916,6 +916,9 @@ DEFAULT_CONFIG = {
         # provider hiccups on a single provider.
         "api_max_retries": 3,
         "service_tier": "",
+        # Provider-authored public reasoning summary detail for Copilot
+        # Responses models. Supported values: "auto", "concise", "detailed".
+        "reasoning_summary": "auto",
         # Tool-use enforcement: injects system prompt guidance that tells the
         # model to actually call tools instead of describing intended actions.
         # Values: "auto" (default — applies to gpt/codex models), true/false

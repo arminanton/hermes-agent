@@ -1226,6 +1226,38 @@ def init_agent(
         _agent_cfg = _load_agent_config()
     except Exception:
         _agent_cfg = {}
+
+    # Provider-authored reasoning summaries are public, bounded explanations,
+    # not private model scratchpads. Keep the provider's automatic policy by
+    # default while allowing a profile to request concise or detailed output.
+    agent.reasoning_summary = "auto"
+    try:
+        _agent_section = _agent_cfg.get("agent", {})
+        if isinstance(_agent_section, dict):
+            _reasoning_summary = str(
+                _agent_section.get("reasoning_summary", "auto") or "auto"
+            ).strip().lower()
+            if _reasoning_summary in {"auto", "concise", "detailed"}:
+                agent.reasoning_summary = _reasoning_summary
+            else:
+                _ra().logger.warning(
+                    "Unknown agent.reasoning_summary %r; using 'auto'",
+                    _reasoning_summary,
+                )
+    except Exception:
+        agent.reasoning_summary = "auto"
+
+    # Codex phase=commentary messages are public mid-turn progress by default.
+    # Turning this off restores the reasoning-channel fallback.
+    agent.show_commentary = True
+    try:
+        _display_section = _agent_cfg.get("display", {})
+        if isinstance(_display_section, dict):
+            agent.show_commentary = bool(
+                _display_section.get("show_commentary", True)
+            )
+    except Exception:
+        agent.show_commentary = True
     try:
         agent._tool_guardrails = ToolCallGuardrailController(
             ToolCallGuardrailConfig.from_mapping(
