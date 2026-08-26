@@ -7082,6 +7082,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             save_config_value("model.default", result.new_model)
             if result.provider_changed:
                 save_config_value("model.provider", result.target_provider)
+            from hermes_cli.model_switch import model_api_mode_for_persistence
+            persisted_api_mode = model_api_mode_for_persistence(result.target_provider)
+            if persisted_api_mode is not None:
+                save_config_value("model.api_mode", persisted_api_mode)
             _cprint("    Saved to config.yaml (--global)")
         else:
             _cprint("    (session only — add --global to persist)")
@@ -7362,6 +7366,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             save_config_value("model.default", result.new_model)
             if result.provider_changed:
                 save_config_value("model.provider", result.target_provider)
+            from hermes_cli.model_switch import model_api_mode_for_persistence
+            persisted_api_mode = model_api_mode_for_persistence(result.target_provider)
+            if persisted_api_mode is not None:
+                save_config_value("model.api_mode", persisted_api_mode)
             _cprint("    Saved to config.yaml")
         else:
             _cprint("    (session only — add --global to persist)")

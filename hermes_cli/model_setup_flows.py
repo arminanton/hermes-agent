@@ -1415,12 +1415,12 @@ def _model_flow_copilot(config, current_model=""):
         resolve_api_key_provider_credentials,
     )
     from hermes_cli.config import save_env_value, load_config, save_config
+    from hermes_cli.model_switch import model_api_mode_for_persistence
     from hermes_cli.models import (
         _PROVIDER_MODELS,
         fetch_api_models,
         fetch_github_model_catalog,
         github_model_reasoning_efforts,
-        copilot_model_api_mode,
         normalize_copilot_model_id,
     )
 
@@ -1583,11 +1583,12 @@ def _model_flow_copilot(config, current_model=""):
             cfg["model"] = model
         model["provider"] = provider_id
         model["base_url"] = effective_base
-        model["api_mode"] = copilot_model_api_mode(
-            selected,
-            catalog=catalog,
-            api_key=api_key,
-        )
+        # Copilot serves different models over three incompatible transports.
+        # Keep the provider-level setting automatic and derive it from the
+        # selected model whenever an agent is built.
+        persisted_api_mode = model_api_mode_for_persistence(provider_id)
+        if persisted_api_mode is not None:
+            model["api_mode"] = persisted_api_mode
         if selected_effort is not None:
             _set_reasoning_effort(cfg, selected_effort)
         save_config(cfg)

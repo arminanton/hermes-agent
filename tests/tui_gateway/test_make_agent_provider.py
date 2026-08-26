@@ -6,6 +6,7 @@ provider/base_url/api_key empty in AIAgent, causing HTTP 404.
 """
 
 import os
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 
@@ -469,3 +470,33 @@ def test_apply_model_switch_does_not_leak_process_env():
     # Sibling session is completely untouched.
     assert sess_a["model_override"] is None
     assert sess_a["agent"].model == "minimax/m3"
+
+
+def test_persist_copilot_model_switch_blanks_stale_api_mode(monkeypatch):
+    """A global TUI switch must not pin one Copilot model's wire protocol."""
+    from tui_gateway import server
+
+    cfg = {
+        "model": {
+            "default": "claude-opus-4.8",
+            "provider": "copilot",
+            "api_mode": "anthropic_messages",
+        }
+    }
+    saved = {}
+    monkeypatch.setattr(server, "_load_cfg", lambda: cfg)
+    monkeypatch.setattr(
+        "hermes_cli.config.save_config",
+        lambda value: saved.update(value),
+    )
+
+    server._persist_model_switch(
+        SimpleNamespace(
+            new_model="gpt-5.6-sol",
+            target_provider="copilot",
+            base_url="https://api.business.githubcopilot.com",
+        )
+    )
+
+    assert saved["model"]["default"] == "gpt-5.6-sol"
+    assert saved["model"]["api_mode"] == ""

@@ -2232,6 +2232,7 @@ def _restart_slash_worker(sid: str, session: dict):
 
 def _persist_model_switch(result) -> None:
     from hermes_cli.config import save_config
+    from hermes_cli.model_switch import model_api_mode_for_persistence
 
     cfg = _load_cfg()
     model_cfg = cfg.get("model")
@@ -2245,6 +2246,9 @@ def _persist_model_switch(result) -> None:
         model_cfg["base_url"] = result.base_url
     else:
         model_cfg.pop("base_url", None)
+    persisted_api_mode = model_api_mode_for_persistence(result.target_provider)
+    if persisted_api_mode is not None:
+        model_cfg["api_mode"] = persisted_api_mode
     save_config(cfg)
 
 

@@ -69,6 +69,35 @@ class TestSaveModelChoiceAlwaysDict:
         assert model["provider"] == "openrouter"  # preserved
 
 
+@pytest.mark.parametrize(
+    "provider",
+    ("copilot", "github", "github-copilot", "github-model", "github-models"),
+)
+def test_copilot_aliases_persist_automatic_api_mode(provider):
+    """Every supported Copilot alias must persist a YAML empty string."""
+    import yaml
+
+    from hermes_cli.model_switch import model_api_mode_for_persistence
+
+    config = {"model": {"api_mode": model_api_mode_for_persistence(provider)}}
+    round_tripped = yaml.safe_load(yaml.safe_dump(config))
+
+    assert round_tripped["model"]["api_mode"] == ""
+
+
+def test_other_provider_does_not_override_persisted_api_mode():
+    from hermes_cli.model_switch import model_api_mode_for_persistence
+
+    assert model_api_mode_for_persistence("custom") is None
+
+
+@pytest.mark.parametrize("provider", ("github_copilot", "gh-copilot"))
+def test_unsupported_copilot_spellings_do_not_clear_api_mode(provider):
+    from hermes_cli.model_switch import model_api_mode_for_persistence
+
+    assert model_api_mode_for_persistence(provider) is None
+
+
 class TestProviderPersistsAfterModelSave:
     def test_update_config_for_provider_uses_atomic_yaml_write(self, config_home):
         """Provider switches should delegate config writes to atomic_yaml_write."""
@@ -173,7 +202,7 @@ class TestProviderPersistsAfterModelSave:
         assert model.get("provider") == "copilot"
         assert model.get("base_url") == "https://api.githubcopilot.com"
         assert model.get("default") == "gpt-5.4"
-        assert model.get("api_mode") == "codex_responses"
+        assert model.get("api_mode") == ""
         assert config["agent"]["reasoning_effort"] == "high"
 
     def test_named_custom_provider_preserves_explicit_api_mode(self, config_home):

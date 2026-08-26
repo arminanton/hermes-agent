@@ -13,6 +13,7 @@ Fix: both display paths now go through ``resolve_display_context_length()``.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from hermes_cli.model_switch import ModelSwitchResult
@@ -52,6 +53,84 @@ def _run_display(monkeypatch, result):
     monkeypatch.setattr(cli_mod, "save_config_value", lambda *a, **k: None)
     cli_mod.HermesCLI._apply_model_switch_result(_StubCLI(), result, False)
     return captured
+
+
+def test_global_copilot_switch_blanks_persisted_api_mode(monkeypatch):
+    """Copilot transport belongs to the model and must stay automatic in YAML."""
+    import cli as cli_mod
+
+    writes: list[tuple[str, object]] = []
+    monkeypatch.setattr(cli_mod, "_cprint", lambda *a, **k: None)
+    monkeypatch.setattr(
+        cli_mod,
+        "save_config_value",
+        lambda key, value: writes.append((key, value)),
+    )
+    result = ModelSwitchResult(
+        success=True,
+        new_model="gpt-5.6-sol",
+        target_provider="copilot",
+        provider_changed=False,
+        api_key="",
+        base_url="https://api.business.githubcopilot.com",
+        api_mode="codex_responses",
+        provider_label="GitHub Copilot",
+    )
+
+    cli_mod.HermesCLI._apply_model_switch_result(_StubCLI(), result, True)
+
+    assert ("model.default", "gpt-5.6-sol") in writes
+    assert ("model.api_mode", "") in writes
+
+
+def test_typed_global_copilot_switch_blanks_persisted_api_mode(monkeypatch):
+    """The typed /model path must apply the same model-derived mode policy."""
+    import cli as cli_mod
+
+    writes: list[tuple[str, object]] = []
+    result = ModelSwitchResult(
+        success=True,
+        new_model="gpt-5.6-sol",
+        target_provider="copilot",
+        provider_changed=False,
+        api_key="",
+        base_url="https://api.business.githubcopilot.com",
+        api_mode="codex_responses",
+        provider_label="GitHub Copilot",
+    )
+    stub = _StubCLI()
+    stub._confirm_expensive_model_switch = lambda switch_result: True
+    monkeypatch.setattr(cli_mod, "_cprint", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        cli_mod,
+        "save_config_value",
+        lambda key, value: writes.append((key, value)),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.switch_model", lambda **kwargs: result
+    )
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.resolve_display_context_length",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "hermes_cli.inventory.load_picker_context",
+        lambda: SimpleNamespace(
+            user_providers=None,
+            custom_providers=None,
+            with_overrides=lambda **kwargs: SimpleNamespace(
+                user_providers=None,
+                custom_providers=None,
+            ),
+        ),
+    )
+
+    cli_mod.HermesCLI._handle_model_switch(
+        stub, "/model gpt-5.6-sol --provider copilot --global"
+    )
+
+    assert ("model.default", "gpt-5.6-sol") in writes
+    assert ("model.api_mode", "") in writes
 
 
 def test_picker_path_uses_provider_aware_context_on_codex(monkeypatch):

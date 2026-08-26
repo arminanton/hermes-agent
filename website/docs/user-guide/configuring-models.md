@@ -106,6 +106,13 @@ model:
   api_mode: chat_completions
 ```
 
+For GitHub Copilot, Hermes writes `api_mode: ''`. Copilot serves different
+models through Chat Completions, Responses, and Anthropic Messages. Hermes
+therefore derives the transport from the selected model whenever it builds an
+agent. A nonempty `model.api_mode` is not authoritative for Copilot. A session
+record may retain its resolved API mode because that record is pinned to one
+specific model; it does not become the global Copilot setting.
+
 **Auxiliary override (example — vision on gemini-flash):**
 ```yaml
 auxiliary:

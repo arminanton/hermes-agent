@@ -295,6 +295,28 @@ class ModelSwitchResult:
     capabilities: Optional[ModelCapabilities] = None
     model_info: Optional[ModelInfo] = None
     is_global: bool = False
+
+
+def model_api_mode_for_persistence(provider: str) -> Optional[str]:
+    """Return the provider-level API mode to persist, if Hermes owns that value.
+
+    Copilot transport varies by model, so its global config must stay blank.
+    Resolve aliases through the canonical provider resolver rather than copying
+    its alias list into each CLI, gateway, and TUI persistence path.
+    """
+    raw_provider = str(provider or "").strip()
+    if not raw_provider:
+        return None
+
+    from hermes_cli.auth import AuthError, resolve_provider
+
+    try:
+        canonical_provider = resolve_provider(raw_provider)
+    except AuthError:
+        canonical_provider = raw_provider.lower()
+    return "" if canonical_provider == "copilot" else None
+
+
 # ---------------------------------------------------------------------------
 # Flag parsing
 # ---------------------------------------------------------------------------

@@ -1398,6 +1398,12 @@ class GatewaySlashCommandsMixin:
                     model_cfg["provider"] = result.target_provider
                     if result.base_url:
                         model_cfg["base_url"] = result.base_url
+                    from hermes_cli.model_switch import model_api_mode_for_persistence
+                    persisted_api_mode = model_api_mode_for_persistence(
+                        result.target_provider
+                    )
+                    if persisted_api_mode is not None:
+                        model_cfg["api_mode"] = persisted_api_mode
                     from hermes_cli.config import save_config
                     save_config(cfg)
                 except Exception as e:
