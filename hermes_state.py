@@ -1530,6 +1530,124 @@ class SessionDB:
         """Create a new session record. Returns the session_id."""
         self._insert_session_row(session_id, source, **kwargs)
         return session_id
+
+    def split_session_for_compression(
+        self,
+        *,
+        parent_session_id: str,
+        child_session_id: str,
+        source: str,
+        messages: List[Dict[str, Any]],
+        model: Optional[str] = None,
+        model_config: Optional[Dict[str, Any]] = None,
+        system_prompt: Optional[str] = None,
+        cwd: Optional[str] = None,
+    ) -> str:
+        """Atomically end a parent and create its complete compression child."""
+        prepared = []
+        now_ts = time.time()
+        total_tool_calls = 0
+        for msg in messages:
+            role = msg.get("role", "unknown")
+            tool_calls = msg.get("tool_calls")
+            message_timestamp = now_ts
+            ts_value = msg.get("timestamp")
+            if ts_value is not None:
+                try:
+                    message_timestamp = (
+                        float(ts_value.timestamp())
+                        if hasattr(ts_value, "timestamp")
+                        else float(ts_value)
+                    )
+                except (TypeError, ValueError):
+                    logger.debug(
+                        "Ignoring invalid explicit message timestamp: %r",
+                        msg.get("timestamp"),
+                    )
+            reasoning_details = (
+                msg.get("reasoning_details") if role == "assistant" else None
+            )
+            codex_reasoning_items = (
+                msg.get("codex_reasoning_items") if role == "assistant" else None
+            )
+            codex_message_items = (
+                msg.get("codex_message_items") if role == "assistant" else None
+            )
+            platform_msg_id = (
+                msg.get("platform_message_id") or msg.get("message_id")
+            )
+            prepared.append(
+                (
+                    role,
+                    self._encode_content(msg.get("content")),
+                    msg.get("tool_call_id"),
+                    json.dumps(tool_calls) if tool_calls else None,
+                    msg.get("tool_name"),
+                    message_timestamp,
+                    msg.get("token_count"),
+                    msg.get("finish_reason"),
+                    msg.get("reasoning") if role == "assistant" else None,
+                    msg.get("reasoning_content") if role == "assistant" else None,
+                    json.dumps(reasoning_details) if reasoning_details else None,
+                    json.dumps(codex_reasoning_items)
+                    if codex_reasoning_items
+                    else None,
+                    json.dumps(codex_message_items) if codex_message_items else None,
+                    platform_msg_id,
+                    1 if msg.get("observed") else 0,
+                )
+            )
+            if tool_calls is not None:
+                total_tool_calls += (
+                    len(tool_calls) if isinstance(tool_calls, list) else 1
+                )
+            now_ts = max(now_ts + 1e-6, message_timestamp + 1e-6)
+
+        transition_time = time.time()
+
+        def _do(conn):
+            ended = conn.execute(
+                "UPDATE sessions SET ended_at = ?, end_reason = 'compression' "
+                "WHERE id = ? AND ended_at IS NULL",
+                (transition_time, parent_session_id),
+            )
+            if ended.rowcount != 1:
+                raise RuntimeError(
+                    f"compression parent is missing or ended: {parent_session_id}"
+                )
+            conn.execute(
+                """INSERT INTO sessions (id, source, model, model_config,
+                   system_prompt, parent_session_id, cwd, started_at,
+                   message_count, tool_call_count)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    child_session_id,
+                    source,
+                    model,
+                    json.dumps(model_config) if model_config else None,
+                    system_prompt,
+                    parent_session_id,
+                    cwd,
+                    transition_time,
+                    len(prepared),
+                    total_tool_calls,
+                ),
+            )
+            for row in prepared:
+                conn.execute(
+                    """INSERT INTO messages (session_id, role, content,
+                       tool_call_id, tool_calls, tool_name, timestamp,
+                       token_count, finish_reason, reasoning,
+                       reasoning_content, reasoning_details,
+                       codex_reasoning_items, codex_message_items,
+                       platform_message_id, observed)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (child_session_id, *row),
+                )
+
+        self._execute_write(_do)
+        return child_session_id
+
     def end_session(self, session_id: str, end_reason: str) -> None:
         """Mark a session as ended.
 

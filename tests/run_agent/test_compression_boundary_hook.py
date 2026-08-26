@@ -13,6 +13,7 @@ this from a real user-initiated /new.
 
 import os
 import tempfile
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -216,6 +217,40 @@ class TestSessionCompressEvent:
             assert ctx["session_id"] == agent.session_id
             assert ctx["old_session_id"] == original_sid
             assert ctx["compression_count"] == 1
+
+    def test_event_callback_runs_after_persistence_lock_is_released(self):
+        """Compression must not nest persist-lock then gateway resume-lock."""
+        from hermes_state import SessionDB
+
+        probe_acquired = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            agent = self._make_agent(db)
+            persist_lock = getattr(agent, "_session_persist_lock")
+
+            def callback(_event_type, _ctx):
+                acquired = []
+
+                def probe():
+                    ok = persist_lock.acquire(timeout=1)
+                    acquired.append(ok)
+                    if ok:
+                        persist_lock.release()
+
+                thread = threading.Thread(target=probe)
+                thread.start()
+                thread.join(timeout=2)
+                probe_acquired.extend(acquired)
+
+            setattr(agent, "event_callback", callback)
+            setattr(agent, "context_compressor", self._stub_compressor())
+            agent._compress_context(
+                [{"role": "user", "content": "m"}],
+                "sys",
+                approx_tokens=100,
+            )
+
+        assert probe_acquired == [True]
 
     def test_no_callback_is_safe(self):
         """Compression must work when no event_callback is wired."""

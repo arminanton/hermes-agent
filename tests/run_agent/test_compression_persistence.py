@@ -18,8 +18,9 @@ Bug scenario (pre-fix):
 
 import os
 import tempfile
+import threading
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 
@@ -46,6 +47,168 @@ class TestFlushAfterCompression:
                 skip_memory=True,
             )
         return agent
+
+    @staticmethod
+    def _install_compressor(agent, compressed):
+        compressor = MagicMock()
+        compressor.compress.return_value = compressed
+        compressor.compression_count = 1
+        compressor.last_prompt_tokens = 0
+        compressor.last_completion_tokens = 0
+        compressor._last_summary_error = None
+        compressor._last_compress_aborted = False
+        compressor._last_aux_model_failure_model = None
+        compressor._last_aux_model_failure_error = None
+        agent.context_compressor = compressor
+        agent._compression_feasibility_checked = True
+
+    def test_compression_publishes_and_persists_only_the_compressed_child(self):
+        """Finalize after rotation must not copy the full parent into the child."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            try:
+                agent = self._make_agent(db)
+                db.create_session("original-session", source="tui")
+                agent._session_db_created = True
+                original = [
+                    {"role": "user", "content": f"old-{i}"}
+                    for i in range(8)
+                ]
+                assert agent.checkpoint_session_messages(original) is True
+
+                compacted = [
+                    {"role": "user", "content": "[CONTEXT COMPACTION] summary"},
+                    {"role": "assistant", "content": "recent answer"},
+                ]
+                self._install_compressor(agent, compacted)
+                real_split = db.split_session_for_compression
+                published_ids = []
+
+                def observe_split(**kwargs):
+                    published_ids.append(getattr(agent, "session_id"))
+                    return real_split(**kwargs)
+
+                setattr(db, "split_session_for_compression", observe_split)
+
+                result, _ = agent._compress_context(
+                    original, "system", approx_tokens=120_000
+                )
+                child_id = getattr(agent, "session_id")
+
+                assert published_ids == ["original-session"]
+                assert result == compacted
+                assert agent._session_messages == compacted
+                assert [row["content"] for row in db.get_messages(child_id)] == [
+                    "[CONTEXT COMPACTION] summary",
+                    "recent answer",
+                ]
+
+                agent.flush_pending_to_db()
+                assert [row["content"] for row in db.get_messages(child_id)] == [
+                    "[CONTEXT COMPACTION] summary",
+                    "recent answer",
+                ]
+
+            finally:
+                db.close()
+
+    def test_compression_does_not_rotate_when_parent_checkpoint_fails(self):
+        """The old tail must be durable before its session is ended."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            try:
+                agent = self._make_agent(db)
+                db.create_session("original-session", source="tui")
+                agent._session_db_created = True
+                original = [{"role": "user", "content": "must survive"}]
+                compacted = [
+                    {"role": "user", "content": "[CONTEXT COMPACTION] summary"}
+                ]
+                self._install_compressor(agent, compacted)
+                agent.checkpoint_session_messages = MagicMock(return_value=False)
+
+                result, _ = agent._compress_context(
+                    original, "system", approx_tokens=120_000
+                )
+
+                assert result is original
+                assert getattr(agent, "session_id") == "original-session"
+                parent_row = db.get_session("original-session")
+                assert parent_row is not None
+                assert parent_row["ended_at"] is None
+                conn = db._conn
+                assert conn is not None
+                children = conn.execute(
+                    "SELECT id FROM sessions WHERE parent_session_id = ?",
+                    ("original-session",),
+                ).fetchall()
+                assert children == []
+            finally:
+                db.close()
+
+    def test_atomic_split_failure_keeps_parent_available_for_cold_resume(self):
+        """An atomic split error must leave the durable parent resumable."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            try:
+                agent = self._make_agent(db)
+                db.create_session("original-session", source="tui")
+                agent._session_db_created = True
+                original = [
+                    {"role": "user", "content": "inspect the stale browser"},
+                    {
+                        "role": "assistant",
+                        "content": "I will inspect it now.",
+                        "tool_calls": [
+                            {
+                                "id": "call-browser",
+                                "type": "function",
+                                "function": {
+                                    "name": "browser_snapshot",
+                                    "arguments": "{}",
+                                },
+                            }
+                        ],
+                    },
+                ]
+                compacted = [
+                    {"role": "user", "content": "[CONTEXT COMPACTION] summary"}
+                ]
+                self._install_compressor(agent, compacted)
+                db.split_session_for_compression = MagicMock(
+                    side_effect=RuntimeError("injected atomic split failure")
+                )
+
+                result, _ = agent._compress_context(
+                    original, "system", approx_tokens=120_000
+                )
+
+                assert result is original
+                assert getattr(agent, "session_id") == "original-session"
+                assert agent._session_messages is original
+                parent_row = db.get_session("original-session")
+                assert parent_row is not None
+                assert parent_row["ended_at"] is None
+                conn = db._conn
+                assert conn is not None
+                children = conn.execute(
+                    "SELECT id FROM sessions WHERE parent_session_id = ?",
+                    ("original-session",),
+                ).fetchall()
+                assert children == []
+
+                resumed_id = db.resolve_resume_session_id("original-session")
+                assert resumed_id == "original-session"
+                resumed = db.get_messages_as_conversation(resumed_id)
+                assert "inspect the stale browser" in str(resumed)
+            finally:
+                db.close()
 
     def test_flush_after_compression_with_long_history(self):
         """The actual bug: conversation_history longer than compressed messages.

@@ -328,6 +328,7 @@ def compress_context(
         agent._compression_feasibility_checked = True
 
     _pre_msg_count = len(messages)
+    _pre_compression_count = getattr(agent.context_compressor, "compression_count", 0)
     logger.info(
         "context compression started: session=%s messages=%d tokens=~%s model=%s focus=%r",
         agent.session_id or "none", _pre_msg_count,
@@ -502,73 +503,138 @@ def compress_context(
     if todo_snapshot:
         compressed.append({"role": "user", "content": todo_snapshot})
 
+    _previous_system_prompt = getattr(agent, "_cached_system_prompt", None)
     agent._invalidate_system_prompt()
     new_system_prompt = agent._build_system_prompt(system_message)
     agent._cached_system_prompt = new_system_prompt
 
+    _persistence_aborted = False
     if agent._session_db:
+        _persist_lock = getattr(agent, "_session_persist_lock", None)
+        old_session_id = None
+        child_session_id = None
+        old_title = None
+        split_committed = False
+
+        # Memory extraction can call plugins and perform arbitrary I/O. Keep it
+        # outside the persistence lock, then re-check finalization after taking
+        # the lock before changing durable state.
+        memory_commit_error = None
         try:
+            agent.commit_memory_session(messages)
+        except Exception as exc:
+            memory_commit_error = exc
+
+        if _persist_lock is not None:
+            _persist_lock.acquire()
+        try:
+            if memory_commit_error is not None:
+                raise memory_commit_error
+            if getattr(agent, "_session_persist_finalizing", False):
+                raise RuntimeError("session persistence is finalizing")
             # Propagate title to the new session with auto-numbering
             old_title = agent._session_db.get_session_title(agent.session_id)
-            # Trigger memory extraction on the old session before it rotates.
-            agent.commit_memory_session(messages)
             # Flush any un-persisted messages from the current turn to the
             # old session *before* rotating.  compress_context() can be
             # called mid-turn (auto-compress when context exceeds threshold)
             # at a point when _flush_messages_to_session_db() has not yet
             # run.  Without this, messages generated during the current turn
             # are silently lost on session rotation (#47202).
-            try:
-                agent._flush_messages_to_session_db(messages)
-            except Exception:
-                pass  # best-effort — don't block compression on a flush error
-            agent._session_db.end_session(agent.session_id, "compression")
+            if not agent.checkpoint_session_messages(messages, publish=False):
+                raise RuntimeError("parent transcript checkpoint failed")
             old_session_id = agent.session_id
-            agent.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-            # Ordering contract: the agent thread updates the contextvar here;
-            # the gateway propagates to SessionEntry after run_in_executor returns.
+            child_session_id = (
+                f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_"
+                f"{uuid.uuid4().hex[:6]}"
+            )
+            persisted_compressed = [
+                agent._session_db_message_payload(message)
+                for message in compressed
+                if isinstance(message, dict)
+            ]
+            agent._session_db.split_session_for_compression(
+                parent_session_id=old_session_id,
+                child_session_id=child_session_id,
+                source=agent.platform
+                or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                messages=persisted_compressed,
+                model=agent.model,
+                model_config=agent._session_init_model_config,
+                system_prompt=new_system_prompt,
+            )
+            split_committed = True
+        except Exception as e:
+            # A wrapper or future journal adapter may raise after committing but
+            # before returning. Reconcile the durable transition before deciding
+            # which identity remains publishable. An ended parent must never be
+            # restored as the live destination.
+            if old_session_id and child_session_id and not split_committed:
+                try:
+                    parent_row = agent._session_db.get_session(old_session_id)
+                    child_row = agent._session_db.get_session(child_session_id)
+                    split_committed = bool(
+                        parent_row
+                        and child_row
+                        and parent_row.get("end_reason") == "compression"
+                        and child_row.get("parent_session_id") == old_session_id
+                    )
+                except Exception:
+                    split_committed = False
+            if not split_committed:
+                if old_session_id:
+                    agent.session_id = old_session_id
+                    agent._session_db_created = True
+                    agent._session_messages = messages
+                _persistence_aborted = True
+                logger.warning("Atomic Session DB compression split aborted: %s", e)
+        finally:
+            if _persist_lock is not None:
+                _persist_lock.release()
+
+        if split_committed:
+            # Publish only after the durable parent-end + child-row + messages
+            # transition commits. Publication callbacks stay outside the lock.
+            assert child_session_id is not None
+            published_child_id = child_session_id
+            agent.session_id = published_child_id
             try:
                 from gateway.session_context import set_current_session_id
 
-                set_current_session_id(agent.session_id)
+                set_current_session_id(published_child_id)
             except Exception:
-                os.environ["HERMES_SESSION_ID"] = agent.session_id
-            # The gateway/tools session context (ContextVar + env) and the
-            # logging session context are SEPARATE mechanisms. The call above
-            # moves the former; the ``[session_id]`` tag on log lines comes
-            # from ``hermes_logging._session_context`` (set once per turn in
-            # conversation_loop.py). Without this, post-rotation log lines in
-            # the same turn keep the STALE old id while the message/DB/gateway
-            # state carry the new one — breaking log correlation exactly at the
-            # compaction boundary (see #34089). Guarded separately so a logging
-            # failure can never regress the routing update above.
+                os.environ["HERMES_SESSION_ID"] = published_child_id
             try:
                 from hermes_logging import set_session_context
 
-                set_session_context(agent.session_id)
+                set_session_context(published_child_id)
             except Exception:
                 pass
-            agent._session_db_created = False
-            agent._session_db.create_session(
-                session_id=agent.session_id,
-                source=agent.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
-                model=agent.model,
-                model_config=agent._session_init_model_config,
-                parent_session_id=old_session_id,
-            )
             agent._session_db_created = True
-            # Auto-number the title for the continuation session
             if old_title:
                 try:
                     new_title = agent._session_db.get_next_title_in_lineage(old_title)
                     agent._session_db.set_session_title(agent.session_id, new_title)
-                except (ValueError, Exception) as e:
+                except Exception as e:
                     logger.debug("Could not propagate title on compression: %s", e)
-            agent._session_db.update_system_prompt(agent.session_id, new_system_prompt)
-            # Reset flush cursor — new session starts with no messages written
-            agent._last_flushed_db_idx = 0
-        except Exception as e:
-            logger.warning("Session DB compression split failed — new session will NOT be indexed: %s", e)
+            agent._last_flushed_db_idx = len(compressed)
+            agent._flushed_db_message_ids = {
+                id(message) for message in compressed if isinstance(message, dict)
+            }
+            agent._flushed_db_message_session_id = published_child_id
+            agent._session_messages = compressed
+
+    if _persistence_aborted:
+        logger.warning(
+            "Compression aborted before session rotation because the parent "
+            "or continuation transcript was not durably checkpointed."
+        )
+        agent.context_compressor.compression_count = _pre_compression_count
+        agent._cached_system_prompt = _previous_system_prompt
+        _existing_sp = _previous_system_prompt
+        if not _existing_sp:
+            _existing_sp = agent._build_system_prompt(system_message)
+        _release_lock()
+        return messages, _existing_sp
 
     # Notify the context engine that the session_id rotated because of
     # compression (not a fresh /new). Plugin engines (e.g. hermes-lcm) use
