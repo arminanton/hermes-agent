@@ -3,6 +3,8 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { useEffect, useState } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { $expandThinking } from '@/store/voice-prefs'
+
 import { Thread } from './thread'
 
 const createdAt = new Date('2026-05-01T00:00:00.000Z')
@@ -322,9 +324,13 @@ function RunningMessageHarness({ message }: { message: ThreadMessage }) {
   )
 }
 
-function ReasoningHarness() {
+function ReasoningHarness({
+  text = ' The user is asking what this file is.'
+}: {
+  text?: string
+}) {
   const runtime = useExternalStoreRuntime<ThreadMessage>({
-    messages: [assistantReasoningMessage(' The user is asking what this file is.')],
+    messages: [assistantReasoningMessage(text)],
     isRunning: false,
     onNew: async () => {}
   })
@@ -395,6 +401,7 @@ function DismissibleErrorHarness({ onDismissError }: { onDismissError: (messageI
 describe('assistant-ui streaming renderer', () => {
   beforeEach(() => {
     resizeObservers.clear()
+    $expandThinking.set(false)
   })
 
   it('renders assistant text incrementally before completion', async () => {
@@ -497,6 +504,25 @@ describe('assistant-ui streaming renderer', () => {
     expect(container.querySelector('[data-slot="aui_reasoning-text"]')?.textContent).toBe(
       'The user is asking what this file is.'
     )
+  })
+
+  it('repairs glued persisted reasoning into separate rendered blocks', () => {
+    const { container } = render(
+      <ReasoningHarness text="**Reviewing changes****Planning next steps**" />
+    )
+
+    const toggle = within(container).getByRole('button', { name: /thinking/i })
+
+    if (toggle.getAttribute('aria-expanded') !== 'true') {
+      fireEvent.click(toggle)
+    }
+
+    const reasoning = container.querySelector('[data-slot="aui_reasoning-text"]')
+    const paragraphs = reasoning?.querySelectorAll('p') ?? []
+
+    expect(paragraphs.length).toBe(2)
+    expect(paragraphs[0]?.textContent).toBe('Reviewing changes')
+    expect(paragraphs[1]?.textContent).toBe('Planning next steps')
   })
 
   it('groups consecutive reasoning parts under one thinking disclosure', () => {

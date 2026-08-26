@@ -93,16 +93,17 @@ import { LinkifiedText } from '@/lib/external-link'
 import { triggerHaptic } from '@/lib/haptics'
 import { GitBranchIcon, Loader2Icon, Volume2Icon, VolumeXIcon, XIcon } from '@/lib/icons'
 import { extractPreviewTargets } from '@/lib/preview-targets'
+import { separateGluedReasoningBlocks } from '@/lib/reasoning-blocks'
 import { useEnterAnimation } from '@/lib/use-enter-animation'
 import { cn } from '@/lib/utils'
 import { playSpeechText, stopVoicePlayback } from '@/lib/voice-playback'
 import { $compactionActive } from '@/store/compaction'
 import type { ComposerAttachment } from '@/store/composer'
 import { notifyError } from '@/store/notifications'
-import { $expandThinking } from '@/store/voice-prefs'
 import { $connection } from '@/store/session'
 import { notifyThreadEditClose, notifyThreadEditOpen } from '@/store/thread-scroll'
 import { $voicePlayback } from '@/store/voice-playback'
+import { $expandThinking } from '@/store/voice-prefs'
 
 type ThreadLoadingState = 'response' | 'session'
 
@@ -603,7 +604,7 @@ const ReasoningAccordionGroup: FC<{ children?: ReactNode; endIndex: number; star
 }
 
 const ReasoningTextPart: FC<{ text: string; status?: { type: string } }> = ({ text, status }) => {
-  const displayText = text.trimStart()
+  const displayText = separateGluedReasoningBlocks(text.trimStart())
   const messageRunning = useAuiState(s => s.message.status?.type === 'running')
   const isRunning = status?.type === 'running' || messageRunning
 
