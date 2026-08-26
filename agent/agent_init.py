@@ -691,6 +691,9 @@ def init_agent(
     # commentary when the provider later returns it as a completed interim
     # assistant message.
     agent._current_streamed_assistant_text = ""
+    # Completed public commentary already delivered during the current user
+    # turn. This spans retries, continuations, and tool calls.
+    agent._delivered_interim_texts = set()
 
     # Optional current-turn user-message override used when the API-facing
     # user message intentionally differs from the persisted transcript

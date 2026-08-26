@@ -567,6 +567,10 @@ def run_conversation(
     _plugin_user_context = _ctx.plugin_user_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
 
+    # Commentary deduplication spans continuations and tool calls within one
+    # user turn, but the same wording may be valid again on the next turn.
+    agent._delivered_interim_texts = set()
+
     # Main conversation loop counters (pure locals consumed by the loop below).
     api_call_count = 0
     final_response = None
@@ -4012,27 +4016,39 @@ def run_conversation(
                     or interim_has_codex_message_items
                 ):
                     last_msg = messages[-1] if messages else None
-                    # Duplicate detection: two consecutive incomplete assistant
-                    # messages with identical content AND reasoning are collapsed.
-                    # For provider-state-only changes (encrypted reasoning
-                    # items or replayable message ids/phases/statuses differ
-                    # while visible content/reasoning are unchanged), compare
-                    # those opaque payloads too so we don't silently drop the
-                    # newer continuation state.
-                    last_codex_items = last_msg.get("codex_reasoning_items") if isinstance(last_msg, dict) else None
-                    interim_codex_items = interim_msg.get("codex_reasoning_items")
-                    last_codex_message_items = last_msg.get("codex_message_items") if isinstance(last_msg, dict) else None
-                    interim_codex_message_items = interim_msg.get("codex_message_items")
-                    duplicate_interim = (
+                    last_visible = (
+                        agent._interim_assistant_visible_text(last_msg)
+                        if isinstance(last_msg, dict)
+                        else ""
+                    )
+                    current_visible = agent._interim_assistant_visible_text(interim_msg)
+                    if last_visible or current_visible:
+                        same_visible_output = last_visible == current_visible
+                    else:
+                        same_visible_output = (
+                            (last_msg.get("content") or "") == (interim_msg.get("content") or "")
+                            and (last_msg.get("reasoning") or "") == (interim_msg.get("reasoning") or "")
+                        ) if isinstance(last_msg, dict) else False
+                    visible_duplicate = (
                         isinstance(last_msg, dict)
                         and last_msg.get("role") == "assistant"
                         and last_msg.get("finish_reason") == "incomplete"
-                        and (last_msg.get("content") or "") == (interim_msg.get("content") or "")
-                        and (last_msg.get("reasoning") or "") == (interim_msg.get("reasoning") or "")
-                        and last_codex_items == interim_codex_items
-                        and last_codex_message_items == interim_codex_message_items
+                        and same_visible_output
                     )
-                    if not duplicate_interim:
+                    if visible_duplicate:
+                        # Keep the newest replay payload without re-emitting the
+                        # same public commentary.
+                        for key in (
+                            "content",
+                            "reasoning",
+                            "reasoning_content",
+                            "reasoning_details",
+                            "codex_reasoning_items",
+                            "codex_message_items",
+                        ):
+                            if key in interim_msg:
+                                last_msg[key] = interim_msg[key]
+                    else:
                         messages.append(interim_msg)
                         agent._emit_interim_assistant_message(interim_msg)
 
@@ -4295,8 +4311,25 @@ def run_conversation(
                 # a LATER tool round.
                 agent._post_tool_empty_retried = False
 
+                previous_msg = messages[-1] if messages else None
+                current_interim_visible = agent._interim_assistant_visible_text(
+                    assistant_msg
+                )
+                previous_interim_visible = (
+                    agent._interim_assistant_visible_text(previous_msg)
+                    if isinstance(previous_msg, dict)
+                    else ""
+                )
+                duplicate_previous_interim = (
+                    bool(current_interim_visible)
+                    and isinstance(previous_msg, dict)
+                    and previous_msg.get("role") == "assistant"
+                    and previous_msg.get("finish_reason") == "incomplete"
+                    and previous_interim_visible == current_interim_visible
+                )
                 messages.append(assistant_msg)
-                agent._emit_interim_assistant_message(assistant_msg)
+                if not duplicate_previous_interim:
+                    agent._emit_interim_assistant_message(assistant_msg)
                 # Persist the assistant's tool intent before execution begins.
                 # A terminal/browser/delegation call can run for minutes; if the
                 # gateway exits during it, a cold resume must still land on the

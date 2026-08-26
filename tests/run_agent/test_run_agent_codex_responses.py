@@ -1552,7 +1552,7 @@ def test_run_conversation_codex_continues_after_incomplete_interim_message(monke
     ]
     monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0))
 
-    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id):
+    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, *_args):
         for call in assistant_message.tool_calls:
             messages.append(
                 {
@@ -2394,7 +2394,7 @@ def test_codex_message_item_status_survives_conversion_and_preflight(monkeypatch
 
 def test_duplicate_detection_distinguishes_different_codex_reasoning(monkeypatch):
     """Two consecutive reasoning-only responses with different encrypted content
-    must NOT be treated as duplicates."""
+    are deduped on visible content while the newest opaque state wins."""
     agent = _build_agent(monkeypatch)
     responses = [
         # First reasoning-only response
@@ -2427,27 +2427,33 @@ def test_duplicate_detection_distinguishes_different_codex_reasoning(monkeypatch
 
     assert result["completed"] is True
     assert result["final_response"] == "Final answer after thinking."
-    # Both reasoning-only interim messages should be in history (not collapsed)
+    # Both responses have empty visible output, so keep one interim carrier.
     interim_msgs = [
         msg for msg in result["messages"]
         if msg.get("role") == "assistant"
         and msg.get("finish_reason") == "incomplete"
     ]
-    assert len(interim_msgs) == 2
-    encrypted_contents = [
-        msg["codex_reasoning_items"][0]["encrypted_content"]
-        for msg in interim_msgs
-    ]
-    assert "enc_first" in encrypted_contents
-    assert "enc_second" in encrypted_contents
+    assert len(interim_msgs) == 1
+    assert interim_msgs[0]["codex_reasoning_items"][0]["encrypted_content"] == "enc_second"
 
 
-def test_duplicate_detection_distinguishes_different_codex_message_items(monkeypatch):
-    """Incomplete turns with new message ids/phases/statuses must not be collapsed."""
+def test_duplicate_detection_uses_commentary_when_hidden_reasoning_changes(monkeypatch):
+    """Identical commentary is emitted once while newer replay state wins."""
     agent = _build_agent(monkeypatch)
+    emitted = []
+    agent.interim_assistant_callback = (
+        lambda text, *, already_streamed=False: emitted.append(text)
+    )
     responses = [
         SimpleNamespace(
             output=[
+                SimpleNamespace(
+                    type="reasoning",
+                    id="rs_first",
+                    encrypted_content="enc_first",
+                    summary=[SimpleNamespace(text="hidden first")],
+                    status="completed",
+                ),
                 SimpleNamespace(
                     type="message",
                     id="msg_first",
@@ -2462,6 +2468,13 @@ def test_duplicate_detection_distinguishes_different_codex_message_items(monkeyp
         ),
         SimpleNamespace(
             output=[
+                SimpleNamespace(
+                    type="reasoning",
+                    id="rs_second",
+                    encrypted_content="enc_second",
+                    summary=[SimpleNamespace(text="hidden second")],
+                    status="completed",
+                ),
                 SimpleNamespace(
                     type="message",
                     id="msg_second",
@@ -2481,17 +2494,16 @@ def test_duplicate_detection_distinguishes_different_codex_message_items(monkeyp
     result = agent.run_conversation("keep going")
 
     assert result["completed"] is True
+    assert emitted == ["Still working..."]
     interim_msgs = [
         msg for msg in result["messages"]
         if msg.get("role") == "assistant"
         and msg.get("finish_reason") == "incomplete"
     ]
-    assert len(interim_msgs) == 2
-    assert [msg["codex_message_items"][0]["id"] for msg in interim_msgs] == [
-        "msg_first",
-        "msg_second",
-    ]
-    assert all(msg["codex_message_items"][0]["status"] == "in_progress" for msg in interim_msgs)
+    assert len(interim_msgs) == 1
+    assert interim_msgs[0]["codex_message_items"][0]["id"] == "msg_second"
+    assert "hidden second" in (interim_msgs[0].get("reasoning") or "")
+    assert interim_msgs[0]["codex_reasoning_items"][0]["id"] == "rs_second"
 
 
 def test_chat_messages_to_responses_input_deduplicates_reasoning_ids(monkeypatch):
@@ -3102,6 +3114,108 @@ def test_nonstreaming_commentary_uses_interim_or_reasoning_fallback(monkeypatch)
     assert reasoning == ["Public update."]
 
 
+def test_run_codex_stream_delivers_redacted_commentary_once(monkeypatch):
+    from agent.codex_responses_adapter import _normalize_codex_response
+
+    agent = _build_agent(monkeypatch)
+    monkeypatch.setattr("agent.redact._REDACT_ENABLED", True)
+    delivered = []
+    reasoning_deltas = []
+    agent.interim_assistant_callback = (
+        lambda text, *, already_streamed=False: delivered.append(
+            (text, already_streamed)
+        )
+    )
+    agent.reasoning_callback = reasoning_deltas.append
+    secret = "sk-" + ("A" * 32)
+    commentary_text = f"Using credential {secret}. I'll inspect the repo."
+    commentary_item = SimpleNamespace(
+        type="message",
+        phase="commentary",
+        status="completed",
+        content=[SimpleNamespace(type="output_text", text=commentary_text)],
+    )
+
+    def _fake_create(**kwargs):
+        return _FakeCreateStream([
+            SimpleNamespace(
+                type="response.output_item.added",
+                item=SimpleNamespace(type="message", phase="commentary"),
+            ),
+            SimpleNamespace(type="response.output_text.delta", delta=commentary_text),
+            SimpleNamespace(type="response.output_item.done", item=commentary_item),
+            SimpleNamespace(type="response.reasoning_text.delta", delta="Private analysis."),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="completed"),
+            ),
+        ])
+
+    agent.client = SimpleNamespace(responses=SimpleNamespace(create=_fake_create))
+    response = agent._run_codex_stream(_codex_request_kwargs())
+
+    assert len(delivered) == 1
+    assert delivered[0][1] is False
+    assert secret not in delivered[0][0]
+    assert reasoning_deltas == ["Private analysis."]
+
+    normalized, finish_reason = _normalize_codex_response(response)
+    agent._emit_interim_assistant_message(
+        agent._build_assistant_message(normalized, finish_reason)
+    )
+    assert len(delivered) == 1
+
+
+def test_run_codex_stream_retry_deduplicates_commentary(monkeypatch):
+    import httpx
+
+    agent = _build_agent(monkeypatch)
+    delivered = []
+    agent.interim_assistant_callback = (
+        lambda text, *, already_streamed=False: delivered.append(text)
+    )
+    commentary_item = SimpleNamespace(
+        type="message",
+        phase="commentary",
+        status="completed",
+        content=[SimpleNamespace(type="output_text", text="Still working.")],
+    )
+    events = [
+        SimpleNamespace(
+            type="response.output_item.added",
+            item=SimpleNamespace(type="message", phase="commentary"),
+        ),
+        SimpleNamespace(type="response.output_text.delta", delta="Still working."),
+        SimpleNamespace(type="response.output_item.done", item=commentary_item),
+    ]
+
+    class _DroppingStream(_FakeCreateStream):
+        def __iter__(self):
+            yield from super().__iter__()
+            raise httpx.RemoteProtocolError("connection dropped")
+
+    calls = 0
+
+    def _fake_create(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _DroppingStream(events)
+        return _FakeCreateStream([
+            *events,
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="completed"),
+            ),
+        ])
+
+    agent.client = SimpleNamespace(responses=SimpleNamespace(create=_fake_create))
+    agent._run_codex_stream(_codex_request_kwargs())
+
+    assert calls == 2
+    assert delivered == ["Still working."]
+
+
 def test_run_codex_stream_show_commentary_off_falls_back_to_reasoning(monkeypatch):
     agent = _build_agent(monkeypatch)
     agent.show_commentary = False
@@ -3137,6 +3251,28 @@ def test_run_codex_stream_show_commentary_off_falls_back_to_reasoning(monkeypatc
 
     assert delivered == []
     assert reasoning_deltas == ["I'll inspect the repo."]
+
+
+def test_interim_commentary_deduplicates_identical_items_in_one_response(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    delivered = []
+    agent.interim_assistant_callback = (
+        lambda text, *, already_streamed=False: delivered.append(text)
+    )
+    item = {
+        "type": "message",
+        "phase": "commentary",
+        "content": [{"type": "output_text", "text": "Still working."}],
+    }
+    agent._emit_interim_assistant_message(
+        {
+            "role": "assistant",
+            "content": "",
+            "codex_message_items": [item, dict(item)],
+        }
+    )
+
+    assert delivered == ["Still working."]
 
 
 def test_codex_commentary_emits_before_tool_and_withholds_final_answer(monkeypatch):
