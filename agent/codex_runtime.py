@@ -363,6 +363,14 @@ def _event_field(event: Any, name: str, default: Any = None) -> Any:
     return value if value is not None else default
 
 
+def _item_field(item: Any, name: str, default: Any = None) -> Any:
+    """Read a nested Responses item from an SDK object or raw dictionary."""
+    value = getattr(item, name, None)
+    if value is None and isinstance(item, dict):
+        value = item.get(name, default)
+    return value if value is not None else default
+
+
 def _raise_stream_error(event: Any) -> None:
     """Raise a ``_StreamErrorEvent`` from a ``type=error`` SSE frame.
 

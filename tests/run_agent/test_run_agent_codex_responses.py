@@ -1,3 +1,4 @@
+import json
 import sys
 import types
 from types import SimpleNamespace
@@ -1425,7 +1426,7 @@ def test_run_conversation_codex_replay_payload_keeps_call_id(monkeypatch):
 
     monkeypatch.setattr(agent, "_interruptible_api_call", _fake_api_call)
 
-    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id):
+    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, *_args):
         for call in assistant_message.tool_calls:
             messages.append(
                 {
@@ -2563,3 +2564,32 @@ def test_run_conversation_codex_invalid_encrypted_content_without_replay_state_d
     assert all(not any(item.get("type") == "reasoning" for item in payload["input"]) for payload in request_payloads)
     assert agent._codex_reasoning_replay_enabled is True
     assert result["messages"][0].get("codex_reasoning_items") is None
+
+
+def test_normalize_codex_response_preserves_raw_dict_function_call():
+    from agent.codex_responses_adapter import _normalize_codex_response
+
+    response = SimpleNamespace(
+        output=[
+            {
+                "type": "function_call",
+                "id": "fc_raw",
+                "call_id": "call_raw",
+                "status": "completed",
+                "name": "terminal",
+                "arguments": '{"command":"pwd"}',
+            }
+        ],
+        status="completed",
+        output_text="",
+    )
+
+    normalized, finish_reason = _normalize_codex_response(response)
+
+    assert finish_reason == "tool_calls"
+    assert len(normalized.tool_calls) == 1
+    assert normalized.tool_calls[0].id == "call_raw"
+    assert normalized.tool_calls[0].function.name == "terminal"
+    assert normalized.tool_calls[0].function.arguments == '{"command":"pwd"}'
+
+

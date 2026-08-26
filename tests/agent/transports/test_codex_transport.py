@@ -508,6 +508,11 @@ class TestCodexValidateResponse:
         r = SimpleNamespace(output=[{"type": "message", "content": []}])
         assert transport.validate_response(r) is True
 
+    def test_valid_raw_dictionary_response(self, transport):
+        assert transport.validate_response(
+            {"output": [{"type": "message", "content": []}]}
+        ) is True
+
     def test_output_text_fallback_not_valid(self, transport):
         """validate_response is strict — output_text doesn't make it valid.
         The caller handles output_text fallback with diagnostic logging."""
