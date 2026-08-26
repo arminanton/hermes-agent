@@ -1504,6 +1504,44 @@ class AIAgent:
                 if timestamp is not None:
                     msg["timestamp"] = timestamp
 
+    def _checkpoint_messages_to_db(
+        self,
+        messages: List[Dict],
+        conversation_history: Optional[List[Dict]] = None,
+    ) -> bool:
+        """Flush a stable snapshot while its destination session ID is locked."""
+        if getattr(self, "_persist_disabled", False):
+            return False
+        if not getattr(self, "_session_db", None) or not messages:
+            return False
+
+        lock = getattr(self, "_session_persist_lock", None)
+        if lock is not None:
+            lock.acquire()
+        try:
+            snapshot = list(messages)
+            return bool(
+                self._flush_messages_to_session_db(snapshot, conversation_history)
+            )
+        except Exception as exc:  # defensive: checkpoints must never break a turn
+            logger.debug("message checkpoint failed: %s", exc)
+            return False
+        finally:
+            if lock is not None:
+                lock.release()
+
+    def checkpoint_session_messages(
+        self,
+        messages: List[Dict],
+        conversation_history: Optional[List[Dict]] = None,
+        *,
+        publish: bool = True,
+    ) -> bool:
+        """Publish the live list and durably checkpoint its current contents."""
+        if publish:
+            self._session_messages = messages
+        return self._checkpoint_messages_to_db(messages, conversation_history)
+
     def flush_pending_to_db(self) -> bool:
         """Idempotently flush any un-persisted in-flight message tail to SQLite.
 
@@ -1526,21 +1564,10 @@ class AIAgent:
         Returns ``True`` when a flush was attempted (persistence enabled, DB
         present, messages held), ``False`` when it no-oped.
         """
-        # Never write for a persistence-isolated fork (background curator /
-        # memory review) — same hard-stop as _flush_messages_to_session_db.
-        if getattr(self, "_persist_disabled", False):
-            return False
-        if not getattr(self, "_session_db", None):
-            return False
         messages = getattr(self, "_session_messages", None)
         if not messages:
             return False
-        try:
-            self._flush_messages_to_session_db(messages)
-        except Exception as exc:  # defensive: finalize must never raise
-            logger.debug("flush_pending_to_db failed: %s", exc)
-            return False
-        return True
+        return self._checkpoint_messages_to_db(messages)
 
     def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
         """Save session state to both JSON log and SQLite on any exit path.
@@ -1551,7 +1578,7 @@ class AIAgent:
         self._apply_persist_user_message_override(messages)
         self._session_messages = messages
         self._save_session_log(messages)
-        self._flush_messages_to_session_db(messages, conversation_history)
+        self._checkpoint_messages_to_db(messages, conversation_history)
 
     def _drop_trailing_empty_response_scaffolding(self, messages: List[Dict]) -> None:
         """Remove private empty-response retry/failure scaffolding from transcript tails.
@@ -1611,7 +1638,74 @@ class AIAgent:
         from agent.agent_runtime_helpers import repair_message_sequence
         return repair_message_sequence(self, messages)
 
-    def _flush_messages_to_session_db(self, messages: List[Dict], conversation_history: List[Dict] = None):
+    def _flush_messages_to_session_db(self, messages: List[Dict], conversation_history: Optional[List[Dict]] = None) -> bool:
+        """Serialize every SQLite transcript write against session rotation."""
+        lock = getattr(self, "_session_persist_lock", None)
+        if lock is not None:
+            lock.acquire()
+        try:
+            return self._flush_messages_to_session_db_unlocked(
+                messages,
+                conversation_history,
+            )
+        finally:
+            if lock is not None:
+                lock.release()
+
+    def _session_db_message_payload(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize one live message for SessionDB persistence."""
+        role = msg.get("role", "unknown")
+        content = msg.get("content")
+        if _is_multimodal_tool_result(content):
+            content = _multimodal_text_summary(content)
+        elif isinstance(content, list):
+            text_parts = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    text_parts.append(str(part.get("text", "")))
+                elif isinstance(part, dict) and part.get("type") in {
+                    "image",
+                    "image_url",
+                    "input_image",
+                }:
+                    text_parts.append("[screenshot]")
+            content = "\n".join(text_parts) if text_parts else None
+
+        tool_calls_data = (
+            msg["tool_calls"]
+            if isinstance(msg.get("tool_calls"), list)
+            else None
+        )
+
+        return {
+            "role": role,
+            "content": content,
+            "tool_name": msg.get("tool_name"),
+            "tool_calls": tool_calls_data,
+            "tool_call_id": msg.get("tool_call_id"),
+            "finish_reason": msg.get("finish_reason"),
+            "reasoning": msg.get("reasoning") if role == "assistant" else None,
+            "reasoning_content": (
+                msg.get("reasoning_content") if role == "assistant" else None
+            ),
+            "reasoning_details": (
+                msg.get("reasoning_details") if role == "assistant" else None
+            ),
+            "codex_reasoning_items": (
+                msg.get("codex_reasoning_items") if role == "assistant" else None
+            ),
+            "codex_message_items": (
+                msg.get("codex_message_items") if role == "assistant" else None
+            ),
+            "token_count": msg.get("token_count"),
+            "platform_message_id": (
+                msg.get("platform_message_id") or msg.get("message_id")
+            ),
+            "observed": bool(msg.get("observed")),
+            "timestamp": msg.get("timestamp"),
+        }
+
+    def _flush_messages_to_session_db_unlocked(self, messages: List[Dict], conversation_history: Optional[List[Dict]] = None) -> bool:
         """Persist any un-flushed messages to the SQLite session store.
 
         Uses per-session message identity tracking so repeated calls (from
@@ -1627,9 +1721,9 @@ class AIAgent:
         # where the next live turn re-reads it as an instruction and the agent
         # "becomes" the curator. Hard-stop before any DB touch.
         if getattr(self, "_persist_disabled", False):
-            return
+            return False
         if not self._session_db:
-            return
+            return False
         self._apply_persist_user_message_override(messages)
         try:
             # Retry row creation if the earlier attempt failed transiently.
@@ -1670,49 +1764,16 @@ class AIAgent:
                 if msg_id in history_ids:
                     flushed_ids.add(msg_id)
                     continue
-                role = msg.get("role", "unknown")
-                content = msg.get("content")
-                # Persist multimodal tool results as their text summary only —
-                # base64 images would bloat the session DB and aren't useful
-                # for cross-session replay.
-                if _is_multimodal_tool_result(content):
-                    content = _multimodal_text_summary(content)
-                elif isinstance(content, list):
-                    # List of OpenAI-style content parts: strip images, keep text.
-                    _txt = []
-                    for p in content:
-                        if isinstance(p, dict) and p.get("type") == "text":
-                            _txt.append(str(p.get("text", "")))
-                        elif isinstance(p, dict) and p.get("type") in {"image", "image_url", "input_image"}:
-                            _txt.append("[screenshot]")
-                    content = "\n".join(_txt) if _txt else None
-                tool_calls_data = None
-                if hasattr(msg, "tool_calls") and isinstance(msg.tool_calls, list) and msg.tool_calls:
-                    tool_calls_data = [
-                        {"name": tc.function.name, "arguments": tc.function.arguments}
-                        for tc in msg.tool_calls
-                    ]
-                elif isinstance(msg.get("tool_calls"), list):
-                    tool_calls_data = msg["tool_calls"]
                 self._session_db.append_message(
                     session_id=self.session_id,
-                    role=role,
-                    content=content,
-                    tool_name=msg.get("tool_name"),
-                    tool_calls=tool_calls_data,
-                    tool_call_id=msg.get("tool_call_id"),
-                    finish_reason=msg.get("finish_reason"),
-                    reasoning=msg.get("reasoning") if role == "assistant" else None,
-                    reasoning_content=msg.get("reasoning_content") if role == "assistant" else None,
-                    reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
-                    codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
-                    codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
-                    timestamp=msg.get("timestamp"),
+                    **self._session_db_message_payload(msg),
                 )
                 flushed_ids.add(msg_id)
             self._last_flushed_db_idx = len(messages)
+            return True
         except Exception as e:
             logger.warning("Session DB append_message failed: %s", e)
+            return False
 
     def _get_messages_up_to_last_assistant(self, messages: List[Dict]) -> List[Dict]:
         """

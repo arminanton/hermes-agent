@@ -1204,6 +1204,8 @@ def init_agent(
     agent._session_db = session_db
     agent._parent_session_id = parent_session_id
     agent._last_flushed_db_idx = 0  # tracks DB-write cursor to prevent duplicate writes
+    agent._session_persist_lock = threading.RLock()
+    agent._session_persist_finalizing = False
     agent._session_db_created = False  # DB row deferred to run_conversation()
     # When True, this agent NEVER persists to the canonical session store
     # (state.db) or the JSON snapshot, regardless of session_id. Set on the

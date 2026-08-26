@@ -74,6 +74,81 @@ class TestFlushPendingToDb:
             finally:
                 db.close()
 
+    def test_returns_false_when_database_append_fails(self):
+        """Callers must distinguish a durable checkpoint from a swallowed error."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "t.db")
+            try:
+                agent = _make_agent(db)
+                agent._session_messages = [
+                    {"role": "user", "content": "must remain retryable"}
+                ]
+                with patch.object(
+                    db, "append_message", side_effect=RuntimeError("disk unavailable")
+                ):
+                    assert agent.flush_pending_to_db() is False
+            finally:
+                db.close()
+
+    def test_checkpoint_preserves_operational_message_metadata(self):
+        """Normal checkpoints retain the metadata carried by atomic splits."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "t.db")
+            try:
+                agent = _make_agent(db)
+                agent._session_messages = [
+                    {
+                        "role": "assistant",
+                        "content": "durable answer",
+                        "token_count": 37,
+                        "message_id": "provider-message-1",
+                        "observed": True,
+                    }
+                ]
+
+                assert agent.flush_pending_to_db() is True
+
+                rows = db.get_messages(SESSION_ID)
+                assert len(rows) == 1
+                assert rows[0]["token_count"] == 37
+                assert rows[0]["platform_message_id"] == "provider-message-1"
+                assert bool(rows[0]["observed"]) is True
+            finally:
+                db.close()
+
+    def test_explicit_platform_message_id_and_timestamp_survive_checkpoint(self):
+        """Explicit platform identity wins over the alias without losing time."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "t.db")
+            try:
+                agent = _make_agent(db)
+                agent._session_messages = [
+                    {
+                        "role": "user",
+                        "content": "two identifiers",
+                        "token_count": 17,
+                        "platform_message_id": "explicit-id",
+                        "message_id": "legacy-alias",
+                        "observed": True,
+                        "timestamp": 1_725_000_000.25,
+                    }
+                ]
+
+                assert agent.flush_pending_to_db() is True
+                row = db.get_messages(SESSION_ID)[0]
+                assert row["token_count"] == 17
+                assert row["platform_message_id"] == "explicit-id"
+                assert bool(row["observed"]) is True
+                assert row["timestamp"] == 1_725_000_000.25
+            finally:
+                db.close()
+
     def test_idempotent_no_duplicate_rows(self):
         """Re-flushing (multiple teardown paths) writes each message once."""
         from hermes_state import SessionDB
