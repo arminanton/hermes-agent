@@ -240,75 +240,18 @@ def _copilot_runtime_api_mode(
     *,
     target_model: Optional[str] = None,
 ) -> str:
-    configured_provider = str(model_cfg.get("provider") or "").strip().lower()
-    configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
-
     # The model actually being built. On a mid-session /model switch or a /new
     # session pinned to a non-default model, ``target_model`` is the real model
     # and ``model.default`` in config is stale (still the previous default).
     default_model = str(model_cfg.get("default") or "").strip()
     model_name = str(target_model or default_model).strip()
 
-    # A persisted ``model.api_mode`` is computed FOR the configured default
-    # model. It must only be honored when the model we're building is that same
-    # default — otherwise it leaks the default's transport onto a different
-    # model. Concretely: default=claude-opus-4.8 persists
-    # api_mode=anthropic_messages; switching to gpt-5.6-sol (a /responses-only
-    # model) must NOT inherit anthropic_messages or Copilot's /v1/messages 400s
-    # with no_available_model_endpoints. Only the copilot-served Claude models
-    # speak /v1/messages; every GPT-5.x model speaks /responses. This is the
-    # same cross-contamination guard as _provider_supports_explicit_api_mode,
-    # applied across MODELS within the copilot provider rather than across
-    # providers.
-    honor_configured_mode = (
-        configured_mode is not None
-        and _provider_supports_explicit_api_mode("copilot", configured_provider)
-        and _copilot_same_model(model_name, default_model, api_key=api_key)
-    )
-    if honor_configured_mode:
-        return configured_mode  # type: ignore[return-value]
-
     if not model_name:
         return "chat_completions"
 
-    try:
-        from hermes_cli.models import copilot_model_api_mode
+    from hermes_cli.models import copilot_model_api_mode
 
-        return copilot_model_api_mode(model_name, api_key=api_key)
-    except Exception:
-        return "chat_completions"
-
-
-def _copilot_same_model(
-    a: Optional[str],
-    b: Optional[str],
-    *,
-    api_key: str = "",
-) -> bool:
-    """Return True when two Copilot model ids refer to the same catalog model.
-
-    Compares via ``normalize_copilot_model_id`` so dot/dash and vendor-prefixed
-    variants (``anthropic/claude-opus-4-8`` vs ``claude-opus-4.8``) of the same
-    model match. Falls back to a case-insensitive string compare if
-    normalization is unavailable. Empty ids never match a non-empty id.
-    """
-    left = str(a or "").strip()
-    right = str(b or "").strip()
-    if not left or not right:
-        return False
-    if left.lower() == right.lower():
-        return True
-    try:
-        from hermes_cli.models import normalize_copilot_model_id
-
-        # Catalog is not needed for equality: normalization is deterministic for
-        # alias/dot-dash resolution, so pass no api_key to stay offline-fast.
-        return (
-            normalize_copilot_model_id(left).lower()
-            == normalize_copilot_model_id(right).lower()
-        )
-    except Exception:
-        return False
+    return copilot_model_api_mode(model_name, api_key=api_key) or "chat_completions"
 
 
 _VALID_API_MODES = {

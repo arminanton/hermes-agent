@@ -2786,8 +2786,8 @@ def test_host_derived_key_helper_basic_cases():
 # no_available_model_endpoints. Fresh sessions escaped it because the composer
 # override carried the model; /model + /new both funnel through
 # resolve_runtime_provider(target_model=...), so the fix threads target_model
-# into _copilot_runtime_api_mode and only honors the persisted mode when the
-# target matches the configured default.
+# into _copilot_runtime_api_mode and always derives the transport from that
+# model. A persisted Copilot api_mode is never authoritative.
 
 
 def _copilot_cfg():
@@ -2818,17 +2818,88 @@ def test_copilot_api_mode_switched_model_ignores_stale_persisted_mode(monkeypatc
     assert mode == "codex_responses"
 
 
-def test_copilot_api_mode_default_model_honors_persisted_mode(monkeypatch):
-    # When the target IS the configured default (claude-opus-4.8), the persisted
-    # anthropic_messages must still be honored (matches the default).
+def test_copilot_api_mode_default_model_derives_from_model(monkeypatch):
+    # The configured default is still routed by its model identity. The matching
+    # persisted value is incidental and is not the source of truth.
     mode = rp._copilot_runtime_api_mode(
         _copilot_cfg(), "", target_model="claude-opus-4.8"
     )
     assert mode == "anthropic_messages"
 
 
+def test_copilot_api_mode_default_model_rejects_stale_incompatible_mode(monkeypatch):
+    """A persisted mode must not override the route required by the model."""
+    from hermes_cli import models as _models
+
+    monkeypatch.setattr(
+        _models,
+        "copilot_model_api_mode",
+        lambda model, api_key=None: "codex_responses",
+    )
+    mode = rp._copilot_runtime_api_mode(
+        {
+            "provider": "copilot",
+            "default": "gpt-5.6-sol",
+            "api_mode": "anthropic_messages",
+        },
+        "",
+        target_model="gpt-5.6-sol",
+    )
+    assert mode == "codex_responses"
+
+
+def test_copilot_api_mode_without_model_ignores_persisted_mode():
+    """A provider-level mode is never authoritative, even before model selection."""
+    mode = rp._copilot_runtime_api_mode(
+        {
+            "provider": "copilot",
+            "api_mode": "anthropic_messages",
+        },
+        "",
+    )
+    assert mode == "chat_completions"
+
+
+def test_copilot_api_mode_survives_catalog_network_failure(monkeypatch):
+    """The catalog layer contains expected network failures before routing."""
+    import urllib.error
+
+    from hermes_cli import models as _models
+
+    def _offline(*args, **kwargs):
+        raise urllib.error.URLError("offline")
+
+    monkeypatch.setattr(_models, "copilot_default_headers", lambda **kwargs: {})
+    monkeypatch.setattr(_models.urllib.request, "urlopen", _offline)
+
+    assert (
+        _models.copilot_model_api_mode("gpt-5.6-sol", api_key="test-token")
+        == "codex_responses"
+    )
+    assert (
+        _models.copilot_model_api_mode("claude-opus-4.8", api_key="test-token")
+        == "anthropic_messages"
+    )
+
+
+def test_copilot_api_mode_unexpected_resolver_error_surfaces(monkeypatch):
+    """Unexpected resolver defects must not become a silent wrong transport."""
+    from hermes_cli import models as _models
+
+    def _broken(*args, **kwargs):
+        raise RuntimeError("resolver defect")
+
+    monkeypatch.setattr(_models, "copilot_model_api_mode", _broken)
+
+    with pytest.raises(RuntimeError, match="resolver defect"):
+        rp._copilot_runtime_api_mode(
+            {"provider": "copilot", "default": "gpt-5.6-sol"},
+            "",
+        )
+
+
 def test_copilot_api_mode_no_target_falls_back_to_default(monkeypatch):
-    # No target_model → behaves as before: reads model.default, honors persisted.
+    # No target_model means derive from model.default.
     mode = rp._copilot_runtime_api_mode(_copilot_cfg(), "")
     assert mode == "anthropic_messages"
 
@@ -2847,11 +2918,3 @@ def test_copilot_api_mode_switched_claude_still_anthropic(monkeypatch):
         _copilot_cfg(), "", target_model="claude-sonnet-4.6"
     )
     assert mode == "anthropic_messages"
-
-
-def test_copilot_same_model_normalizes_dot_dash_and_prefix():
-    assert rp._copilot_same_model("claude-opus-4.8", "claude-opus-4.8")
-    assert rp._copilot_same_model("anthropic/claude-opus-4-8", "claude-opus-4.8")
-    assert not rp._copilot_same_model("gpt-5.6-sol", "claude-opus-4.8")
-    assert not rp._copilot_same_model("", "claude-opus-4.8")
-    assert not rp._copilot_same_model("gpt-5.6-sol", "")
