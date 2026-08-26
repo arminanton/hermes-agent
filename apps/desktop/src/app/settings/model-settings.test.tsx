@@ -125,6 +125,17 @@ describe('ModelSettings', () => {
     )
   })
 
+  it('normalizes an unsupported persisted reasoning effort to medium', async () => {
+    getHermesConfigRecord.mockResolvedValueOnce({
+      agent: { reasoning_effort: 'ultra', service_tier: 'normal' }
+    })
+
+    await renderModelSettings()
+    await waitFor(() => expect(getHermesConfigRecord).toHaveBeenCalled())
+
+    expect(await screen.findByText('Medium')).toBeTruthy()
+  })
+
   it('hides the reasoning/speed defaults when the main model reports no capabilities', async () => {
     getGlobalModelOptions.mockResolvedValueOnce({
       providers: [{ name: 'Nous', slug: 'nous', models: ['hermes-4'], authenticated: true, capabilities: { 'hermes-4': { reasoning: false, fast: false } } }]

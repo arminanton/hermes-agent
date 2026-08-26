@@ -1,21 +1,6 @@
-const REASONING_LABELS: Record<string, string> = {
-  none: 'Off',
-  minimal: 'Min',
-  low: 'Low',
-  medium: 'Med',
-  high: 'High',
-  xhigh: 'Max'
-}
+import { reasoningEffortLabel } from './reasoning-effort'
 
-export function reasoningEffortLabel(effort: string): string {
-  const key = effort.trim().toLowerCase()
-
-  if (!key) {
-    return ''
-  }
-
-  return REASONING_LABELS[key] ?? effort
-}
+export { reasoningEffortLabel }
 
 /** Which model/provider a picker should mark "current". With a live session the
  *  gateway's `model.options` is authoritative; pre-session there is no server

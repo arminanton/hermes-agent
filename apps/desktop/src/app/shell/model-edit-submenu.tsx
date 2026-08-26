@@ -12,19 +12,14 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Switch } from '@/components/ui/switch'
 import { useI18n } from '@/i18n'
+import { isThinkingEnabled, REASONING_EFFORTS, resolveReasoningEffort } from '@/lib/reasoning-effort'
 import { setModelPreset } from '@/store/model-presets'
 import { notifyError } from '@/store/notifications'
 import { $activeSessionId, setCurrentFastMode, setCurrentReasoningEffort } from '@/store/session'
 
 // Hermes' real reasoning levels (see VALID_REASONING_EFFORTS); `none` is owned
 // by the Thinking toggle, not the radio.
-const EFFORT_OPTIONS = [
-  { value: 'minimal', labelKey: 'minimal' },
-  { value: 'low', labelKey: 'low' },
-  { value: 'medium', labelKey: 'medium' },
-  { value: 'high', labelKey: 'high' },
-  { value: 'xhigh', labelKey: 'max' }
-] as const
+const EFFORT_OPTIONS = REASONING_EFFORTS.map(value => ({ value, labelKey: value }))
 
 /** How "fast" is achieved for a given model — two different mechanisms:
  *  - `param`: the Anthropic/OpenAI `speed=fast` request parameter.
@@ -104,7 +99,7 @@ export function ModelEditSubmenu({
   const copy = t.shell.modelOptions
   const activeSessionId = useStore($activeSessionId)
 
-  const effortValue = normalizeEffort(effort)
+  const effortValue = resolveReasoningEffort(effort)
   const thinkingOn = isThinkingEnabled(effort)
 
   // Editing always records the model's global preset; the active model also gets
@@ -225,20 +220,4 @@ export function ModelEditSubmenu({
       )}
     </DropdownMenuSubContent>
   )
-}
-
-function isThinkingEnabled(effort: string): boolean {
-  // Empty = Hermes default (medium) = on; only an explicit "none" is off.
-  return (effort || 'medium').trim().toLowerCase() !== 'none'
-}
-
-function normalizeEffort(effort: string): string {
-  const value = (effort || 'medium').trim().toLowerCase()
-
-  // Thinking off → no effort selected in the radio group.
-  if (value === 'none') {
-    return ''
-  }
-
-  return EFFORT_OPTIONS.some(option => option.value === value) ? value : 'medium'
 }
