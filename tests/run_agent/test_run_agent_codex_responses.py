@@ -2506,52 +2506,6 @@ def test_duplicate_detection_uses_commentary_when_hidden_reasoning_changes(monke
     assert interim_msgs[0]["codex_reasoning_items"][0]["id"] == "rs_second"
 
 
-def test_duplicate_interim_replacement_removes_stale_replay_carriers(monkeypatch):
-    agent = _build_agent(monkeypatch)
-    responses = [
-        SimpleNamespace(
-            output=[
-                SimpleNamespace(
-                    type="reasoning",
-                    id="rs_old",
-                    encrypted_content="enc_old",
-                    summary=[SimpleNamespace(text="Same visible update.")],
-                    status="completed",
-                )
-            ],
-            status="incomplete",
-            output_text="",
-        ),
-        SimpleNamespace(
-            output=[
-                SimpleNamespace(
-                    type="message",
-                    id="msg_new",
-                    phase="analysis",
-                    status="incomplete",
-                    content=[SimpleNamespace(type="output_text", text="Same visible update.")],
-                )
-            ],
-            status="incomplete",
-            output_text="",
-        ),
-        _codex_message_response("Done."),
-    ]
-    monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0))
-
-    result = agent.run_conversation("continue")
-
-    interim = [
-        message
-        for message in result["messages"]
-        if message.get("role") == "assistant"
-        and message.get("finish_reason") == "incomplete"
-    ]
-    assert len(interim) == 1
-    assert "codex_reasoning_items" not in interim[0]
-    assert interim[0]["codex_message_items"][0]["id"] == "msg_new"
-
-
 def test_chat_messages_to_responses_input_deduplicates_reasoning_ids(monkeypatch):
     """Duplicate reasoning item IDs across multi-turn incomplete responses
     must be deduplicated so the Responses API doesn't reject with HTTP 400."""
@@ -2928,6 +2882,62 @@ def test_normalize_codex_response_preserves_raw_dict_function_call():
     assert normalized.tool_calls[0].function.arguments == '{"command":"pwd"}'
 
 
+def test_consume_codex_stream_separates_reasoning_summary_parts():
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    reasoning_deltas = []
+    _consume_codex_event_stream(
+        _FakeCreateStream([
+            SimpleNamespace(
+                type="response.reasoning_summary_text.delta",
+                summary_index=0,
+                delta="**Investigating culprit PRs**",
+            ),
+            SimpleNamespace(
+                type="response.reasoning_summary_text.delta",
+                summary_index=1,
+                delta="**Inspecting message schema**",
+            ),
+            SimpleNamespace(
+                type="response.reasoning_summary_text.delta",
+                summary_index=1,
+                delta=" and tool calls",
+            ),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="completed"),
+            ),
+        ]),
+        model="gpt-5.6-sol",
+        on_reasoning_delta=reasoning_deltas.append,
+    )
+
+    assert "".join(reasoning_deltas) == (
+        "**Investigating culprit PRs**"
+        "\n\n**Inspecting message schema** and tool calls"
+    )
+
+
+def test_consume_codex_stream_leaves_unindexed_reasoning_untouched():
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    reasoning_deltas = []
+    _consume_codex_event_stream(
+        _FakeCreateStream([
+            SimpleNamespace(type="response.reasoning_text.delta", delta="Need to "),
+            SimpleNamespace(type="response.reasoning_text.delta", delta="inspect files."),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="completed"),
+            ),
+        ]),
+        model="gpt-5.6-sol",
+        on_reasoning_delta=reasoning_deltas.append,
+    )
+
+    assert "".join(reasoning_deltas) == "Need to inspect files."
+
+
 def test_interim_commentary_prefers_structured_text_and_redacts(monkeypatch):
     agent = _build_agent(monkeypatch)
     monkeypatch.setattr("agent.redact._REDACT_ENABLED", True)
@@ -3045,39 +3055,6 @@ def test_codex_visible_reasoning_is_redacted_before_persistence(
         assert persisted_items[0]["encrypted_content"] == "opaque-replay-state"
     finally:
         db.close()
-
-
-def test_codex_replay_redaction_recurses_without_touching_opaque_fields(monkeypatch):
-    from agent.chat_completion_helpers import _redact_codex_visible_items
-
-    monkeypatch.setattr("agent.redact._REDACT_ENABLED", True)
-    secret = "sk-" + ("B" * 32)
-    items = [
-        {
-            "type": "reasoning",
-            "id": secret,
-            "encrypted_content": secret,
-            "summary": [
-                {
-                    "type": "summary_text",
-                    "text": f"nested {secret}",
-                    "metadata": {"opaque": secret},
-                }
-            ],
-        },
-        {"type": "message", "content": f"direct {secret}"},
-        {"type": "message", "refusal": f"refusal {secret}"},
-    ]
-
-    redacted = _redact_codex_visible_items(items)
-
-    assert secret not in redacted[0]["summary"][0]["text"]
-    assert secret not in redacted[1]["content"]
-    assert secret not in redacted[2]["refusal"]
-    assert redacted[0]["id"] == secret
-    assert redacted[0]["encrypted_content"] == secret
-    assert redacted[0]["summary"][0]["metadata"] == {"opaque": secret}
-    assert items[0]["summary"][0]["text"] == f"nested {secret}"
 
 
 def test_interim_commentary_respects_show_commentary_off(monkeypatch):
@@ -3355,6 +3332,95 @@ def test_codex_commentary_emits_before_tool_and_withholds_final_answer(monkeypat
     assert all(text != "Done." for kind, text in events if kind == "interim")
 
 
+def test_consume_codex_stream_scopes_message_phase_by_output_item():
+    """Interleaved message items must not inherit the most recently added phase."""
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    commentary = []
+    final_text = []
+    events = [
+        SimpleNamespace(
+            type="response.output_item.added",
+            output_index=0,
+            item=SimpleNamespace(id="commentary-1", type="message", phase="commentary"),
+        ),
+        SimpleNamespace(
+            type="response.output_item.added",
+            output_index=1,
+            item=SimpleNamespace(id="final-1", type="message", phase="final_answer"),
+        ),
+        SimpleNamespace(
+            type="response.output_text.delta",
+            output_index=0,
+            item_id="commentary-1",
+            delta="Working on it.",
+        ),
+        SimpleNamespace(
+            type="response.output_text.delta",
+            output_index=1,
+            item_id="final-1",
+            delta="Final answer.",
+        ),
+        SimpleNamespace(
+            type="response.output_item.done",
+            output_index=0,
+            item=SimpleNamespace(
+                id="commentary-1",
+                type="message",
+                phase="commentary",
+                content=[SimpleNamespace(type="output_text", text="Working on it.")],
+            ),
+        ),
+        SimpleNamespace(
+            type="response.output_item.done",
+            output_index=1,
+            item=SimpleNamespace(
+                id="final-1",
+                type="message",
+                phase="final_answer",
+                content=[SimpleNamespace(type="output_text", text="Final answer.")],
+            ),
+        ),
+        SimpleNamespace(
+            type="response.completed",
+            response=SimpleNamespace(status="completed"),
+        ),
+    ]
+
+    response = _consume_codex_event_stream(
+        iter(events),
+        model="gpt-5.6-sol",
+        on_text_delta=final_text.append,
+        on_commentary_message=commentary.append,
+    )
+
+    assert commentary == ["Working on it."]
+    assert final_text == ["Final answer."]
+    assert response.output_text == "Final answer."
+
+
+def test_consume_codex_stream_scopes_summary_index_by_reasoning_item():
+    """Each reasoning item owns an independent summary-part boundary counter."""
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    reasoning = []
+    events = [
+        SimpleNamespace(type="response.reasoning_summary_text.delta", item_id="reasoning-a", output_index=0, summary_index=0, delta="A0"),
+        SimpleNamespace(type="response.reasoning_summary_text.delta", item_id="reasoning-b", output_index=1, summary_index=0, delta="B0"),
+        SimpleNamespace(type="response.reasoning_summary_text.delta", item_id="reasoning-b", output_index=1, summary_index=1, delta="B1"),
+        SimpleNamespace(type="response.reasoning_summary_text.delta", item_id="reasoning-a", output_index=0, summary_index=1, delta="A1"),
+        SimpleNamespace(type="response.completed", response=SimpleNamespace(status="completed")),
+    ]
+
+    _consume_codex_event_stream(
+        iter(events),
+        model="gpt-5.6-sol",
+        on_reasoning_delta=reasoning.append,
+    )
+
+    assert reasoning == ["A0", "B0", "\n\nB1", "\n\nA1"]
+
+
 def test_duplicate_carrier_replacement_removes_omitted_replay_fields():
     from agent.conversation_loop import _replace_interim_replay_fields
 
@@ -3374,3 +3440,98 @@ def test_duplicate_carrier_replacement_removes_omitted_replay_fields():
     _replace_interim_replay_fields(prior, newest)
 
     assert prior == newest
+
+
+def test_redaction_covers_string_valued_codex_readable_fields(monkeypatch):
+    from agent.chat_completion_helpers import _redact_codex_visible_items
+
+    monkeypatch.setattr("agent.redact._REDACT_ENABLED", True)
+    secret = "sk-" + ("A" * 32)
+    opaque = "opaque-replay-state"
+
+    redacted = _redact_codex_visible_items(
+        [{
+            "type": "reasoning",
+            "text": f"text {secret}",
+            "summary": f"summary {secret}",
+            "content": f"content {secret}",
+            "encrypted_content": opaque,
+        }]
+    )
+
+    serialized = json.dumps(redacted)
+    assert secret not in serialized
+    assert redacted[0]["encrypted_content"] == opaque
+
+
+def test_codex_replay_redaction_recurses_without_touching_opaque_fields(monkeypatch):
+    from agent.chat_completion_helpers import _redact_codex_visible_items
+
+    monkeypatch.setattr("agent.redact._REDACT_ENABLED", True)
+    secret = "sk-" + ("B" * 32)
+    items = [
+        {
+            "type": "reasoning",
+            "id": secret,
+            "encrypted_content": secret,
+            "summary": [
+                {
+                    "type": "summary_text",
+                    "text": f"nested {secret}",
+                    "metadata": {"opaque": secret},
+                }
+            ],
+        },
+        {"type": "message", "content": f"direct {secret}"},
+        {"type": "message", "refusal": f"refusal {secret}"},
+    ]
+
+    redacted = _redact_codex_visible_items(items)
+
+    assert secret not in redacted[0]["summary"][0]["text"]
+    assert secret not in redacted[1]["content"]
+    assert secret not in redacted[2]["refusal"]
+    assert redacted[0]["id"] == secret
+    assert redacted[0]["encrypted_content"] == secret
+    assert redacted[0]["summary"][0]["metadata"] == {"opaque": secret}
+    assert items[0]["summary"][0]["text"] == f"nested {secret}"
+
+
+def test_run_agent_copilot_host_checks_accept_plan_hosts_and_reject_lookalikes():
+    from run_agent import AIAgent
+
+    agent = object.__new__(AIAgent)
+    for url in (
+        "https://api.githubcopilot.com",
+        "https://api.business.githubcopilot.com",
+        "https://api.enterprise.githubcopilot.com/v1",
+    ):
+        assert agent._is_github_copilot_url(url)
+
+    for url in (
+        "https://githubcopilot.com.evil.example",
+        "https://example.test/githubcopilot.com",
+        "https://api.openai.com",
+    ):
+        assert not agent._is_github_copilot_url(url)
+
+
+def test_run_agent_applies_copilot_headers_to_plan_scoped_hosts(monkeypatch):
+    from run_agent import AIAgent
+
+    agent = object.__new__(AIAgent)
+    agent._client_kwargs = {}
+    agent.api_mode = "chat_completions"
+    agent.provider = "copilot"
+    monkeypatch.setattr(
+        "hermes_cli.models.copilot_default_headers",
+        lambda: {"Copilot-Integration-Id": "test-contract"},
+    )
+
+    agent._apply_client_headers_for_base_url(
+        "https://api.business.githubcopilot.com"
+    )
+
+    assert agent._client_kwargs["default_headers"] == {
+        "Copilot-Integration-Id": "test-contract"
+    }

@@ -371,6 +371,20 @@ def _item_field(item: Any, name: str, default: Any = None) -> Any:
     return value if value is not None else default
 
 
+def _event_item_keys(event: Any, item: Any = None) -> List[tuple[str, Any]]:
+    """Return stable aliases for one Responses output item."""
+    keys: List[tuple[str, Any]] = []
+    item_id = _event_field(event, "item_id")
+    if item_id is None and item is not None:
+        item_id = _item_field(item, "id")
+    if item_id is not None:
+        keys.append(("item_id", item_id))
+    output_index = _event_field(event, "output_index")
+    if output_index is not None:
+        keys.append(("output_index", output_index))
+    return keys
+
+
 def _raise_stream_error(event: Any) -> None:
     """Raise a ``_StreamErrorEvent`` from a ``type=error`` SSE frame.
 
@@ -437,7 +451,9 @@ def _consume_codex_event_stream(
     first_delta_fired = False
     active_message_phase: str | None = None
     commentary_text_deltas: List[str] = []
-    active_summary_index: Any = None
+    message_phases: dict[tuple[str, Any], str | None] = {}
+    commentary_deltas: dict[tuple[str, Any], List[str]] = {}
+    summary_indexes: dict[tuple[str, Any], Any] = {}
     terminal_status: str = "completed"
     terminal_usage: Any = None
     terminal_response_id: str = None
@@ -479,12 +495,20 @@ def _consume_codex_event_stream(
             item_type = _item_field(item, "type", "")
             if item_type == "message":
                 phase = _item_field(item, "phase", None)
-                active_message_phase = (
+                normalized_phase = (
                     phase.strip().lower() if isinstance(phase, str) else None
                 )
-                if active_message_phase == "commentary":
-                    commentary_text_deltas = []
-            else:
+                item_keys = _event_item_keys(event, item)
+                if item_keys:
+                    item_commentary: List[str] = []
+                    for item_key in item_keys:
+                        message_phases[item_key] = normalized_phase
+                        commentary_deltas[item_key] = item_commentary
+                else:
+                    active_message_phase = normalized_phase
+                    if active_message_phase == "commentary":
+                        commentary_text_deltas = []
+            elif not _event_item_keys(event, item):
                 active_message_phase = None
             if "function_call" in str(item_type):
                 has_tool_calls = True
@@ -492,14 +516,26 @@ def _consume_codex_event_stream(
 
         if "output_text.delta" in event_type or event_type == "response.output_text.delta":
             delta_text = _event_field(event, "delta", "")
-            if delta_text and active_message_phase == "commentary":
-                commentary_text_deltas.append(delta_text)
+            item_keys = _event_item_keys(event)
+            item_key = next((key for key in item_keys if key in message_phases), None)
+            message_phase = (
+                message_phases.get(item_key)
+                if item_key is not None
+                else active_message_phase
+            )
+            item_commentary = (
+                commentary_deltas.get(item_key, commentary_text_deltas)
+                if item_key is not None
+                else commentary_text_deltas
+            )
+            if delta_text and message_phase == "commentary":
+                item_commentary.append(delta_text)
                 if on_commentary_message is None and on_reasoning_delta is not None:
                     try:
                         on_reasoning_delta(delta_text)
                     except Exception:
                         logger.debug("Codex stream on_reasoning_delta raised", exc_info=True)
-            elif delta_text and active_message_phase == "analysis":
+            elif delta_text and message_phase == "analysis":
                 if on_reasoning_delta is not None:
                     try:
                         on_reasoning_delta(delta_text)
@@ -529,6 +565,18 @@ def _consume_codex_event_stream(
         if "reasoning" in event_type and "delta" in event_type:
             reasoning_text = _event_field(event, "delta", "")
             if reasoning_text and on_reasoning_delta is not None:
+                summary_index = _event_field(event, "summary_index")
+                item_keys = _event_item_keys(event)
+                summary_key = item_keys[0] if item_keys else ("stream", "default")
+                active_summary_index = summary_indexes.get(summary_key)
+                if (
+                    summary_index is not None
+                    and active_summary_index is not None
+                    and summary_index != active_summary_index
+                ):
+                    reasoning_text = f"\n\n{reasoning_text}"
+                if summary_index is not None:
+                    summary_indexes[summary_key] = summary_index
                 try:
                     on_reasoning_delta(reasoning_text)
                 except Exception:
@@ -546,7 +594,17 @@ def _consume_codex_event_stream(
                     else None
                 )
                 if done_phase == "commentary" and on_commentary_message is not None:
-                    commentary_text = "".join(commentary_text_deltas).strip()
+                    item_keys = _event_item_keys(event, done_item)
+                    item_key = next(
+                        (key for key in item_keys if key in commentary_deltas),
+                        None,
+                    )
+                    item_commentary = (
+                        commentary_deltas.get(item_key, commentary_text_deltas)
+                        if item_key is not None
+                        else commentary_text_deltas
+                    )
+                    commentary_text = "".join(item_commentary).strip()
                     if not commentary_text:
                         content_parts = _item_field(done_item, "content", [])
                         if isinstance(content_parts, list):
@@ -563,7 +621,12 @@ def _consume_codex_event_stream(
                                 "Codex stream on_commentary_message raised",
                                 exc_info=True,
                             )
-                    commentary_text_deltas = []
+                    if item_key is None:
+                        commentary_text_deltas = []
+                    else:
+                        for key in item_keys:
+                            message_phases.pop(key, None)
+                            commentary_deltas.pop(key, None)
             continue
 
         if event_type in _TERMINAL_EVENT_TYPES:
