@@ -5138,6 +5138,35 @@ def _fallback_session_info(session: dict) -> dict:
     }
 
 
+def _strip_persisted_assistant_prefix(
+    streamed: str,
+    history: list[dict],
+) -> str:
+    """Remove assistant segments already materialized in the resume transcript."""
+    last_user = -1
+    for idx, message in enumerate(history):
+        if isinstance(message, dict) and message.get("role") == "user":
+            last_user = idx
+
+    parts = [
+        _content_display_text(message.get("content")).strip()
+        for message in history[last_user + 1 :]
+        if isinstance(message, dict) and message.get("role") == "assistant"
+    ]
+    parts = [part for part in parts if part]
+    if not parts:
+        return streamed
+
+    offset = 0
+    for part in parts:
+        while offset < len(streamed) and streamed[offset].isspace():
+            offset += 1
+        if not streamed.startswith(part, offset):
+            return streamed
+        offset += len(part)
+    return streamed[offset:].lstrip()
+
+
 def _live_session_payload(
     sid: str,
     session: dict,
@@ -5153,11 +5182,31 @@ def _live_session_payload(
             session["transport"] = transport
         if touch:
             session["last_active"] = time.time()
-        history = list(session.get("display_history_prefix") or []) + list(
-            session.get("history") or []
-        )
-        inflight = _inflight_snapshot(session)
+        prefix = list(session.get("display_history_prefix") or [])
+        stored_history = list(session.get("history") or [])
+        agent = session.get("agent")
+        agent_history = getattr(agent, "_session_messages", None)
         running = bool(session.get("running"))
+        use_agent_history = running and isinstance(agent_history, list) and bool(agent_history)
+        current_history = (
+            list(agent_history)
+            if running and isinstance(agent_history, list) and agent_history
+            else stored_history
+        )
+        history = prefix + current_history
+        inflight = _inflight_snapshot(session)
+        if use_agent_history and inflight:
+            # The live list already contains the current user message and every
+            # completed assistant/tool round. Keep only the not-yet-materialized
+            # streamed suffix in ``inflight`` so a reconnect neither loses tool
+            # rows nor duplicates commentary already present in ``messages``.
+            inflight = dict(inflight)
+            inflight["user"] = ""
+            streamed_assistant = str(inflight.get("assistant") or "")
+            inflight["assistant"] = _strip_persisted_assistant_prefix(
+                streamed_assistant,
+                current_history,
+            )
     payload = {
         "info": _fallback_session_info(session),
         "message_count": len(history),

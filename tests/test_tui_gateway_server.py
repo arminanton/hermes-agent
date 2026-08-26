@@ -2227,6 +2227,115 @@ def test_atomic_finalizer_failure_does_not_fall_back_or_publish_finalized(
     assert fallback == []
 
 
+def test_live_session_payload_uses_running_agents_current_messages(monkeypatch):
+    """Renderer reattach must include completed tool rounds from the live turn."""
+    agent = types.SimpleNamespace(
+        _session_messages=[
+            {"role": "user", "content": "inspect the browser"},
+            {
+                "role": "assistant",
+                "content": "The browser has a stale tab.",
+                "tool_calls": [
+                    {
+                        "id": "call-browser",
+                        "type": "function",
+                        "function": {
+                            "name": "browser_snapshot",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-browser",
+                "content": "410 Gone",
+            },
+        ],
+    )
+    session = _session(
+        agent=agent,
+        running=True,
+        history=[{"role": "user", "content": "stale checkpoint"}],
+    )
+    monkeypatch.setattr(server, "_fallback_session_info", lambda _session: {})
+
+    payload = server._live_session_payload("sid", session)
+
+    assert any(
+        message.get("role") == "assistant"
+        and message.get("text") == "The browser has a stale tab."
+        for message in payload["messages"]
+    )
+    assert any(
+        message.get("role") == "tool"
+        and message.get("name") == "browser_snapshot"
+        for message in payload["messages"]
+    )
+
+
+def test_live_session_payload_removes_persisted_commentary_from_inflight_stream(
+    monkeypatch,
+):
+    """Reattach must not render persisted commentary again as streamed text."""
+    agent = types.SimpleNamespace(
+        _session_messages=[
+            {"role": "user", "content": "inspect the browser"},
+            {"role": "assistant", "content": "First commentary."},
+            {
+                "role": "tool",
+                "tool_call_id": "call-browser",
+                "content": "410 Gone",
+            },
+            {"role": "assistant", "content": "Second commentary."},
+        ],
+    )
+    session = _session(
+        agent=agent,
+        running=True,
+        history=[{"role": "user", "content": "stale checkpoint"}],
+        inflight_turn={
+            "assistant": "First commentary.\n\nSecond commentary.",
+            "streaming": True,
+            "user": "inspect the browser",
+        },
+    )
+    monkeypatch.setattr(server, "_fallback_session_info", lambda _session: {})
+
+    payload = server._live_session_payload("sid", session)
+
+    assert payload["inflight"]["assistant"] == ""
+    assert [
+        message.get("text")
+        for message in payload["messages"]
+        if message.get("role") == "assistant"
+    ] == ["First commentary.", "Second commentary."]
+
+
+def test_persisted_commentary_prefix_stripping_preserves_unmatched_new_text():
+    history = [
+        {"role": "user", "content": "inspect"},
+        {"role": "assistant", "content": "First commentary."},
+        {"role": "tool", "tool_call_id": "call-1", "content": "done"},
+        {"role": "assistant", "content": "Second commentary."},
+    ]
+
+    for separator in ("", " ", "\n", "\n\n", "\t\n"):
+        streamed = f"First commentary.{separator}Second commentary. Fresh suffix."
+        assert server._strip_persisted_assistant_prefix(streamed, history) == (
+            "Fresh suffix."
+        )
+
+    for unmatched in (
+        "Fresh suffix only.",
+        "First commentary. Different second segment.",
+        "Prefix First commentary. Second commentary.",
+    ):
+        assert server._strip_persisted_assistant_prefix(unmatched, history) == (
+            unmatched
+        )
+
+
 def test_ws_orphan_reap_spares_reattached_session(monkeypatch):
     """A session that rebinds a live transport is NOT considered orphaned."""
 
