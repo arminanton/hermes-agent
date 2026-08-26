@@ -28,41 +28,45 @@ describe('toTranscriptMessages', () => {
     expect(toTranscriptMessages(rows)[1]?.tools?.[0]).toContain('Search Files')
   })
 
-  it('attaches a trailing pending tool to the preceding assistant on resume', () => {
+  it('attaches a live reconnect pending tool without claiming completion', () => {
     const rows = [
-      { role: 'user', text: 'inspect the stale tab' },
-      { role: 'assistant', text: 'I will inspect it now.' },
-      { role: 'tool', context: 'sleep 600', name: 'terminal', pending: true }
+      { role: 'user', text: 'run the fixture operation' },
+      { role: 'assistant', text: 'Starting the fixture operation.' },
+      { role: 'tool', context: 'fixture-live', name: 'fixture_operation', pending: true }
     ]
 
     const messages = toTranscriptMessages(rows)
 
     expect(messages).toHaveLength(2)
     expect(messages[1]?.role).toBe('assistant')
-    expect(messages[1]?.tools?.[0]).toContain('Terminal')
-    expect(messages[1]?.tools?.[0]).toContain('sleep 600')
+    expect(messages[1]?.tools?.[0]).toContain('Fixture Operation')
+    expect(messages[1]?.tools?.[0]).toContain('fixture-live')
+    expect(messages[1]?.tools?.[0]).toContain('…')
     expect(messages[1]?.tools?.[0]).not.toContain('✓')
+    expect(messages[1]?.tools?.[0]).not.toContain('interrupted')
   })
 
-  it('keeps a contentless pending tool as a visible tool shelf', () => {
+  it('renders a cold-resume unmatched tool as interrupted, not pending', () => {
     const rows = [
-      { role: 'user', text: 'inspect the stale tab' },
-      { role: 'tool', context: 'sleep 600', name: 'terminal', pending: true }
+      { role: 'user', text: 'run the fixture operation' },
+      { role: 'tool', context: 'fixture-cold', name: 'fixture_operation', status: 'interrupted' }
     ]
 
     const messages = toTranscriptMessages(rows)
 
     expect(messages).toHaveLength(2)
     expect(messages[1]).toMatchObject({ kind: 'trail', role: 'system', text: '' })
-    expect(messages[1]?.tools?.[0]).toContain('Terminal')
-    expect(messages[1]?.tools?.[0]).not.toContain('✓')
+    expect(messages[1]?.tools?.[0]).toContain('Fixture Operation')
+    expect(messages[1]?.tools?.[0]).toContain('interrupted')
+    expect(messages[1]?.tools?.[0]).toContain('✗')
+    expect(messages[1]?.tools?.[0]).not.toContain('…')
   })
 
-  it('keeps completed and pending tools from one contentless batch', () => {
+  it('keeps completed and interrupted tools from one contentless batch', () => {
     const rows = [
-      { role: 'user', text: 'inspect both targets' },
+      { role: 'user', text: 'run both fixture operations' },
       { role: 'tool', context: 'first', name: 'read_file' },
-      { role: 'tool', context: 'second', name: 'terminal', pending: true }
+      { role: 'tool', context: 'second', name: 'fixture_operation', status: 'interrupted' }
     ]
 
     const messages = toTranscriptMessages(rows)
@@ -71,8 +75,9 @@ describe('toTranscriptMessages', () => {
     expect(tools).toHaveLength(2)
     expect(tools[0]).toContain('Read File')
     expect(tools[0]).toContain('✓')
-    expect(tools[1]).toContain('Terminal')
-    expect(tools[1]).not.toContain('✓')
+    expect(tools[1]).toContain('Fixture Operation')
+    expect(tools[1]).toContain('interrupted')
+    expect(tools[1]).toContain('✗')
   })
 
   it('hydrates persisted assistant reasoning into the thinking transcript field', () => {

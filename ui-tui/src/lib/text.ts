@@ -268,14 +268,14 @@ export const buildVerboseToolTrailLine = (
   return `${formatToolCall(name, context)}${took}${detail ? ` :: ${detail}` : ''} ${error ? '✗' : '✓'}`
 }
 
-export const isToolTrailResultLine = (line: string) => line.endsWith(' ✓') || line.endsWith(' ✗')
+export const isToolTrailResultLine = (line: string) => line.endsWith(' ✓') || line.endsWith(' ✗') || line.endsWith(' …')
 
 export const parseToolTrailResultLine = (line: string) => {
   if (!isToolTrailResultLine(line)) {
     return null
   }
 
-  const mark = line.endsWith(' ✗') ? '✗' : '✓'
+  const mark = line.endsWith(' ✗') ? '✗' : line.endsWith(' …') ? '…' : '✓'
   const body = line.slice(0, -2)
   const sep = body.indexOf(' :: ')
 

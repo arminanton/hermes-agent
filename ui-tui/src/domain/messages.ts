@@ -55,14 +55,17 @@ export const toTranscriptMessages = (rows: unknown): Msg[] => {
       reasoning,
       reasoning_content: reasoningContent,
       role,
+      status,
       text
     } = row as TranscriptRow
 
     if (role === 'tool') {
       pending.push(
-        isPending
-          ? `${formatToolCall(name ?? 'tool', context ?? '')} …`
-          : buildToolTrailLine(name ?? 'tool', context ?? '')
+        status === 'interrupted'
+          ? `${formatToolCall(name ?? 'tool', context ?? '')} :: interrupted ✗`
+          : isPending
+            ? `${formatToolCall(name ?? 'tool', context ?? '')} …`
+            : buildToolTrailLine(name ?? 'tool', context ?? '')
       )
 
       continue
@@ -131,5 +134,6 @@ interface TranscriptRow {
   reasoning?: string
   reasoning_content?: string
   role?: string
+  status?: string
   text?: string
 }

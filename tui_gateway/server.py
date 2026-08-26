@@ -4211,6 +4211,19 @@ def _coerce_message_text(content: Any) -> str:
 def _history_to_messages(history: list[dict]) -> list[dict]:
     messages = []
     tool_call_args = {}
+    unmatched_tool_calls = {}
+
+    def append_interrupted_tool_rows() -> None:
+        for name, args in unmatched_tool_calls.values():
+            messages.append(
+                {
+                    "role": "tool",
+                    "name": name,
+                    "context": _tool_full_ctx(name, args),
+                    "status": "interrupted",
+                }
+            )
+        unmatched_tool_calls.clear()
 
     for m in history:
         if not isinstance(m, dict):
@@ -4218,6 +4231,8 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
         role = m.get("role")
         if role not in {"user", "assistant", "tool", "system"}:
             continue
+        if role != "tool" and unmatched_tool_calls:
+            append_interrupted_tool_rows()
         content_text = _coerce_message_text(m.get("content"))
         if role == "assistant" and m.get("tool_calls"):
             for tc in m["tool_calls"]:
@@ -4229,6 +4244,7 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
                     except (json.JSONDecodeError, TypeError):
                         args = {}
                     tool_call_args[tc_id] = (fn["name"], args)
+                    unmatched_tool_calls[tc_id] = (fn["name"], args)
             if not content_text.strip():
                 continue
         if role == "tool":
@@ -4246,6 +4262,8 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
             messages.append(
                 {"role": "tool", "name": name, "context": _tool_full_ctx(name, args)}
             )
+            if tc_id:
+                unmatched_tool_calls.pop(tc_id, None)
             continue
         # An assistant turn may carry only reasoning/thinking content with no
         # visible text (extended-thinking turns, thinking-only recovery
@@ -4272,6 +4290,7 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
                     msg[key] = m.get(key)
         messages.append(msg)
 
+    append_interrupted_tool_rows()
     return messages
 
 

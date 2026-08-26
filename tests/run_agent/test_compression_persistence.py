@@ -307,6 +307,7 @@ class TestFlushAfterCompression:
     def test_atomic_split_failure_keeps_parent_available_for_cold_resume(self):
         """An atomic split error must leave the durable parent resumable."""
         from hermes_state import SessionDB
+        from tui_gateway.server import _history_to_messages
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db = SessionDB(db_path=Path(tmpdir) / "test.db")
@@ -361,6 +362,14 @@ class TestFlushAfterCompression:
                 assert resumed_id == "original-session"
                 resumed = db.get_messages_as_conversation(resumed_id)
                 assert "inspect the stale browser" in str(resumed)
+                rendered = _history_to_messages(resumed)
+                assert any(
+                    row.get("role") == "tool"
+                    and row.get("name") == "browser_snapshot"
+                    and row.get("status") == "interrupted"
+                    and "pending" not in row
+                    for row in rendered
+                )
             finally:
                 db.close()
 

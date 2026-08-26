@@ -293,6 +293,35 @@ def test_sess_found(server):
 # ── session.resume payload ────────────────────────────────────────────
 
 
+def test_history_to_messages_keeps_a_pending_tool_call_visible(server):
+    """A cold resume should show the tool that was active at process exit."""
+    messages = server._history_to_messages(
+        [
+            {"role": "user", "content": "inspect the browser"},
+            {
+                "role": "assistant",
+                "content": "I will inspect the stale tab now.",
+                "tool_calls": [
+                    {
+                        "id": "call-browser",
+                        "type": "function",
+                        "function": {
+                            "name": "browser_snapshot",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            },
+        ]
+    )
+
+    assert any(
+        message.get("role") == "tool"
+        and message.get("name") == "browser_snapshot"
+        for message in messages
+    )
+
+
 def test_session_resume_returns_hydrated_messages(server, monkeypatch):
     class _DB:
         def get_session(self, _sid):

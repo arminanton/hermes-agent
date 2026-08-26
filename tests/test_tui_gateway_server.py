@@ -1094,6 +1094,74 @@ def test_session_resume_cold_load_stays_on_requested_segment(monkeypatch, tmp_pa
     assert "unrelated later topic" not in texts
 
 
+def test_session_resume_marks_unmatched_tool_call_interrupted(monkeypatch, tmp_path):
+    """A cold resume must not present an unmatched call as still running."""
+    from hermes_state import SessionDB
+
+    recovery_id = "cold-resume-fixture"
+    recovery = "Continue the deterministic fixture operation after restart."
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session(recovery_id, source="recovery")
+    db.append_message(recovery_id, role="user", content=recovery)
+    db.append_message(
+        recovery_id,
+        role="assistant",
+        content="Starting the deterministic fixture operation.",
+        tool_calls=[
+            {
+                "id": "call-fixture-operation",
+                "type": "function",
+                "function": {
+                    "name": "fixture_operation",
+                    "arguments": '{"label":"restart-fixture"}',
+                },
+            }
+        ],
+        finish_reason="tool_calls",
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_claim_active_session_slot", lambda *a, **k: (None, None))
+    monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
+    monkeypatch.setattr(server, "_set_session_context", lambda target: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda tokens: None)
+    monkeypatch.setattr(
+        server,
+        "_make_agent",
+        lambda *a, **k: types.SimpleNamespace(model="test", provider="test"),
+    )
+    monkeypatch.setattr(server, "_init_session", lambda *a, **k: None)
+    monkeypatch.setattr(
+        server,
+        "_session_info",
+        lambda agent, *a: {"model": "test", "tools": {}, "skills": {}},
+    )
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "recovery",
+                "method": "session.resume",
+                "params": {"session_id": recovery_id},
+            }
+        )
+    finally:
+        db.close()
+
+    assert resp is not None
+    result = resp["result"]
+    rendered = str(result["messages"])
+    assert result["resumed"] == recovery_id
+    assert recovery in rendered
+    assert any(
+        row.get("role") == "tool"
+        and row.get("name") == "fixture_operation"
+        and row.get("status") == "interrupted"
+        and "pending" not in row
+        for row in result["messages"]
+    )
+
+
 def test_session_resume_reuses_live_session_rotated_to_tip(monkeypatch, tmp_path):
     """Resuming a pre-rotation id reattaches to a still-live session under the tip.
 

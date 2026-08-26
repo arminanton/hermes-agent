@@ -26,6 +26,7 @@ describe('isToolTrailResultLine', () => {
   it('detects completion markers', () => {
     expect(isToolTrailResultLine('foo ✓')).toBe(true)
     expect(isToolTrailResultLine('foo ✗')).toBe(true)
+    expect(isToolTrailResultLine('foo …')).toBe(true)
     expect(isToolTrailResultLine('drafting x…')).toBe(false)
   })
 })
@@ -66,6 +67,22 @@ describe('toolCallInspectTitle', () => {
 })
 
 describe('parseToolTrailResultLine', () => {
+  it('keeps a live pending tool in the tool group without claiming success', () => {
+    expect(parseToolTrailResultLine('Fixture Operation("fixture-live") …')).toEqual({
+      call: 'Fixture Operation("fixture-live")',
+      detail: '',
+      mark: '…'
+    })
+  })
+
+  it('parses an interrupted cold-resume tool as a failed operation with a reason', () => {
+    expect(parseToolTrailResultLine('Fixture Operation("fixture-cold") :: interrupted ✗')).toEqual({
+      call: 'Fixture Operation("fixture-cold")',
+      detail: 'interrupted',
+      mark: '✗'
+    })
+  })
+
   it('does NOT split on a `: ` embedded inside a modern Label("…") command (regression)', () => {
     // A completed shell call whose command contains an embedded `: ` — e.g.
     // `echo "the REAL question: is my commit on the remote?"`. The legacy
@@ -334,9 +351,7 @@ describe('thinkingPreview', () => {
   it('strips adjacent bold markers on one line to plain text', () => {
     const raw = 'Sizing now. **S** is 3-4 sprints, **M** is 5-6, **L** is 7-8, larger decomposes.'
 
-    expect(thinkingPreview(raw, 'full')).toBe(
-      'Sizing now. S is 3-4 sprints, M is 5-6, L is 7-8, larger decomposes.'
-    )
+    expect(thinkingPreview(raw, 'full')).toBe('Sizing now. S is 3-4 sprints, M is 5-6, L is 7-8, larger decomposes.')
   })
 })
 
