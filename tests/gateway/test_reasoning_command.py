@@ -82,6 +82,21 @@ class TestReasoningCommand:
         assert gateway_run.GatewayRunner._parse_reasoning_command_args("—global xhigh") == ("xhigh", True)
 
     @pytest.mark.asyncio
+    async def test_reasoning_command_accepts_max_but_rejects_ultra(self):
+        runner = _make_runner()
+
+        accepted = await runner._handle_reasoning_command(
+            _make_event("/reasoning max")
+        )
+        assert runner._reasoning_config == {"enabled": True, "effort": "max"}
+        assert "max" in accepted
+
+        rejected = await runner._handle_reasoning_command(
+            _make_event("/reasoning ultra")
+        )
+        assert "Unknown argument" in rejected
+
+    @pytest.mark.asyncio
     async def test_reasoning_command_reloads_current_state_from_config(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
