@@ -499,6 +499,25 @@ def _content_policy_blocked_result(
     }
 
 
+_INTERIM_REPLAY_FIELDS = (
+    "content",
+    "reasoning",
+    "reasoning_content",
+    "reasoning_details",
+    "codex_reasoning_items",
+    "codex_message_items",
+)
+
+
+def _replace_interim_replay_fields(prior: Dict[str, Any], newest: Dict[str, Any]) -> None:
+    """Replace every replay carrier, removing fields omitted by the newest item."""
+    for key in _INTERIM_REPLAY_FIELDS:
+        if key in newest:
+            prior[key] = newest[key]
+        else:
+            prior.pop(key, None)
+
+
 def run_conversation(
     agent,
     user_message: str,
@@ -4038,16 +4057,7 @@ def run_conversation(
                     if visible_duplicate:
                         # Keep the newest replay payload without re-emitting the
                         # same public commentary.
-                        for key in (
-                            "content",
-                            "reasoning",
-                            "reasoning_content",
-                            "reasoning_details",
-                            "codex_reasoning_items",
-                            "codex_message_items",
-                        ):
-                            if key in interim_msg:
-                                last_msg[key] = interim_msg[key]
+                        _replace_interim_replay_fields(last_msg, interim_msg)
                     else:
                         messages.append(interim_msg)
                         agent._emit_interim_assistant_message(interim_msg)

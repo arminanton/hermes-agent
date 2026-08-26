@@ -2506,6 +2506,52 @@ def test_duplicate_detection_uses_commentary_when_hidden_reasoning_changes(monke
     assert interim_msgs[0]["codex_reasoning_items"][0]["id"] == "rs_second"
 
 
+def test_duplicate_interim_replacement_removes_stale_replay_carriers(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    responses = [
+        SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="reasoning",
+                    id="rs_old",
+                    encrypted_content="enc_old",
+                    summary=[SimpleNamespace(text="Same visible update.")],
+                    status="completed",
+                )
+            ],
+            status="incomplete",
+            output_text="",
+        ),
+        SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    id="msg_new",
+                    phase="analysis",
+                    status="incomplete",
+                    content=[SimpleNamespace(type="output_text", text="Same visible update.")],
+                )
+            ],
+            status="incomplete",
+            output_text="",
+        ),
+        _codex_message_response("Done."),
+    ]
+    monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0))
+
+    result = agent.run_conversation("continue")
+
+    interim = [
+        message
+        for message in result["messages"]
+        if message.get("role") == "assistant"
+        and message.get("finish_reason") == "incomplete"
+    ]
+    assert len(interim) == 1
+    assert "codex_reasoning_items" not in interim[0]
+    assert interim[0]["codex_message_items"][0]["id"] == "msg_new"
+
+
 def test_chat_messages_to_responses_input_deduplicates_reasoning_ids(monkeypatch):
     """Duplicate reasoning item IDs across multi-turn incomplete responses
     must be deduplicated so the Responses API doesn't reject with HTTP 400."""
@@ -3307,3 +3353,24 @@ def test_codex_commentary_emits_before_tool_and_withholds_final_answer(monkeypat
         ("tool", "terminal"),
     ]
     assert all(text != "Done." for kind, text in events if kind == "interim")
+
+
+def test_duplicate_carrier_replacement_removes_omitted_replay_fields():
+    from agent.conversation_loop import _replace_interim_replay_fields
+
+    prior = {
+        "content": "",
+        "reasoning": "stale reasoning",
+        "reasoning_content": "stale summary",
+        "reasoning_details": [{"type": "stale"}],
+        "codex_reasoning_items": [{"encrypted_content": "stale"}],
+        "codex_message_items": [{"id": "stale-message"}],
+    }
+    newest = {
+        "content": "",
+        "codex_message_items": [{"id": "fresh-message"}],
+    }
+
+    _replace_interim_replay_fields(prior, newest)
+
+    assert prior == newest
