@@ -506,7 +506,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
         setStatus(p.text)
 
-        if (p.kind === 'compressing') {
+        if (p.kind === 'compressing' || p.kind === 'compacting') {
           sys(p.text)
 
           return
