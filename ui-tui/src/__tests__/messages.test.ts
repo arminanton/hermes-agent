@@ -1,6 +1,7 @@
+import { PassThrough } from 'stream'
+
 import { renderSync } from '@hermes/ink'
 import React from 'react'
-import { PassThrough } from 'stream'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { MessageLine } from '../components/messageLine.js'
@@ -25,6 +26,77 @@ describe('toTranscriptMessages', () => {
       ['user', 'second prompt']
     ])
     expect(toTranscriptMessages(rows)[1]?.tools?.[0]).toContain('Search Files')
+  })
+
+  it('attaches a trailing pending tool to the preceding assistant on resume', () => {
+    const rows = [
+      { role: 'user', text: 'inspect the stale tab' },
+      { role: 'assistant', text: 'I will inspect it now.' },
+      { role: 'tool', context: 'sleep 600', name: 'terminal', pending: true }
+    ]
+
+    const messages = toTranscriptMessages(rows)
+
+    expect(messages).toHaveLength(2)
+    expect(messages[1]?.role).toBe('assistant')
+    expect(messages[1]?.tools?.[0]).toContain('Terminal')
+    expect(messages[1]?.tools?.[0]).toContain('sleep 600')
+    expect(messages[1]?.tools?.[0]).not.toContain('✓')
+  })
+
+  it('keeps a contentless pending tool as a visible tool shelf', () => {
+    const rows = [
+      { role: 'user', text: 'inspect the stale tab' },
+      { role: 'tool', context: 'sleep 600', name: 'terminal', pending: true }
+    ]
+
+    const messages = toTranscriptMessages(rows)
+
+    expect(messages).toHaveLength(2)
+    expect(messages[1]).toMatchObject({ kind: 'trail', role: 'system', text: '' })
+    expect(messages[1]?.tools?.[0]).toContain('Terminal')
+    expect(messages[1]?.tools?.[0]).not.toContain('✓')
+  })
+
+  it('keeps completed and pending tools from one contentless batch', () => {
+    const rows = [
+      { role: 'user', text: 'inspect both targets' },
+      { role: 'tool', context: 'first', name: 'read_file' },
+      { role: 'tool', context: 'second', name: 'terminal', pending: true }
+    ]
+
+    const messages = toTranscriptMessages(rows)
+    const tools = messages[1]?.tools ?? []
+
+    expect(tools).toHaveLength(2)
+    expect(tools[0]).toContain('Read File')
+    expect(tools[0]).toContain('✓')
+    expect(tools[1]).toContain('Terminal')
+    expect(tools[1]).not.toContain('✓')
+  })
+
+  it('hydrates persisted assistant reasoning into the thinking transcript field', () => {
+    const messages = toTranscriptMessages([
+      {
+        role: 'assistant',
+        text: 'Final answer.',
+        reasoning: '**Checking constraints**\n\nThe ordering works.'
+      }
+    ])
+
+    expect(messages).toEqual([
+      {
+        role: 'assistant',
+        text: 'Final answer.',
+        thinking: '**Checking constraints**\n\nThe ordering works.'
+      }
+    ])
+  })
+
+  it('keeps a reasoning-only assistant row visible on resume', () => {
+    const messages = toTranscriptMessages([{ role: 'assistant', text: '', reasoning_content: 'Still reasoning.' }])
+
+    expect(messages).toEqual([{ role: 'assistant', text: '', thinking: 'Still reasoning.' }])
   })
 })
 
@@ -100,6 +172,7 @@ describe('imageTokenMeta (path in attachment notice)', () => {
       token_estimate: 2040,
       display_path: '~/.hermes/images/clip-1782671798.png'
     })
+
     expect(meta).toBe('3024x1762 · ~/.hermes/images/clip-1782671798.png · ~2k tok')
   })
 
@@ -126,6 +199,7 @@ describe('attachedImageNotice includes the path', () => {
       height: 100,
       display_path: '~/.hermes/images/clip-1.png'
     })
+
     expect(notice).toBe('📎 Attached image: clip-1.png · 100x100 · ~/.hermes/images/clip-1.png')
   })
 })
@@ -134,8 +208,11 @@ describe('tildePath', () => {
   const origHome = process.env.HOME
 
   afterEach(() => {
-    if (origHome === undefined) delete process.env.HOME
-    else process.env.HOME = origHome
+    if (origHome === undefined) {
+      delete process.env.HOME
+    } else {
+      process.env.HOME = origHome
+    }
   })
 
   it('abbreviates a path under $HOME to ~ and never truncates', () => {
