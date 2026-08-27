@@ -129,6 +129,30 @@ class _BackgroundLoop:
         self._loop = None
         self._thread = None
 
+    def spawn_background(self, coro_factory: Callable[[], Any]) -> None:
+        """Schedule a long-lived fire-and-forget coroutine on the loop.
+
+        ``coro_factory`` is a zero-arg callable returning a coroutine;
+        it is invoked *on the loop thread* so the resulting task is
+        owned by this loop.  Used for the idle-reaper sweep.  Errors in
+        scheduling are swallowed — a missing reaper must never break
+        the LSP data path.
+        """
+        loop = self._loop
+        if loop is None:
+            return
+
+        def _create() -> None:
+            try:
+                asyncio.ensure_future(coro_factory())
+            except Exception:  # noqa: BLE001
+                pass
+
+        try:
+            loop.call_soon_threadsafe(_create)
+        except RuntimeError:
+            pass
+
 
 class LSPService:
     """The process-wide LSP service.
@@ -167,8 +191,16 @@ class LSPService:
         self._idle_timeout = idle_timeout
 
         self._loop = _BackgroundLoop()
+        self._reaper_task: Optional[asyncio.Task] = None
         if self._enabled:
             self._loop.start()
+            # Start the idle reaper so long-lived processes don't
+            # accumulate one language server per workspace_root ever
+            # touched.  Without this, ``_last_used`` grows unbounded
+            # and pyright/tsserver processes pile up until the box
+            # thrashes into swap.  Disabled when idle_timeout <= 0.
+            if self._idle_timeout and self._idle_timeout > 0:
+                self._loop.spawn_background(self._reaper_loop)
 
         # Per-(server_id, workspace_root) state
         self._clients: Dict[Tuple[str, str], LSPClient] = {}
@@ -205,6 +237,10 @@ class LSPService:
         wait_mode = lsp_cfg.get("wait_mode", "document")
         wait_timeout = float(lsp_cfg.get("wait_timeout", DIAGNOSTICS_DOCUMENT_WAIT))
         install_strategy = lsp_cfg.get("install_strategy", "auto")
+        try:
+            idle_timeout = float(lsp_cfg.get("idle_timeout", DEFAULT_IDLE_TIMEOUT))
+        except (TypeError, ValueError):
+            idle_timeout = DEFAULT_IDLE_TIMEOUT
         servers_cfg = lsp_cfg.get("servers") or {}
         disabled = []
         binary_overrides: Dict[str, List[str]] = {}
@@ -235,6 +271,7 @@ class LSPService:
             env_overrides=env_overrides,
             init_overrides=init_overrides,
             disabled_servers=disabled,
+            idle_timeout=idle_timeout,
         )
 
     # ------------------------------------------------------------------
@@ -567,6 +604,14 @@ class LSPService:
                 self._spawning.pop(key, None)
 
     async def _shutdown_async(self) -> None:
+        reaper = self._reaper_task
+        self._reaper_task = None
+        if reaper is not None and not reaper.done():
+            reaper.cancel()
+            try:
+                await reaper
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         with self._state_lock:
             clients = list(self._clients.values())
             self._clients.clear()
@@ -576,6 +621,67 @@ class LSPService:
             *(c.shutdown() for c in clients),
             return_exceptions=True,
         )
+
+    async def _reaper_loop(self) -> None:
+        """Periodically shut down language-server clients that have been
+        idle longer than ``self._idle_timeout``.
+
+        Runs on the LSP background loop for the process lifetime.  The
+        sweep interval is derived from the idle timeout (half of it,
+        clamped to [30s, 300s]) so a short timeout reaps promptly while
+        a long one doesn't busy-loop.  All errors are swallowed — the
+        reaper is best-effort and must never break the lint data path.
+        """
+        interval = max(30.0, min(self._idle_timeout / 2.0, 300.0))
+        try:
+            self._reaper_task = asyncio.current_task()
+        except RuntimeError:
+            self._reaper_task = None
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                try:
+                    await self._reap_idle()
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("LSP reaper sweep failed: %s", e)
+        except asyncio.CancelledError:
+            # Clean teardown on service shutdown — exit quietly.
+            return
+
+    async def _reap_idle(self) -> None:
+        """Shut down and drop any client idle for > ``self._idle_timeout``.
+
+        Victims are removed from ``_clients``/``_last_used`` under the
+        state lock (no ``await`` while holding it), then shut down
+        gracefully outside the lock.  A subsequent edit to a reaped
+        workspace simply re-spawns the server on demand.
+        """
+        if self._idle_timeout <= 0:
+            return
+        now = time.time()
+        victims: List[Tuple[Tuple[str, str], LSPClient]] = []
+        with self._state_lock:
+            for key, last in list(self._last_used.items()):
+                if now - last <= self._idle_timeout:
+                    continue
+                # Never reap a server that is still mid-spawn.
+                if key in self._spawning:
+                    continue
+                client = self._clients.pop(key, None)
+                self._last_used.pop(key, None)
+                if client is not None:
+                    victims.append((key, client))
+        for (server_id, workspace_root), client in victims:
+            try:
+                await client.shutdown()
+            except Exception as e:  # noqa: BLE001
+                logger.debug(
+                    "LSP reaper shutdown failed for %s/%s: %s",
+                    server_id,
+                    workspace_root,
+                    e,
+                )
+            eventlog.log_reaped(server_id, workspace_root, self._idle_timeout)
 
     # ------------------------------------------------------------------
     # status / introspection (used by ``hermes lsp status``)

@@ -121,6 +121,19 @@ def log_active(server_id: str, workspace_root: str) -> None:
         _emit(server_id, logging.DEBUG, f"reused client for {workspace_root}")
 
 
+def log_reaped(server_id: str, workspace_root: str, idle_seconds: float) -> None:
+    """An idle LSP client was shut down by the reaper.
+
+    INFO — reaping is rare and users grepping for "why did my server
+    go away?" want a single, greppable line with the idle duration.
+    """
+    _emit(
+        server_id,
+        logging.INFO,
+        f"reaped idle client for {workspace_root} (idle {idle_seconds:.0f}s)",
+    )
+
+
 def log_diagnostics(server_id: str, file_path: str, count: int) -> None:
     """Diagnostics arrived for a file.  INFO every time — these are the
     failure signals users actually want to grep for, and they are

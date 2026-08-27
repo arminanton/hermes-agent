@@ -130,6 +130,15 @@ lsp:
   wait_mode: document      # "document" or "full"
   wait_timeout: 5.0
 
+  # Idle reaper. Each unique project root the agent navigates spawns its
+  # own language server (one pyright, one tsserver, etc.) and reuses it
+  # across edits. A long-lived session touching many repos would
+  # otherwise accumulate servers indefinitely and exhaust memory. The
+  # reaper shuts down any server idle longer than this many seconds; the
+  # next edit to that project re-spawns it on demand. Set to 0 to disable
+  # reaping (not recommended for long-running gateway/TUI sessions).
+  idle_timeout: 600        # seconds (default 600 = 10 min)
+
   # How to handle missing server binaries.
   #   auto    — install via npm/pip/go install into <HERMES_HOME>/lsp/bin
   #   manual  — only use binaries already on PATH
