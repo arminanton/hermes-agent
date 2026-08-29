@@ -28,6 +28,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from typing import Optional
 
 from hermes_cli.fallback_config import get_fallback_chain
+from hermes_constants import resolve_reasoning_config
 
 
 def _normalize_toolsets(toolsets: object = None) -> list[str] | None:
@@ -332,6 +333,18 @@ def _run_agent(
     # honour the same merge semantics as interactive CLI and gateway sessions.
     _fb = get_fallback_chain(cfg)
 
+    # Reasoning effort from profile config (agent.reasoning_effort), resolved
+    # through the same shared helper the interactive CLI (cli.py), the gateway
+    # (GatewayRunner._load_reasoning_config) and cron use. Without this, oneshot
+    # constructed AIAgent with reasoning_config=None, which makes the Anthropic
+    # adapter skip its whole `thinking` block (anthropic_adapter.py gates on
+    # `if reasoning_config and isinstance(reasoning_config, dict)`), so Claude
+    # and Gemini returned and persisted zero reasoning on the `-z` path while
+    # TUI sessions captured it normally. None stays a valid value meaning
+    # "provider default", so chat_completions lanes (grok/gpt) are unchanged
+    # when the key is unset.
+    _reasoning_config = resolve_reasoning_config(cfg)
+
     agent = AIAgent(
         api_key=runtime.get("api_key"),
         base_url=runtime.get("base_url"),
@@ -344,6 +357,7 @@ def _run_agent(
         session_db=session_db,
         credential_pool=runtime.get("credential_pool"),
         fallback_model=_fb or None,
+        reasoning_config=_reasoning_config,
         # Interactive callbacks are intentionally NOT wired beyond this
         # one.  In oneshot mode there's no user sitting at a terminal:
         #   - clarify  → returns a synthetic "pick a default" instruction

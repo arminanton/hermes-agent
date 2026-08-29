@@ -1,0 +1,622 @@
+{
+ "chunks": [
+  {
+   "choices": [
+    {
+     "delta": {
+      "content": null,
+      "reasoning_text": "**Calculating the Product**\n\nI'm focusing on efficient calculation methods for $47 \\times 53$. My current thought is to leverage the proximity of these numbers to $50$. I'm exploring how best to represent this as a difference of squares, $a^2 - b^2$, to simplify the multiplication.\n\n",
+      "role": "assistant"
+     },
+     "index": 0
+    }
+   ],
+   "copilot_usage": {
+    "token_details": [
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 150000000000,
+      "token_count": 0,
+      "token_type": "input"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 15000000000,
+      "token_count": 0,
+      "token_type": "cache_read"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 0,
+      "token_count": 0,
+      "token_type": "cache_write"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 900000000000,
+      "token_count": 0,
+      "token_type": "output"
+     }
+    ],
+    "total_nano_aiu": 0
+   },
+   "created": 1787973108,
+   "id": "802SatrcDOb44PoPwumO-Ac",
+   "model": "gemini-3.5-flash",
+   "usage": {
+    "completion_tokens": 0,
+    "prompt_tokens": 0,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "total_tokens": 0
+   }
+  },
+  {
+   "choices": [
+    {
+     "delta": {
+      "content": "To find $47 \\times 53$",
+      "role": "assistant"
+     },
+     "index": 0
+    }
+   ],
+   "copilot_usage": {
+    "token_details": [
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 150000000000,
+      "token_count": 0,
+      "token_type": "input"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 15000000000,
+      "token_count": 0,
+      "token_type": "cache_read"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 0,
+      "token_count": 0,
+      "token_type": "cache_write"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 900000000000,
+      "token_count": 0,
+      "token_type": "output"
+     }
+    ],
+    "total_nano_aiu": 0
+   },
+   "created": 1787973109,
+   "id": "802SatrcDOb44PoPwumO-Ac",
+   "model": "gemini-3.5-flash",
+   "usage": {
+    "completion_tokens": 0,
+    "prompt_tokens": 0,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "total_tokens": 0
+   }
+  },
+  {
+   "choices": [
+    {
+     "delta": {
+      "content": " step-by-step, we can use a quick mental math trick using the **difference of squares** formula: $(a - b",
+      "role": "assistant"
+     },
+     "index": 0
+    }
+   ],
+   "copilot_usage": {
+    "token_details": [
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 150000000000,
+      "token_count": 0,
+      "token_type": "input"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 15000000000,
+      "token_count": 0,
+      "token_type": "cache_read"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 0,
+      "token_count": 0,
+      "token_type": "cache_write"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 900000000000,
+      "token_count": 0,
+      "token_type": "output"
+     }
+    ],
+    "total_nano_aiu": 0
+   },
+   "created": 1787973109,
+   "id": "802SatrcDOb44PoPwumO-Ac",
+   "model": "gemini-3.5-flash",
+   "usage": {
+    "completion_tokens": 0,
+    "prompt_tokens": 0,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "total_tokens": 0
+   }
+  },
+  {
+   "choices": [
+    {
+     "delta": {
+      "content": ")(a + b) = a^2 - b^2$.\n\n### **Step 1: Find the middle number**",
+      "role": "assistant"
+     },
+     "index": 0
+    }
+   ],
+   "copilot_usage": {
+    "token_details": [
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 150000000000,
+      "token_count": 0,
+      "token_type": "input"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 15000000000,
+      "token_count": 0,
+      "token_type": "cache_read"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 0,
+      "token_count": 0,
+      "token_type": "cache_write"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 900000000000,
+      "token_count": 0,
+      "token_type": "output"
+     }
+    ],
+    "total_nano_aiu": 0
+   },
+   "created": 1787973110,
+   "id": "802SatrcDOb44PoPwumO-Ac",
+   "model": "gemini-3.5-flash",
+   "usage": {
+    "completion_tokens": 0,
+    "prompt_tokens": 0,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "total_tokens": 0
+   }
+  },
+  {
+   "choices": [
+    {
+     "delta": {
+      "content": "\nThe number exactly halfway between $47$ and $53$ is **$50$**.\n\n### **Step 2:",
+      "role": "assistant"
+     },
+     "index": 0
+    }
+   ],
+   "copilot_usage": {
+    "token_details": [
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 150000000000,
+      "token_count": 0,
+      "token_type": "input"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 15000000000,
+      "token_count": 0,
+      "token_type": "cache_read"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 0,
+      "token_count": 0,
+      "token_type": "cache_write"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 900000000000,
+      "token_count": 0,
+      "token_type": "output"
+     }
+    ],
+    "total_nano_aiu": 0
+   },
+   "created": 1787973110,
+   "id": "802SatrcDOb44PoPwumO-Ac",
+   "model": "gemini-3.5-flash",
+   "usage": {
+    "completion_tokens": 0,
+    "prompt_tokens": 0,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "total_tokens": 0
+   }
+  },
+  {
+   "choices": [
+    {
+     "delta": {
+      "content": " Rewrite the numbers**\nWe can rewrite $47$ and $53$ in relation to $50$:",
+      "role": "assistant"
+     },
+     "index": 0
+    }
+   ],
+   "copilot_usage": {
+    "token_details": [
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 150000000000,
+      "token_count": 0,
+      "token_type": "input"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 15000000000,
+      "token_count": 0,
+      "token_type": "cache_read"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 0,
+      "token_count": 0,
+      "token_type": "cache_write"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 900000000000,
+      "token_count": 0,
+      "token_type": "output"
+     }
+    ],
+    "total_nano_aiu": 0
+   },
+   "created": 1787973110,
+   "id": "802SatrcDOb44PoPwumO-Ac",
+   "model": "gemini-3.5-flash",
+   "usage": {
+    "completion_tokens": 0,
+    "prompt_tokens": 0,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "total_tokens": 0
+   }
+  },
+  {
+   "choices": [
+    {
+     "delta": {
+      "content": "\n*   $47 = 50 - 3$\n*   $53 = 50",
+      "role": "assistant"
+     },
+     "index": 0
+    }
+   ],
+   "copilot_usage": {
+    "token_details": [
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 150000000000,
+      "token_count": 0,
+      "token_type": "input"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 15000000000,
+      "token_count": 0,
+      "token_type": "cache_read"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 0,
+      "token_count": 0,
+      "token_type": "cache_write"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 900000000000,
+      "token_count": 0,
+      "token_type": "output"
+     }
+    ],
+    "total_nano_aiu": 0
+   },
+   "created": 1787973110,
+   "id": "802SatrcDOb44PoPwumO-Ac",
+   "model": "gemini-3.5-flash",
+   "usage": {
+    "completion_tokens": 0,
+    "prompt_tokens": 0,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "total_tokens": 0
+   }
+  },
+  {
+   "choices": [
+    {
+     "delta": {
+      "content": " + 3$\n\nSo, the problem becomes:\n$$(50 - 3) \\times (50 +",
+      "role": "assistant"
+     },
+     "index": 0
+    }
+   ],
+   "copilot_usage": {
+    "token_details": [
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 150000000000,
+      "token_count": 0,
+      "token_type": "input"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 15000000000,
+      "token_count": 0,
+      "token_type": "cache_read"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 0,
+      "token_count": 0,
+      "token_type": "cache_write"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 900000000000,
+      "token_count": 0,
+      "token_type": "output"
+     }
+    ],
+    "total_nano_aiu": 0
+   },
+   "created": 1787973110,
+   "id": "802SatrcDOb44PoPwumO-Ac",
+   "model": "gemini-3.5-flash",
+   "usage": {
+    "completion_tokens": 0,
+    "prompt_tokens": 0,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "total_tokens": 0
+   }
+  },
+  {
+   "choices": [
+    {
+     "delta": {
+      "content": " 3)$$\n\n### **Step 3: Apply the algebraic formula**\nUsing the formula $(a - b)(a + b)",
+      "role": "assistant"
+     },
+     "index": 0
+    }
+   ],
+   "copilot_usage": {
+    "token_details": [
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 150000000000,
+      "token_count": 0,
+      "token_type": "input"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 15000000000,
+      "token_count": 0,
+      "token_type": "cache_read"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 0,
+      "token_count": 0,
+      "token_type": "cache_write"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 900000000000,
+      "token_count": 0,
+      "token_type": "output"
+     }
+    ],
+    "total_nano_aiu": 0
+   },
+   "created": 1787973110,
+   "id": "802SatrcDOb44PoPwumO-Ac",
+   "model": "gemini-3.5-flash",
+   "usage": {
+    "completion_tokens": 0,
+    "prompt_tokens": 0,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "total_tokens": 0
+   }
+  },
+  {
+   "choices": [
+    {
+     "delta": {
+      "content": " = a^2 - b^2$, where $a = 50$ and $b = 3$:\n$$50",
+      "role": "assistant"
+     },
+     "index": 0
+    }
+   ],
+   "copilot_usage": {
+    "token_details": [
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 150000000000,
+      "token_count": 0,
+      "token_type": "input"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 15000000000,
+      "token_count": 0,
+      "token_type": "cache_read"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 0,
+      "token_count": 0,
+      "token_type": "cache_write"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 900000000000,
+      "token_count": 0,
+      "token_type": "output"
+     }
+    ],
+    "total_nano_aiu": 0
+   },
+   "created": 1787973110,
+   "id": "802SatrcDOb44PoPwumO-Ac",
+   "model": "gemini-3.5-flash",
+   "usage": {
+    "completion_tokens": 0,
+    "prompt_tokens": 0,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "total_tokens": 0
+   }
+  },
+  {
+   "choices": [
+    {
+     "delta": {
+      "content": "^2 - 3^2$$\n\n### **Step 4: Calculate the squares**\n*   $50^2 = ",
+      "role": "assistant"
+     },
+     "index": 0
+    }
+   ],
+   "copilot_usage": {
+    "token_details": [
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 150000000000,
+      "token_count": 0,
+      "token_type": "input"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 15000000000,
+      "token_count": 0,
+      "token_type": "cache_read"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 0,
+      "token_count": 0,
+      "token_type": "cache_write"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 900000000000,
+      "token_count": 0,
+      "token_type": "output"
+     }
+    ],
+    "total_nano_aiu": 0
+   },
+   "created": 1787973110,
+   "id": "802SatrcDOb44PoPwumO-Ac",
+   "model": "gemini-3.5-flash",
+   "usage": {
+    "completion_tokens": 0,
+    "prompt_tokens": 0,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "total_tokens": 0
+   }
+  },
+  {
+   "choices": [
+    {
+     "delta": {
+      "content": "2500$\n*   $3^2 = 9$\n\n### **Step 5: Subtract",
+      "role": "assistant"
+     },
+     "index": 0
+    }
+   ],
+   "copilot_usage": {
+    "token_details": [
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 150000000000,
+      "token_count": 0,
+      "token_type": "input"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 15000000000,
+      "token_count": 0,
+      "token_type": "cache_read"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 0,
+      "token_count": 0,
+      "token_type": "cache_write"
+     },
+     {
+      "batch_size": 1000000,
+      "cost_per_batch": 900000000000,
+      "token_count": 0,
+      "token_type": "output"
+     }
+    ],
+    "total_nano_aiu": 0
+   },
+   "created": 1787973111,
+   "id": "802SatrcDOb44PoPwumO-Ac",
+   "model": "gemini-3.5-flash",
+   "usage": {
+    "completion_tokens": 0,
+    "prompt_tokens": 0,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    },
+    "total_tokens": 0
+   }
+  }
+ ],
+ "delta_keys_observed": [
+  "content",
+  "reasoning_text",
+  "role"
+ ]
+}

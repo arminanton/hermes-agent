@@ -343,6 +343,18 @@ def _parse_reasoning_config(effort: str) -> dict | None:
     return result
 
 
+def _resolve_reasoning_config(config) -> dict | None:
+    """Resolve ``agent.reasoning_effort`` from a loaded config mapping.
+
+    Thin alias of the shared ``hermes_constants.resolve_reasoning_config`` so
+    the interactive CLI, the gateway, cron and oneshot all resolve reasoning
+    effort through one implementation instead of four hand-rolled copies that
+    can drift.
+    """
+    from hermes_constants import resolve_reasoning_config
+    return resolve_reasoning_config(config)
+
+
 def _parse_service_tier_config(raw: str) -> str | None:
     """Parse a persisted service-tier preference into a Responses API value."""
     value = str(raw or "").strip().lower()
@@ -3480,9 +3492,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         )
         
         # Reasoning config (OpenRouter reasoning effort level)
-        self.reasoning_config = _parse_reasoning_config(
-            CLI_CONFIG["agent"].get("reasoning_effort", "")
-        )
+        self.reasoning_config = _resolve_reasoning_config(CLI_CONFIG)
         self.service_tier = _parse_service_tier_config(
             CLI_CONFIG["agent"].get("service_tier", "")
         )

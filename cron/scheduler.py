@@ -1676,10 +1676,10 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         except Exception:
             pass
 
-        # Reasoning config from config.yaml
-        from hermes_constants import parse_reasoning_effort
-        effort = str(_cfg.get("agent", {}).get("reasoning_effort", "")).strip()
-        reasoning_config = parse_reasoning_effort(effort)
+        # Reasoning config from config.yaml, via the shared resolver so cron
+        # honours agent.reasoning_effort exactly as the CLI and gateway do.
+        from hermes_constants import resolve_reasoning_config
+        reasoning_config = resolve_reasoning_config(_cfg)
 
         # Prefill messages from env or config.yaml. The top-level
         # prefill_messages_file key is canonical; agent.prefill_messages_file is

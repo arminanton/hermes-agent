@@ -2121,8 +2121,20 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             if hasattr(chunk, "model") and chunk.model:
                 model_name = chunk.model
 
-            # Accumulate reasoning content
+            # Accumulate reasoning content. Copilot streams Gemini's thinking
+            # as ``reasoning_text`` deltas (verified live), which the OpenAI SDK
+            # parks in ``model_extra`` because it isn't a known field; read it
+            # last so a provider using a standard field always wins.
+            # Undocumented key: see the contract-risk note in
+            # agent/agent_runtime_helpers.extract_reasoning and the canary tests
+            # over tests/fixtures/copilot/.
             reasoning_text = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
+            if not reasoning_text:
+                _delta_extra = getattr(delta, "model_extra", None) or {}
+                if isinstance(_delta_extra, dict):
+                    _candidate = _delta_extra.get("reasoning_text")
+                    if isinstance(_candidate, str) and _candidate:
+                        reasoning_text = _candidate
             if reasoning_text:
                 reasoning_text = separate_glued_reasoning_blocks(
                     reasoning_parts[-1] if reasoning_parts else "",

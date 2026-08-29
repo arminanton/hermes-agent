@@ -649,10 +649,30 @@ class ChatCompletionsTransport(ProviderTransport):
         # so keep them apart in provider_data rather than merging.
         reasoning = getattr(msg, "reasoning", None)
         reasoning_content = getattr(msg, "reasoning_content", None)
-        if reasoning_content is None and hasattr(msg, "model_extra"):
-            model_extra = getattr(msg, "model_extra", None) or {}
-            if isinstance(model_extra, dict) and "reasoning_content" in model_extra:
-                reasoning_content = model_extra["reasoning_content"]
+        model_extra = getattr(msg, "model_extra", None) or {}
+        if not isinstance(model_extra, dict):
+            model_extra = {}
+        if reasoning_content is None and "reasoning_content" in model_extra:
+            reasoning_content = model_extra["reasoning_content"]
+        # GitHub Copilot returns Gemini's reasoning under ``reasoning_text``
+        # (verified live against api.githubcopilot.com: the message carries
+        # ``reasoning_text`` + ``reasoning_opaque``, and usage reports non-zero
+        # ``reasoning_tokens``). The OpenAI SDK has no such field, so it lands
+        # in ``model_extra`` and was dropped on the floor: Gemini produced and
+        # billed reasoning that Hermes never surfaced or persisted. Map it onto
+        # the canonical ``reasoning`` slot, without clobbering a provider that
+        # populated the standard field. A blank standard value counts as absent
+        # here: a provider that sends ``reasoning: ""`` as a placeholder would
+        # otherwise suppress the real text.
+        #
+        # CONTRACT RISK: this key is undocumented and was found by live probe,
+        # so a rename upstream degrades silently (no reasoning, no crash). The
+        # canary tests over tests/fixtures/copilot/ are the alarm; see the
+        # longer note in agent/agent_runtime_helpers.extract_reasoning.
+        if not (isinstance(reasoning, str) and reasoning.strip()):
+            _reasoning_text = model_extra.get("reasoning_text")
+            if isinstance(_reasoning_text, str) and _reasoning_text.strip():
+                reasoning = _reasoning_text
 
         provider_data: Dict[str, Any] = {}
         if reasoning_content is not None:

@@ -1095,6 +1095,40 @@ def extract_reasoning(agent, assistant_message) -> Optional[str]:
         # Don't duplicate if same as reasoning
         if assistant_message.reasoning_content not in reasoning_parts:
             reasoning_parts.append(assistant_message.reasoning_content)
+
+    # Check reasoning_text (GitHub Copilot's field name for Gemini reasoning).
+    # The transport normalizes this onto ``reasoning``, but this helper is also
+    # called with raw SDK message objects, where an unknown field lands in
+    # ``model_extra`` instead of becoming an attribute.
+    #
+    # CONTRACT RISK: ``reasoning_text`` is NOT part of the OpenAI schema and is
+    # not documented by GitHub. It was established by probing
+    # api.githubcopilot.com directly, where a gemini-3.5-flash response carries
+    # ``reasoning_text`` + ``reasoning_opaque`` and reports non-zero
+    # ``usage.reasoning_tokens``. If Copilot renames or drops the key this
+    # branch simply stops matching: reasoning goes uncaptured again, but nothing
+    # raises. That silent degradation is why recorded responses live in
+    # tests/fixtures/copilot/ with canary tests
+    # (tests/agent/test_copilot_reasoning_text_capture.py) that fail loudly when
+    # the recorded shape no longer holds. Refresh the fixtures and this branch
+    # together if the canary goes red.
+    #
+    # ``reasoning_opaque`` is deliberately NOT read: it is an encrypted
+    # continuation handle, not displayable reasoning.
+    #
+    # TODO(reasoning-drift-probe): the committed fixtures pin the contract as
+    # observed from one account. They cannot detect a rename that only appears
+    # on another account, in another region, or in a future API version. A
+    # scheduled (not per-PR) live probe against api.githubcopilot.com would
+    # close that gap; see tests/fixtures/copilot/README.md.
+    _reasoning_text = getattr(assistant_message, 'reasoning_text', None)
+    if not _reasoning_text:
+        _extra = getattr(assistant_message, 'model_extra', None) or {}
+        if isinstance(_extra, dict):
+            _reasoning_text = _extra.get('reasoning_text')
+    if isinstance(_reasoning_text, str) and _reasoning_text.strip():
+        if _reasoning_text not in reasoning_parts:
+            reasoning_parts.append(_reasoning_text)
     
     # Check reasoning_details array (OpenRouter unified format)
     # Format: [{"type": "reasoning.summary", "summary": "...", ...}, ...]

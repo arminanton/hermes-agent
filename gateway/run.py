@@ -3725,15 +3725,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         Reads agent.reasoning_effort from config.yaml. Valid: "none",
         "minimal", "low", "medium", "high", "xhigh", "max". Returns None to use
-        default (medium).
+        default (medium). Resolution is delegated to the shared
+        ``hermes_constants.resolve_reasoning_config`` so the gateway, the
+        interactive CLI, cron and oneshot cannot drift apart.
         """
-        from hermes_constants import parse_reasoning_effort
-        cfg = _load_gateway_runtime_config()
-        effort = str(cfg_get(cfg, "agent", "reasoning_effort", default="") or "").strip()
-        result = parse_reasoning_effort(effort)
-        if effort and effort.strip() and result is None:
-            logger.warning("Unknown reasoning_effort '%s', using default (medium)", effort)
-        return result
+        from hermes_constants import resolve_reasoning_config
+        return resolve_reasoning_config(_load_gateway_runtime_config())
 
     @staticmethod
     def _parse_reasoning_command_args(raw_args: str) -> tuple[str, bool]:

@@ -431,6 +431,41 @@ def parse_reasoning_effort(effort: str) -> dict | None:
     return None
 
 
+def resolve_reasoning_config(config) -> dict | None:
+    """Resolve ``agent.reasoning_effort`` from a loaded config mapping.
+
+    This is the shared config-to-reasoning_config step every entry point needs
+    (interactive CLI, gateway, cron, oneshot). Callers pass an already-loaded
+    config mapping; this reads ``agent.reasoning_effort``, parses it through
+    :func:`parse_reasoning_effort`, and warns once when the configured value is
+    not a level Hermes recognizes.
+
+    Returns None when the key is missing, empty, or unrecognized, which means
+    "use the provider default" and is the same safe degradation the interactive
+    path has always had.
+
+    Tolerates a non-mapping config and a non-mapping ``agent`` section (a user
+    can write a scalar where a section was expected) rather than raising, so a
+    malformed profile degrades to the default instead of breaking startup. This
+    mirrors ``hermes_cli.config.cfg_get`` semantics, hand-rolled here because
+    ``hermes_constants`` is a leaf module and must not import the config layer.
+    """
+    import logging
+
+    effort = ""
+    if isinstance(config, dict):
+        agent_cfg = config.get("agent")
+        if isinstance(agent_cfg, dict):
+            effort = str(agent_cfg.get("reasoning_effort", "") or "").strip()
+
+    result = parse_reasoning_effort(effort)
+    if effort and result is None:
+        logging.getLogger(__name__).warning(
+            "Unknown reasoning_effort '%s', using default (medium)", effort
+        )
+    return result
+
+
 def is_termux() -> bool:
     """Return True when running inside a Termux (Android) environment.
 
