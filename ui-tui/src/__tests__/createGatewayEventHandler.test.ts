@@ -155,6 +155,38 @@ describe('createGatewayEventHandler', () => {
     expect(ctx.system.sys).toHaveBeenCalledWith('Compacting context for continuation…')
   })
 
+  it('releases the status line after compaction instead of pinning it for the whole turn', () => {
+    // Regression: the compacting/compressing branch used to return early
+    // WITHOUT scheduling a status restore, so "Compacting context…" stayed on
+    // the status line for the remainder of the turn. A ~73s compaction then
+    // looked like a multi-minute hang while the model was really running tools.
+    // The transcript notice must persist; the live status line must not.
+    const appended: Msg[] = []
+    const ctx = buildCtx(appended)
+    const onEvent = createGatewayEventHandler(ctx)
+
+    vi.useFakeTimers()
+
+    try {
+      for (const kind of ['compacting', 'compressing'] as const) {
+        const text = `${kind} context…`
+
+        onEvent({ payload: { kind, text }, type: 'status.update' } as any)
+
+        // Transcript keeps the notice permanently.
+        expect(ctx.system.sys).toHaveBeenCalledWith(text)
+        // Status line shows it while it is current...
+        expect(getUiState().status).toBe(text)
+
+        // ...then reverts, rather than remaining stuck for the whole turn.
+        vi.advanceTimersByTime(4001)
+        expect(getUiState().status).not.toBe(text)
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('keeps goal verdict text in transcript but shows a brief idle status (#goal statusbar)', () => {
     const appended: Msg[] = []
     const ctx = buildCtx(appended)

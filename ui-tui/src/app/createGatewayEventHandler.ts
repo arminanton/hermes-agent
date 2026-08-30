@@ -507,7 +507,17 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         setStatus(p.text)
 
         if (p.kind === 'compressing' || p.kind === 'compacting') {
+          // Keep the notice in the transcript permanently (that is the point of
+          // retaining automatic compaction notices), but do NOT pin the live
+          // status line to it. Compaction is a bounded operation, typically
+          // under two minutes, while the turn that follows can run for many
+          // more. Returning early here left "Compacting context..." on screen
+          // for the whole remaining turn, so a ~73s compaction looked like a
+          // multi-minute hang. Let the status revert like every other transient
+          // note; the transcript entry above is the durable record.
           sys(p.text)
+
+          restoreStatusAfter(4000)
 
           return
         }
