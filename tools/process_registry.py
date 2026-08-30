@@ -29,10 +29,12 @@ Usage:
     process_registry.kill(session.id)
 """
 
+import codecs
 import json
 import logging
 import os
 import platform
+import select
 import shlex
 import signal
 import subprocess
@@ -44,7 +46,7 @@ _IS_WINDOWS = platform.system() == "Windows"
 from tools.environments.local import _find_shell, _resolve_safe_cwd, _sanitize_subprocess_env
 from hermes_cli._subprocess_compat import windows_hide_flags
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from hermes_cli.config import get_hermes_home
 
@@ -73,6 +75,33 @@ WATCH_STRIKE_LIMIT = 3            # Strikes in a row → disable watch + promote
 WATCH_GLOBAL_MAX_PER_WINDOW = 15
 WATCH_GLOBAL_WINDOW_SECONDS = 10
 WATCH_GLOBAL_COOLDOWN_SECONDS = 30
+
+
+def _windows_pipe_available(fd: int) -> Optional[int]:
+    """Return available pipe bytes, or None when the Windows pipe is closed."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    win_dll: Any = getattr(ctypes, "WinDLL")
+    get_osfhandle: Any = getattr(msvcrt, "get_osfhandle")
+    get_last_error: Any = getattr(ctypes, "get_last_error")
+    kernel32 = win_dll("kernel32", use_last_error=True)
+    available = wintypes.DWORD()
+    ok = kernel32.PeekNamedPipe(
+        wintypes.HANDLE(get_osfhandle(fd)),
+        None,
+        0,
+        None,
+        ctypes.byref(available),
+        None,
+    )
+    if ok:
+        return int(available.value)
+    error_code = get_last_error()
+    if error_code in (109, 232):  # broken pipe / no data
+        return None
+    raise OSError(error_code, "PeekNamedPipe failed")
 
 
 def format_uptime_short(seconds: int) -> str:
@@ -134,6 +163,7 @@ class ProcessSession:
     _completion_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _reader_thread: Optional[threading.Thread] = field(default=None, repr=False)
+    _reader_owns_completion: bool = field(default=False, repr=False)
     _pty: Any = field(default=None, repr=False)  # ptyprocess handle (when use_pty=True)
 
 
@@ -191,7 +221,12 @@ class ProcessRegistry:
             lines.pop(0)
         return "\n".join(lines)
 
-    def _check_watch_patterns(self, session: ProcessSession, new_text: str) -> None:
+    def _check_watch_patterns(
+        self,
+        session: ProcessSession,
+        new_text: str,
+        min_match_end: int = 0,
+    ) -> None:
         """Scan new output for watch patterns and queue notifications.
 
         Called from reader threads with new_text being the freshly-read chunk.
@@ -213,15 +248,31 @@ class ProcessRegistry:
         if session.exited:
             return
 
-        # Scan new text line-by-line for pattern matches
+        # Scan new text line-by-line for pattern matches. min_match_end lets
+        # streaming readers prepend a bounded overlap from the prior chunk
+        # without emitting the same match twice.
         matched_lines = []
         matched_pattern = None
-        for line in new_text.splitlines():
+        cursor = 0
+        for raw_line in new_text.splitlines(keepends=True):
+            line = raw_line.rstrip("\r\n")
+            line_start = cursor
+            cursor += len(raw_line)
+            matched_this_line = False
             for pat in session.watch_patterns:
-                if pat in line:
-                    matched_lines.append(line.rstrip())
-                    if matched_pattern is None:
-                        matched_pattern = pat
+                search_from = 0
+                while True:
+                    match_at = line.find(pat, search_from)
+                    if match_at < 0:
+                        break
+                    if line_start + match_at + len(pat) > min_match_end:
+                        matched_lines.append(line.rstrip())
+                        if matched_pattern is None:
+                            matched_pattern = pat
+                        matched_this_line = True
+                        break
+                    search_from = match_at + 1
+                if matched_this_line:
                     break  # one match per line is enough
 
         if not matched_lines:
@@ -318,6 +369,27 @@ class ProcessRegistry:
             "thread_id": session.watcher_thread_id,
             "message_id": session.watcher_message_id,
         })
+
+    def _scan_watch_chunk(
+        self,
+        session: ProcessSession,
+        chunk: str,
+        overlap: str,
+    ) -> str:
+        """Scan one stream chunk and return bounded cross-chunk overlap."""
+        if not session.watch_patterns or not chunk:
+            return overlap
+        combined = overlap + chunk
+        self._check_watch_patterns(
+            session,
+            combined,
+            min_match_end=len(overlap),
+        )
+        overlap_chars = max(
+            (len(pattern) - 1 for pattern in session.watch_patterns),
+            default=0,
+        )
+        return combined[-overlap_chars:] if overlap_chars > 0 else ""
 
     def _global_watch_admit(self, now: float) -> bool:
         """Return True if this watch_match event is allowed through the global breaker.
@@ -524,6 +596,9 @@ class ProcessRegistry:
         session_key: str = "",
         env_vars: dict = None,
         use_pty: bool = False,
+        notify_on_complete: bool = False,
+        watch_patterns: Optional[List[str]] = None,
+        watcher_metadata: Optional[Dict[str, str]] = None,
     ) -> ProcessSession:
         """
         Spawn a background process locally.
@@ -535,6 +610,7 @@ class ProcessRegistry:
                      CLI tools (Codex, Claude Code, Python REPL). Falls back to
                      subprocess.Popen if ptyprocess is not installed.
         """
+        watcher = watcher_metadata or {}
         session = ProcessSession(
             id=f"proc_{uuid.uuid4().hex[:12]}",
             command=command,
@@ -542,6 +618,14 @@ class ProcessRegistry:
             session_key=session_key,
             cwd=_resolve_safe_cwd(cwd or os.getcwd()),
             started_at=time.time(),
+            notify_on_complete=notify_on_complete,
+            watch_patterns=list(watch_patterns or []),
+            watcher_platform=watcher.get("platform", ""),
+            watcher_chat_id=watcher.get("chat_id", ""),
+            watcher_user_id=watcher.get("user_id", ""),
+            watcher_user_name=watcher.get("user_name", ""),
+            watcher_thread_id=watcher.get("thread_id", ""),
+            watcher_message_id=watcher.get("message_id", ""),
         )
 
         if use_pty:
@@ -572,12 +656,25 @@ class ProcessRegistry:
                     name=f"proc-pty-reader-{session.id}",
                 )
                 session._reader_thread = reader
-                reader.start()
+                session._reader_owns_completion = True
 
                 with self._lock:
                     self._prune_if_needed()
                     self._running[session.id] = session
 
+                try:
+                    reader.start()
+                except Exception:
+                    with self._lock:
+                        self._running.pop(session.id, None)
+                    session._reader_thread = None
+                    session._reader_owns_completion = False
+                    session._pty = None
+                    try:
+                        pty_proc.terminate(force=True)
+                    except Exception:
+                        pass
+                    raise
                 self._write_checkpoint()
                 return session
 
@@ -599,11 +696,9 @@ class ProcessRegistry:
 
         proc = subprocess.Popen(
             [user_shell, "-lic", f"set +m; {command}"],
-            text=True,
+            text=False,
             cwd=session.cwd,
             env=bg_env,
-            encoding="utf-8",
-            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
@@ -623,14 +718,17 @@ class ProcessRegistry:
                 name=f"proc-reader-{session.id}",
             )
             session._reader_thread = reader
-            reader.start()
+            session._reader_owns_completion = True
 
             with self._lock:
                 self._prune_if_needed()
                 self._running[session.id] = session
 
+            reader.start()
             self._write_checkpoint()
         except Exception:
+            with self._lock:
+                self._running.pop(session.id, None)
             # Post-Popen setup failed — kill the orphaned subprocess (and any
             # descendants spawned via setsid) before re-raising so they do not
             # leak as untracked background processes.
@@ -661,6 +759,9 @@ class ProcessRegistry:
         task_id: str = "",
         session_key: str = "",
         timeout: int = 10,
+        notify_on_complete: bool = False,
+        watch_patterns: Optional[List[str]] = None,
+        watcher_metadata: Optional[Dict[str, str]] = None,
     ) -> ProcessSession:
         """
         Spawn a background process through a non-local environment backend.
@@ -673,6 +774,7 @@ class ProcessRegistry:
         This is less capable than local spawn (no live stdout pipe, no stdin),
         but it ensures the command runs in the correct sandbox context.
         """
+        watcher = watcher_metadata or {}
         session = ProcessSession(
             id=f"proc_{uuid.uuid4().hex[:12]}",
             command=command,
@@ -682,6 +784,14 @@ class ProcessRegistry:
             started_at=time.time(),
             env_ref=env,
             pid_scope="sandbox",
+            notify_on_complete=notify_on_complete,
+            watch_patterns=list(watch_patterns or []),
+            watcher_platform=watcher.get("platform", ""),
+            watcher_chat_id=watcher.get("chat_id", ""),
+            watcher_user_id=watcher.get("user_id", ""),
+            watcher_user_name=watcher.get("user_name", ""),
+            watcher_thread_id=watcher.get("thread_id", ""),
+            watcher_message_id=watcher.get("message_id", ""),
         )
 
         # Run the command in the sandbox with output capture
@@ -732,8 +842,15 @@ class ProcessRegistry:
             session.termination_source = "failed_start"
             session.output_buffer = f"Failed to start: {e}"
 
+        with self._lock:
+            self._prune_if_needed()
+            if not session.exited:
+                self._running[session.id] = session
+
         if not session.exited:
-            # Start a poller thread that periodically reads the log file
+            # Start a poller thread that periodically reads the log file only
+            # after registration, so an immediate exit cannot be reinserted as
+            # running after _move_to_finished() has already handled it.
             reader = threading.Thread(
                 target=self._env_poller_loop,
                 args=(session, env, log_path, pid_path, exit_path),
@@ -741,14 +858,13 @@ class ProcessRegistry:
                 name=f"proc-poller-{session.id}",
             )
             session._reader_thread = reader
-            reader.start()
-
-        with self._lock:
-            self._prune_if_needed()
-            if not session.exited:
-                self._running[session.id] = session
-
-        if not session.exited:
+            try:
+                reader.start()
+            except Exception:
+                with self._lock:
+                    self._running.pop(session.id, None)
+                session._reader_thread = None
+                raise
             self._write_checkpoint()
 
         return session
@@ -757,32 +873,114 @@ class ProcessRegistry:
 
     def _reader_loop(self, session: ProcessSession):
         """Background thread: read stdout from a local Popen process."""
+        proc = session.process
+        assert proc is not None and proc.stdout is not None
+        stdout = proc.stdout
         first_chunk = True
-        try:
+        watch_overlap = ""
+        decoder = None
+
+        with session._lock:
+            session._reader_owns_completion = True
+
+        def scan_watch_text(chunk: str) -> None:
+            nonlocal watch_overlap
+            watch_overlap = self._scan_watch_chunk(session, chunk, watch_overlap)
+
+        def append_chunk(chunk: str) -> None:
+            nonlocal first_chunk
+            if not chunk:
+                return
+            if first_chunk:
+                chunk = self._clean_shell_noise(chunk)
+                first_chunk = False
+            with session._lock:
+                session.output_buffer += chunk
+                if len(session.output_buffer) > session.max_output_chars:
+                    session.output_buffer = session.output_buffer[-session.max_output_chars:]
+            scan_watch_text(chunk)
+
+        def binary_chunks(binary_stdout: Any) -> Iterator[bytes]:
+            fileno = getattr(binary_stdout, "fileno", None)
+            try:
+                fd = fileno() if callable(fileno) else None
+            except (OSError, ValueError):
+                fd = None
+
+            if isinstance(fd, int):
+                if _IS_WINDOWS:
+                    while True:
+                        available = _windows_pipe_available(fd)
+                        if available is None:
+                            return
+                        if available:
+                            yield os.read(fd, min(4096, available))
+                        elif proc.poll() is not None:
+                            return
+                        else:
+                            time.sleep(0.05)
+                else:
+                    while True:
+                        readable, _, _ = select.select([fd], [], [], 0.1)
+                        if not readable:
+                            if proc.poll() is not None:
+                                return
+                            continue
+                        data = os.read(fd, 4096)
+                        if not data:
+                            return
+                        yield data
+                return
+
+            read_binary: Any = getattr(binary_stdout, "read1", None)
+            if not callable(read_binary):
+                read_binary = binary_stdout.read
             while True:
-                chunk = session.process.stdout.read(4096)
-                if not chunk:
-                    break
-                if first_chunk:
-                    chunk = self._clean_shell_noise(chunk)
-                    first_chunk = False
-                with session._lock:
-                    session.output_buffer += chunk
-                    if len(session.output_buffer) > session.max_output_chars:
-                        session.output_buffer = session.output_buffer[-session.max_output_chars:]
-                self._check_watch_patterns(session, chunk)
+                data = read_binary(4096)
+                if not data:
+                    return
+                if not isinstance(data, bytes):
+                    raise TypeError("Background stdout binary reader returned non-bytes data")
+                yield data
+
+        try:
+            binary_stdout = getattr(stdout, "buffer", None)
+            if binary_stdout is None and callable(getattr(stdout, "read1", None)):
+                binary_stdout = stdout
+            if binary_stdout is None:
+                while True:
+                    chunk = stdout.read(4096)
+                    if not chunk:
+                        break
+                    append_chunk(chunk)
+            else:
+                decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+                for data in binary_chunks(binary_stdout):
+                    append_chunk(decoder.decode(data))
+                append_chunk(decoder.decode(b"", final=True))
+                decoder = None
         except Exception as e:
             logger.debug("Process stdout reader ended: %s", e)
         finally:
+            if decoder is not None:
+                try:
+                    append_chunk(decoder.decode(b"", final=True))
+                except Exception:
+                    pass
+            try:
+                stdout.close()
+            except Exception:
+                pass
             # Always reap the child to prevent zombie processes.
             try:
-                session.process.wait(timeout=5)
+                proc.wait(timeout=5)
             except Exception as e:
                 logger.debug("Process wait timed out or failed: %s", e)
-            session.exited = True
-            if session.completion_reason != "killed":
-                session.exit_code = session.process.returncode
-                session.completion_reason = "exited"
+            with session._lock:
+                session.exited = True
+                if session.completion_reason != "killed":
+                    session.exit_code = proc.returncode
+                    session.completion_reason = "exited"
             self._move_to_finished(session)
 
     def _env_poller_loop(
@@ -793,6 +991,7 @@ class ProcessRegistry:
         quoted_pid_path = shlex.quote(pid_path)
         quoted_exit_path = shlex.quote(exit_path)
         prev_output_len = 0  # track delta for watch pattern scanning
+        watch_overlap = ""
         while not session.exited:
             time.sleep(2)  # Poll every 2 seconds
             try:
@@ -808,7 +1007,7 @@ class ProcessRegistry:
                         if len(session.output_buffer) > session.max_output_chars:
                             session.output_buffer = session.output_buffer[-session.max_output_chars:]
                     if delta:
-                        self._check_watch_patterns(session, delta)
+                        watch_overlap = self._scan_watch_chunk(session, delta, watch_overlap)
 
                 # Check if process is still running
                 check = env.execute(
@@ -845,6 +1044,7 @@ class ProcessRegistry:
     def _pty_reader_loop(self, session: ProcessSession):
         """Background thread: read output from a PTY process."""
         pty = session._pty
+        watch_overlap = ""
         try:
             while pty.isalive():
                 try:
@@ -856,7 +1056,7 @@ class ProcessRegistry:
                             session.output_buffer += text
                             if len(session.output_buffer) > session.max_output_chars:
                                 session.output_buffer = session.output_buffer[-session.max_output_chars:]
-                        self._check_watch_patterns(session, text)
+                        watch_overlap = self._scan_watch_chunk(session, text, watch_overlap)
                 except EOFError:
                     break
                 except Exception:
@@ -940,66 +1140,33 @@ class ProcessRegistry:
     def _reconcile_local_exit(self, session: "ProcessSession") -> None:
         """Reconcile session.exited against the real child process state.
 
-        The reader thread (`_reader_loop`) sets `session.exited = True` only
-        in its `finally` block, which runs when `stdout.read()` returns EOF.
-        If the direct `Popen` child has exited but a descendant process (e.g.
-        a daemon spawned by `hermes update` restarting the gateway) is still
-        holding the stdout pipe open, the reader blocks forever and poll()
-        keeps returning "running" indefinitely (issue #17327 — 74 polls over
-        7 minutes on Feishu).
-
-        This helper closes that window: when `session.exited` is still False
-        but the direct child's `Popen.poll()` reports an exit code, drain any
-        readable bytes non-blocking and flip `session.exited`. The orphaned
-        reader thread remains stuck on its blocking `read()` but is a daemon
-        thread and will be reaped with the process.
+        The reader thread owns stdout and normally owns completion too. It
+        drains available bytes, observes the direct child's exit, and finishes
+        even if a descendant still holds the pipe open. This helper is the
+        fallback for sessions without a live managed reader, such as tests or
+        legacy local sessions recovered inside the same process.
 
         Safe no-op on sessions without a local `Popen` (env/PTY), already-
         exited sessions, and detached-recovered sessions.
         """
-        if session is None or session.exited:
+        if session is None:
             return
-        proc = getattr(session, "process", None)
-        if proc is None:
-            return
-        try:
-            rc = proc.poll()
-        except Exception:
-            return
-        if rc is None:
-            return  # Direct child still running — reader block is legitimate.
-
-        # Direct child exited. Try to drain any bytes the reader hasn't
-        # consumed yet. This is best-effort: if the pipe is held open by a
-        # descendant, the non-blocking read returns what's immediately
-        # available and we stop.
-        drained = ""
-        stdout = getattr(proc, "stdout", None)
-        if stdout is not None and not _IS_WINDOWS:
-            try:
-                import fcntl
-                fd = stdout.fileno()
-                flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-                fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-                try:
-                    chunk = stdout.read()
-                    if chunk:
-                        drained = chunk if isinstance(chunk, str) else chunk.decode("utf-8", errors="replace")
-                except (BlockingIOError, OSError, ValueError):
-                    pass
-                finally:
-                    try:
-                        fcntl.fcntl(fd, fcntl.F_SETFL, flags)
-                    except Exception:
-                        pass
-            except Exception as e:
-                logger.debug("Non-blocking drain failed for %s: %s", session.id, e)
 
         with session._lock:
-            if drained:
-                session.output_buffer += drained
-                if len(session.output_buffer) > session.max_output_chars:
-                    session.output_buffer = session.output_buffer[-session.max_output_chars:]
+            if session.exited:
+                return
+            reader = session._reader_thread
+            if session._reader_owns_completion and reader is not None:
+                return
+            proc = getattr(session, "process", None)
+            if proc is None:
+                return
+            try:
+                rc = proc.poll()
+            except Exception:
+                return
+            if rc is None:
+                return  # Direct child still running; reader block is legitimate.
             session.exited = True
             if session.completion_reason != "killed":
                 session.exit_code = rc

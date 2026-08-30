@@ -149,14 +149,19 @@ def test_background_command_prefers_live_env_cwd_over_init_time_cwd(monkeypatch)
     )
 
     assert result["exit_code"] == 0
-    assert registry.calls == [{
-        "command": "sleep 1",
-        "cwd": "/workspace/live",
-        "task_id": task_id,
-        "session_key": "",
-        "env_vars": {},
-        "use_pty": False,
-    }]
+    assert registry.calls == [
+        {
+            "command": "sleep 1",
+            "cwd": "/workspace/live",
+            "task_id": task_id,
+            "session_key": "",
+            "env_vars": {},
+            "use_pty": False,
+            "notify_on_complete": False,
+            "watch_patterns": None,
+            "watcher_metadata": {},
+        }
+    ]
 
 
 def test_registering_cwd_override_updates_live_env_cwd(monkeypatch):

@@ -10,6 +10,7 @@ Covers:
 
 import json
 import os
+import threading
 import time
 import pytest
 from unittest.mock import MagicMock, patch
@@ -205,6 +206,37 @@ class TestCompletionQueue:
         assert len(completions) == 3
         ids = {c["session_id"] for c in completions}
         assert ids == {"proc_0", "proc_1", "proc_2"}
+
+    def test_spawn_local_registers_and_configures_before_reader_can_finish(
+        self, registry, tmp_path
+    ):
+        """An immediate exit must not outrun registration or notification setup."""
+        observed = {}
+
+        def poll_before_reader_start(thread):
+            session = thread._args[0]
+            deadline = time.monotonic() + 2
+            while session.process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            observed["poll"] = registry.poll(session.id)
+            thread.run()
+
+        with patch.object(registry, "_write_checkpoint"), patch.object(
+            threading.Thread, "start", poll_before_reader_start
+        ):
+            session = registry.spawn_local(
+                "printf ready",
+                cwd=str(tmp_path),
+                notify_on_complete=True,
+            )
+
+        assert observed["poll"]["status"] == "running"
+        assert session.id not in registry._running
+        assert session.id in registry._finished
+        completion = registry.completion_queue.get_nowait()
+        assert completion["type"] == "completion"
+        assert completion["session_id"] == session.id
+        assert completion["output"] == "ready"
 
 
 # =========================================================================
@@ -412,12 +444,15 @@ def _silent_bg_harness(monkeypatch, tmp_path):
 
     config = _silent_bg_base_config(tmp_path)
     dummy_env = SimpleNamespace(env={})
+    spawn_calls = []
 
     def fake_spawn_local(**kwargs):
+        spawn_calls.append(kwargs)
         return SimpleNamespace(
             id="proc_silent_test",
             pid=4242,
-            notify_on_complete=False,
+            notify_on_complete=kwargs.get("notify_on_complete", False),
+            watch_patterns=list(kwargs.get("watch_patterns") or []),
             watcher_platform="",
             watcher_chat_id="",
             watcher_user_id="",
@@ -433,6 +468,7 @@ def _silent_bg_harness(monkeypatch, tmp_path):
     monkeypatch.setattr(process_registry_module.process_registry, "spawn_local", fake_spawn_local)
     monkeypatch.setitem(terminal_tool_module._active_environments, "default", dummy_env)
     monkeypatch.setitem(terminal_tool_module._last_activity, "default", 0.0)
+    setattr(terminal_tool_module, "_test_spawn_calls", spawn_calls)
     return terminal_tool_module
 
 
@@ -481,6 +517,9 @@ def test_background_with_notify_does_not_emit_hint(monkeypatch, tmp_path):
         f"Correct usage must not emit a hint, got: {result.get('hint')!r}"
     )
     assert result.get("notify_on_complete") is True
+    spawn_call = getattr(tt, "_test_spawn_calls")[0]
+    assert spawn_call["notify_on_complete"] is True
+    assert spawn_call["watch_patterns"] is None
 
 
 def test_background_with_watch_patterns_does_not_emit_hint(monkeypatch, tmp_path):
@@ -501,6 +540,9 @@ def test_background_with_watch_patterns_does_not_emit_hint(monkeypatch, tmp_path
     assert "hint" not in result, (
         f"watch_patterns shape must not emit a silent-process hint, got: {result.get('hint')!r}"
     )
+    spawn_call = getattr(tt, "_test_spawn_calls")[0]
+    assert spawn_call["notify_on_complete"] is False
+    assert spawn_call["watch_patterns"] == ["Application startup complete"]
 
 
 def test_foreground_command_does_not_emit_hint(monkeypatch, tmp_path):

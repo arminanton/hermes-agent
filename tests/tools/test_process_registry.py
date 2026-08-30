@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -144,7 +145,6 @@ class TestGetAndPoll:
 # Orphaned-pipe reconciliation (issue #17327)
 # =========================================================================
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: uses setsid/fcntl")
 class TestOrphanedPipeReconciliation:
     """Regression tests for issue #17327.
 
@@ -158,6 +158,181 @@ class TestOrphanedPipeReconciliation:
     direct `Popen.poll()` before trusting `session.exited`.
     """
 
+    def test_reader_uses_one_binary_owner_and_preserves_split_utf8(self, registry):
+        """The reader must not leave decoded bytes buffered behind an open descendant pipe."""
+        chunks = iter([b"alpha \xe2", b"\x82\xac omega", b""])
+
+        class BinaryBuffer:
+            def read1(self, _size):
+                return next(chunks)
+
+        class TextStream:
+            buffer = BinaryBuffer()
+
+            def read(self, _size):
+                raise AssertionError("TextIOWrapper.read must not own background stdout")
+
+        proc = MagicMock()
+        proc.stdout = TextStream()
+        proc.returncode = 0
+        session = _make_session(sid="proc_binary_reader")
+        session.process = proc
+
+        with patch.object(registry, "_move_to_finished"):
+            registry._reader_loop(session)
+
+        assert session.output_buffer == "alpha € omega"
+        assert session.exited is True
+        assert session.exit_code == 0
+
+    def test_windows_reader_peeks_before_reading_and_stops_after_direct_exit(self, registry):
+        class BinaryStream:
+            def fileno(self):
+                return 42
+
+            def read1(self, _size):
+                raise AssertionError("Windows pipe reads must be gated by PeekNamedPipe")
+
+            def close(self):
+                pass
+
+        proc = MagicMock()
+        proc.stdout = BinaryStream()
+        proc.poll.return_value = 0
+        proc.returncode = 0
+        session = _make_session(sid="proc_windows_reader")
+        session.process = proc
+
+        with patch("tools.process_registry._IS_WINDOWS", True), \
+                patch("tools.process_registry._windows_pipe_available", side_effect=[5, 0]) as peek, \
+                patch("tools.process_registry.os.read", return_value=b"READY") as raw_read, \
+                patch.object(registry, "_move_to_finished"):
+            registry._reader_loop(session)
+
+        assert session.output_buffer == "READY"
+        assert session.exited is True
+        assert peek.call_count == 2
+        raw_read.assert_called_once_with(42, 5)
+
+    def test_reader_matches_watch_pattern_split_across_binary_chunks(self, registry):
+        chunks = iter([b"REA", b"DY\n", b""])
+
+        class BinaryBuffer:
+            def read1(self, _size):
+                return next(chunks)
+
+        class TextStream:
+            buffer = BinaryBuffer()
+
+        proc = MagicMock()
+        proc.stdout = TextStream()
+        proc.returncode = 0
+        session = _make_session(sid="proc_split_watch")
+        session.process = proc
+        session.watch_patterns = ["READY"]
+
+        with patch.object(registry, "_move_to_finished"):
+            registry._reader_loop(session)
+
+        event = registry.completion_queue.get_nowait()
+        assert event["type"] == "watch_match"
+        assert event["pattern"] == "READY"
+        assert "READY" in event["output"]
+
+    def test_reader_emits_watch_match_before_newline_or_eof(self, registry):
+        release_eof = threading.Event()
+        second_read_started = threading.Event()
+        reads = 0
+
+        class BinaryBuffer:
+            def read1(self, _size):
+                nonlocal reads
+                reads += 1
+                if reads == 1:
+                    return b"x" * 250_000 + b"READY"
+                second_read_started.set()
+                release_eof.wait(timeout=2)
+                return b""
+
+        class TextStream:
+            buffer = BinaryBuffer()
+
+        proc = MagicMock()
+        proc.stdout = TextStream()
+        proc.returncode = 0
+        session = _make_session(sid="proc_no_newline_watch")
+        session.process = proc
+        session.watch_patterns = ["READY"]
+
+        reader = threading.Thread(target=registry._reader_loop, args=(session,), daemon=True)
+        try:
+            with patch.object(registry, "_move_to_finished"):
+                reader.start()
+                assert second_read_started.wait(timeout=1)
+                assert _wait_until(lambda: not registry.completion_queue.empty(), timeout=1)
+        finally:
+            release_eof.set()
+            reader.join(timeout=2)
+
+        event = registry.completion_queue.get_nowait()
+        assert event["type"] == "watch_match"
+        assert event["pattern"] == "READY"
+
+    def test_reconcile_leaves_live_reader_to_publish_final_output(self, registry):
+        read_started = threading.Event()
+        release_read = threading.Event()
+        reads = 0
+
+        class BinaryBuffer:
+            def read1(self, _size):
+                nonlocal reads
+                reads += 1
+                if reads == 1:
+                    read_started.set()
+                    release_read.wait(timeout=2)
+                    return b"READY output\n"
+                return b""
+
+        class TextStream:
+            buffer = BinaryBuffer()
+
+        proc = MagicMock()
+        proc.stdout = TextStream()
+        proc.poll.return_value = 0
+        proc.returncode = 0
+        session = _make_session(sid="proc_reader_flush")
+        session.process = proc
+        session.watch_patterns = ["READY"]
+        session.notify_on_complete = True
+        registry._running[session.id] = session
+
+        reader = threading.Thread(target=registry._reader_loop, args=(session,), daemon=True)
+        session._reader_thread = reader
+        try:
+            with patch.object(registry, "_write_checkpoint"):
+                reader.start()
+                assert read_started.wait(timeout=1)
+
+                first = registry.poll(session.id)
+                assert first["status"] == "running"
+
+                release_read.set()
+                reader.join(timeout=2)
+                assert not reader.is_alive()
+                final = registry.poll(session.id)
+        finally:
+            release_read.set()
+            reader.join(timeout=2)
+
+        assert final["status"] == "exited"
+        assert "READY output" in final["output_preview"]
+        events = [registry.completion_queue.get_nowait(), registry.completion_queue.get_nowait()]
+        watch_event = next(event for event in events if event["type"] == "watch_match")
+        completion_event = next(event for event in events if event["type"] == "completion")
+        assert watch_event["pattern"] == "READY"
+        assert "READY output" in completion_event["output"]
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: uses sh/setsid/killpg")
     def test_reconcile_flips_exited_when_direct_child_done(self, registry):
         """Direct child exited but reader thread is blocked on orphaned pipe."""
         # Simulate the orphaned-pipe scenario: direct child exited, but a
@@ -203,6 +378,78 @@ class TestOrphanedPipeReconciliation:
         except (ProcessLookupError, PermissionError):
             pass
 
+    def test_reconcile_never_competes_with_stdout_reader(self, registry):
+        """poll() must not become a second reader of the process stdout pipe."""
+        read_fd, write_fd = os.pipe()
+        read_started = threading.Event()
+        release_read = threading.Event()
+
+        class LockedTextStream:
+            def fileno(self):
+                return read_fd
+
+            def read(self):
+                read_started.set()
+                release_read.wait(timeout=2)
+                return ""
+
+        proc = MagicMock()
+        proc.poll.return_value = 0
+        proc.stdout = LockedTextStream()
+        s = _make_session(sid="proc_text_stream_lock")
+        s.process = proc
+        s.pid = 12345
+        registry._running[s.id] = s
+        outcome = {}
+
+        def poll_once():
+            outcome["result"] = registry.poll(s.id)
+
+        thread = threading.Thread(target=poll_once, daemon=True)
+        try:
+            with patch.object(registry, "_write_checkpoint"), \
+                    patch("tools.process_registry.os.read", wraps=os.read) as raw_read:
+                thread.start()
+                thread.join(timeout=0.25)
+                blocked = thread.is_alive()
+                release_read.set()
+                thread.join(timeout=2)
+        finally:
+            release_read.set()
+            os.close(write_fd)
+            os.close(read_fd)
+
+        assert not blocked, (
+            "poll() attempted a second stdout read and blocked behind the "
+            "reader thread instead of reconciling only the process state"
+        )
+        assert read_started.is_set() is False
+        raw_read.assert_not_called()
+        assert outcome["result"]["status"] == "exited"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: uses process groups")
+    def test_short_utf8_output_survives_an_orphaned_pipe(self, registry, tmp_path):
+        """A short final chunk is visible even when a descendant keeps stdout open."""
+        script = (
+            "import subprocess,sys;"
+            "sys.stdout.write('short € output\\n');sys.stdout.flush();"
+            "subprocess.Popen([sys.executable,'-c','import time;time.sleep(1)'],"
+            "stdout=sys.stdout,stderr=sys.stderr)"
+        )
+        command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+        session = registry.spawn_local(command, cwd=str(tmp_path))
+
+        assert _wait_until(lambda: session.process.poll() is not None, timeout=5.0)
+        assert _wait_until(lambda: "short € output" in session.output_buffer, timeout=2.0)
+
+        started = time.monotonic()
+        result = registry.wait(session.id, timeout=2)
+
+        assert result["status"] == "exited"
+        assert result["exit_code"] == 0
+        assert "short € output" in result["output"]
+        assert time.monotonic() - started < 0.5
+
     def test_reconcile_noop_when_child_still_running(self, registry):
         """Reconcile must NOT flip exited when the direct child is alive."""
         proc = _spawn_python_sleep(5.0)
@@ -237,6 +484,7 @@ class TestOrphanedPipeReconciliation:
         registry._reconcile_local_exit(s)
         assert s.exited is False
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: uses sh/setsid/killpg")
     def test_wait_returns_when_reader_blocked(self, registry):
         """wait() must also reconcile — not just poll()."""
         proc = subprocess.Popen(

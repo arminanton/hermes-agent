@@ -2157,6 +2157,29 @@ def terminal_tool(
                 env=env,
                 default_cwd=cwd,
             )
+            # Resolve notification mode and routing before process launch. A
+            # short command can finish before spawn_local() returns, so setting
+            # these fields afterwards can permanently lose its notification.
+            watch_patterns, conflict_note = _resolve_notification_flag_conflict(
+                notify_on_complete=bool(notify_on_complete),
+                watch_patterns=watch_patterns,
+                background=bool(background),
+            )
+            watcher_metadata = {}
+            if notify_on_complete or watch_patterns:
+                try:
+                    from gateway.session_context import get_session_env as _gse
+
+                    watcher_metadata = {
+                        "platform": _gse("HERMES_SESSION_PLATFORM", ""),
+                        "chat_id": _gse("HERMES_SESSION_CHAT_ID", ""),
+                        "thread_id": _gse("HERMES_SESSION_THREAD_ID", ""),
+                        "user_id": _gse("HERMES_SESSION_USER_ID", ""),
+                        "user_name": _gse("HERMES_SESSION_USER_NAME", ""),
+                        "message_id": _gse("HERMES_SESSION_MESSAGE_ID", ""),
+                    }
+                except Exception as exc:
+                    logger.debug("Could not resolve background notification route: %s", exc)
             try:
                 if env_type == "local":
                     proc_session = process_registry.spawn_local(
@@ -2166,6 +2189,9 @@ def terminal_tool(
                         session_key=session_key,
                         env_vars=env.env if hasattr(env, 'env') else None,
                         use_pty=effective_pty,
+                        notify_on_complete=bool(notify_on_complete),
+                        watch_patterns=watch_patterns,
+                        watcher_metadata=watcher_metadata,
                     )
                 else:
                     proc_session = process_registry.spawn_via_env(
@@ -2174,6 +2200,9 @@ def terminal_tool(
                         cwd=effective_cwd,
                         task_id=effective_task_id,
                         session_key=session_key,
+                        notify_on_complete=bool(notify_on_complete),
+                        watch_patterns=watch_patterns,
+                        watcher_metadata=watcher_metadata,
                     )
 
                 result_data = {
@@ -2293,44 +2322,11 @@ def terminal_tool(
                             else canonical_hint
                         )
 
-                # Populate routing metadata on the session so that
-                # watch-pattern and completion notifications can be
-                # routed back to the correct chat/thread.
-                if background and (notify_on_complete or watch_patterns):
-                    from gateway.session_context import get_session_env as _gse
-                    _gw_platform = _gse("HERMES_SESSION_PLATFORM", "")
-                    if _gw_platform:
-                        _gw_chat_id = _gse("HERMES_SESSION_CHAT_ID", "")
-                        _gw_thread_id = _gse("HERMES_SESSION_THREAD_ID", "")
-                        _gw_user_id = _gse("HERMES_SESSION_USER_ID", "")
-                        _gw_user_name = _gse("HERMES_SESSION_USER_NAME", "")
-                        _gw_message_id = _gse("HERMES_SESSION_MESSAGE_ID", "")
-                        proc_session.watcher_platform = _gw_platform
-                        proc_session.watcher_chat_id = _gw_chat_id
-                        proc_session.watcher_user_id = _gw_user_id
-                        proc_session.watcher_user_name = _gw_user_name
-                        proc_session.watcher_thread_id = _gw_thread_id
-                        proc_session.watcher_message_id = _gw_message_id
-
-                # Mutual exclusion: if both notify_on_complete and watch_patterns
-                # are set, drop watch_patterns. The combination produces duplicate
-                # notifications (one per match + one on exit) that deliver
-                # asynchronously and can spam the user long after the process ends.
-                # notify_on_complete is the more useful signal for "let me know
-                # when the task finishes"; watch_patterns should be reserved for
-                # standalone mid-process signals on long-lived processes.
-                watch_patterns, conflict_note = _resolve_notification_flag_conflict(
-                    notify_on_complete=bool(notify_on_complete),
-                    watch_patterns=watch_patterns,
-                    background=bool(background),
-                )
                 if conflict_note:
                     logger.warning("background proc %s: %s", proc_session.id, conflict_note)
                     result_data["watch_patterns_ignored"] = conflict_note
 
-                # Mark for agent notification on completion
                 if notify_on_complete and background:
-                    proc_session.notify_on_complete = True
                     result_data["notify_on_complete"] = True
 
                     # In gateway mode, auto-register a fast watcher so the
@@ -2351,9 +2347,7 @@ def terminal_tool(
                             "notify_on_complete": True,
                         })
 
-                # Set watch patterns for output monitoring
                 if watch_patterns and background:
-                    proc_session.watch_patterns = list(watch_patterns)
                     result_data["watch_patterns"] = proc_session.watch_patterns
 
                 return json.dumps(result_data, ensure_ascii=False)
