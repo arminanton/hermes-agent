@@ -56,7 +56,14 @@ describe('appendToolShelfMessage', () => {
     expect(merged).toEqual([{ kind: 'trail', role: 'system', text: '', thinking: 'plan', tools: ['one ✓', 'two ✓'] }])
   })
 
-  it('merges through intervening thinking-only rows back into the nearest holder', () => {
+  it('does not merge back across an intervening thinking row', () => {
+    // REVISED (was: "merges through intervening thinking-only rows back into the
+    // nearest holder"). The original encoded the "group across thinking"
+    // behaviour from fork commit 113d4c7477, which hoisted a tool call ABOVE the
+    // reasoning that produced it: the reader saw one dense block of tools and a
+    // separate block of thoughts, with cause and effect inverted. That commit is
+    // fork-local, not upstream, so this is a revision of our own earlier choice.
+    // A reasoning row is now a barrier, exactly like assistant text.
     const prev: Msg[] = [
       { kind: 'trail', role: 'system', text: '', thinking: 'plan', tools: ['one ✓'] },
       { kind: 'trail', role: 'system', text: '', thinking: 'more plan' }
@@ -69,18 +76,32 @@ describe('appendToolShelfMessage', () => {
       tools: ['two ✓']
     })
 
-    expect(merged).toHaveLength(2)
+    // The earlier shelf keeps only the tool that actually ran before the thinking.
     expect(merged[0]).toEqual({
       kind: 'trail',
       role: 'system',
       text: '',
       thinking: 'plan',
-      tools: ['one ✓', 'two ✓']
+      tools: ['one ✓']
     })
-    expect(merged[1]).toEqual({ kind: 'trail', role: 'system', text: '', thinking: 'more plan' })
+
+    // The new call lands on the reasoning row that caused it, never above it.
+    expect(merged).toHaveLength(2)
+    expect(merged[1]).toEqual({
+      kind: 'trail',
+      role: 'system',
+      text: '',
+      thinking: 'more plan',
+      tools: ['two ✓']
+    })
   })
 
-  it('collapses a chronological thinking/tool/thinking/tool stream into one shelf', () => {
+  it('keeps a thinking/tool/thinking/tool stream in chronological order', () => {
+    // REVISED (was: "collapses a chronological thinking/tool/thinking/tool stream
+    // into one shelf"). Collapsing that stream is precisely the defect: it moved
+    // 'two ✓' and 'three ✓' above 'more plan', so the transcript claimed those
+    // tools ran before the reasoning that decided to run them. Tools now group
+    // under the reasoning they follow, and only consecutive tools merge.
     const events: Msg[] = [
       { kind: 'trail', role: 'system', text: '', thinking: 'plan' },
       { kind: 'trail', role: 'system', text: '', tools: ['one ✓'] },
@@ -97,9 +118,17 @@ describe('appendToolShelfMessage', () => {
       role: 'system',
       text: '',
       thinking: 'plan',
-      tools: ['one ✓', 'two ✓', 'three ✓']
+      tools: ['one ✓']
     })
-    expect(reduced[1]).toEqual({ kind: 'trail', role: 'system', text: '', thinking: 'more plan' })
+    // 'two' and 'three' ran back-to-back after the second thought, so they still
+    // group together - the grouping the shelf exists to provide is preserved.
+    expect(reduced[1]).toEqual({
+      kind: 'trail',
+      role: 'system',
+      text: '',
+      thinking: 'more plan',
+      tools: ['two ✓', 'three ✓']
+    })
   })
 
   it('starts a new shelf across assistant text boundaries', () => {

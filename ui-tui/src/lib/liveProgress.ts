@@ -35,6 +35,18 @@ const isBarrierMessage = (msg: Msg | undefined) => {
     return true
   }
 
+  // A reasoning segment terminates the shelf too. Without this, tool calls made
+  // AFTER a block of thinking merge backward into a shelf that sits BEFORE it,
+  // so the transcript shows one large group of tools followed by one large group
+  // of thoughts and the causal order is lost: the reader sees a tool call above
+  // the reasoning that actually decided to make it. Reasoning is a real event in
+  // the turn, so it bounds a shelf exactly like assistant text does. Tools that
+  // genuinely ran together with no thinking between them still merge, which is
+  // the grouping this shelf exists to provide.
+  if (msg.thinking?.trim()) {
+    return true
+  }
+
   return false
 }
 
