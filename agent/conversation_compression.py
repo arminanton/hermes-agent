@@ -174,6 +174,38 @@ def check_compression_model_feasibility(agent: Any) -> None:
             )
 
         threshold = agent.context_compressor.threshold_tokens
+        _cc_release = agent.context_compressor
+        _prior_pct = getattr(_cc_release, "_aux_clamped_from_percent", None)
+        if _prior_pct is not None:
+            # A clamp is already in force. Re-measure against the ORIGINAL
+            # ratio rather than the clamped one, otherwise repeated outages
+            # ratchet the threshold downward (691,500 -> 80,000 -> 64,000 ...),
+            # each one compounding the last.
+            _orig_tokens = int((_cc_release.context_length or 0) * _prior_pct)
+            if aux_context >= _orig_tokens:
+                # Fully recovered: drop the clamp entirely.
+                _cc_release.threshold_percent = _prior_pct
+                _cc_release.threshold_tokens = _orig_tokens
+                _cc_release._aux_clamped_from_percent = None
+                _cc_release._aux_clamp_tokens = None
+                logger.info(
+                    "Auxiliary compression model %s now covers the original "
+                    "threshold (%d tokens); released the auto-lowered clamp "
+                    "and restored threshold_percent=%.3f.",
+                    aux_model, _orig_tokens, _prior_pct,
+                )
+            else:
+                # Partially recovered: re-clamp to the CURRENT aux capacity so
+                # the session tracks what the aux can actually summarise now,
+                # while keeping the original ratio for a later full release.
+                _cc_release.threshold_tokens = aux_context
+                if _cc_release.context_length:
+                    _cc_release.threshold_percent = (
+                        aux_context / _cc_release.context_length
+                    )
+                _cc_release._aux_clamp_tokens = aux_context
+            threshold = _cc_release.threshold_tokens
+
         if aux_context < threshold:
             # Auto-correct: lower the live session threshold so
             # compression actually works this session.  The hard floor
@@ -187,14 +219,21 @@ def check_compression_model_feasibility(agent: Any) -> None:
             old_threshold = threshold
             new_threshold = aux_context
             agent.context_compressor.threshold_tokens = new_threshold
-            # Keep threshold_percent in sync so future main-model
-            # context_length changes (update_model) re-derive from a
-            # sensible number rather than the original too-high value.
+            # Record what the threshold WOULD be without this clamp, so a
+            # later model switch can restore it. Overwriting
+            # threshold_percent outright made the downgrade permanent: a
+            # transient aux outage (or a temporarily-resolved small aux
+            # window) rewrote the ratio, and every subsequent update_model
+            # re-derived from the shrunken value. A 922k main model that hit
+            # an 80k aux once would keep compressing at ~8.7% of its window
+            # for the rest of the session, long after the aux recovered.
             main_ctx = agent.context_compressor.context_length
+            _cc = agent.context_compressor
+            if getattr(_cc, "_aux_clamped_from_percent", None) is None:
+                _cc._aux_clamped_from_percent = _cc.threshold_percent
+            _cc._aux_clamp_tokens = new_threshold
             if main_ctx:
-                agent.context_compressor.threshold_percent = (
-                    new_threshold / main_ctx
-                )
+                _cc.threshold_percent = new_threshold / main_ctx
             safe_pct = int((aux_context / main_ctx) * 100) if main_ctx else 50
             # Build human-readable "model (provider)" labels for both
             # the main model and the compression model so users can
