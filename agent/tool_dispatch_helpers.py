@@ -317,6 +317,54 @@ def _trajectory_normalize_msg(msg: Dict[str, Any]) -> Dict[str, Any]:
     return msg
 
 
+def _tool_result_char_cap() -> int:
+    """Per-result character cap, 0 disables.
+
+    Config: ``compression.tool_result_char_cap`` in config.yaml (non-secret
+    behavioural setting, so it belongs in config, not an env var).
+    """
+    try:
+        from hermes_cli.config import load_config
+        cfg = (load_config() or {}).get("compression", {}) or {}
+        return max(0, int(cfg.get("tool_result_char_cap", 0) or 0))
+    except Exception:  # noqa: BLE001, budgeting must never break dispatch
+        return 0
+
+
+def _cap_tool_result(name: str, content: Any) -> Any:
+    """Bound a single tool result so one call cannot refill the context.
+
+    A successful compaction can be undone within a few turns by a handful of
+    large results: observed live at 73,016 / 69,871 / 63,914 chars from one
+    retrieval tool and 55,666 / 49,480 from another, roughly 78k tokens across
+    five calls, against a session that had just been compacted to ~118k.
+
+    The head and tail are kept because they carry the shape of the result (the
+    first hits and the summary/verdict); the middle is where redundancy lives.
+    The elision names the tool and the exact number of characters removed so
+    the model can tell the difference between "this is all of it" and "there is
+    more, narrow the query or page through it".
+
+    Only plain strings are capped. Multimodal results (content lists with image
+    parts) pass through untouched so the list structure stays valid for vision
+    adapters.
+    """
+    cap = _tool_result_char_cap()
+    if not cap or not isinstance(content, str) or len(content) <= cap:
+        return content
+    keep = cap // 2
+    head, tail = content[:keep], content[-keep:]
+    removed = len(content) - (2 * keep)
+    return (
+        f"{head}\n\n"
+        f"[... {removed:,} characters elided by the {cap:,}-char tool-result "
+        f"cap. This is a bounded view of a {len(content):,}-char result from "
+        f"`{name}`; narrow the query, filter, or request a specific section to "
+        f"see the omitted middle ...]\n\n"
+        f"{tail}"
+    )
+
+
 def make_tool_result_message(name: str, content: Any, tool_call_id: str) -> dict:
     """Build a tool-result message dict with both the OpenAI-format ``name``
     field (required by the wire format and provider adapters) and the internal
@@ -333,7 +381,10 @@ def make_tool_result_message(name: str, content: Any, tool_call_id: str) -> dict
     (content lists with image_url parts) pass through unwrapped so the
     list structure stays valid for vision-capable adapters.
     """
-    wrapped = _maybe_wrap_untrusted(name, content)
+    # Cap BEFORE wrapping so the untrusted-content delimiters always survive
+    # intact; truncating afterwards could sever the closing delimiter and leave
+    # the model reading poisoned content as if it were trusted.
+    wrapped = _maybe_wrap_untrusted(name, _cap_tool_result(name, content))
     return {
         "role": "tool",
         "name": name,

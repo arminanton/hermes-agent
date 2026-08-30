@@ -1262,6 +1262,15 @@ DEFAULT_CONFIG = {
         "threshold": 0.50,            # compress when context usage exceeds this ratio
         "target_ratio": 0.20,         # fraction of threshold to preserve as recent tail
         "protect_last_n": 20,         # minimum recent messages to keep uncompressed
+        "tool_result_char_cap": 0,    # per-tool-result character cap (0 = off). A few
+                                      # large retrieval/skill results can refill a freshly
+                                      # compacted context within a couple of turns (observed
+                                      # 73k/70k/64k chars from single calls). When set, the
+                                      # head and tail are kept and the middle is elided with
+                                      # an explicit marker naming the tool and the number of
+                                      # characters removed, so the model knows to narrow or
+                                      # page rather than assuming it saw everything.
+                                      # Suggested starting point: 24000.
         "max_attempts": 3,            # P2: compression-retry ceiling on context_overflow/413.
                                       # Default 3 (historical). LCM users that persist content
                                       # to files and reference them by a single line can afford
