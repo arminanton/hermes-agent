@@ -1612,9 +1612,80 @@ class SessionDB:
                 (transition_time, parent_session_id),
             )
             if ended.rowcount != 1:
-                raise RuntimeError(
-                    f"compression parent is missing or ended: {parent_session_id}"
+                # The strict ``ended_at IS NULL`` guard matched no row. Before
+                # treating this as fatal, inspect the parent to tell three
+                # cases apart:
+                #
+                #   (a) parent row is MISSING -> fatal, raise. A compression
+                #       child parented to a non-existent id would be an orphan;
+                #       the caller must abort and keep the messages intact.
+                #
+                #   (b) parent EXISTS, already ended, with a real end_reason
+                #       (e.g. 'compression', 'new_session', 'session_reset')
+                #       -> also fatal, raise. A non-null end_reason means the
+                #       session was legitimately ended (most importantly, a
+                #       concurrent compression path that already committed its
+                #       own child). Reopening here would resurrect an ended
+                #       session and, in the compression case, create a SECOND
+                #       orphan child — the exact race the atomic split guards
+                #       against. Leave that guard intact.
+                #
+                #   (c) parent EXISTS, ended_at is set, but end_reason IS NULL
+                #       -> corrupt data, safe to repair. Every legitimate ender
+                #       sets an end_reason; a non-null ended_at with a NULL
+                #       reason is a synthetic stamp (observed: a stale
+                #       ``started_at + 3600`` finalizer writing sessions that
+                #       never actually ended). Since we are compressing this
+                #       session right now it is logically live, so clear the
+                #       bogus stamp and re-end it as 'compression' inside THIS
+                #       same atomic transaction. Without this, one poisoned row
+                #       sends the whole turn into an 8x compression-retry loop
+                #       that can never make progress.
+                parent_row = conn.execute(
+                    "SELECT ended_at, end_reason FROM sessions WHERE id = ?",
+                    (parent_session_id,),
+                ).fetchone()
+                if parent_row is None:
+                    raise RuntimeError(
+                        f"compression parent is missing: {parent_session_id}"
+                    )
+                prior_ended_at = (
+                    parent_row["ended_at"]
+                    if hasattr(parent_row, "keys")
+                    else parent_row[0]
                 )
+                prior_reason = (
+                    parent_row["end_reason"]
+                    if hasattr(parent_row, "keys")
+                    else parent_row[1]
+                )
+                if prior_reason is not None:
+                    # Legitimately ended (case b) — preserve the anti-orphan
+                    # guarantee and abort as before.
+                    raise RuntimeError(
+                        f"compression parent already ended "
+                        f"(reason={prior_reason!r}): {parent_session_id}"
+                    )
+                # Case (c): non-null ended_at + NULL end_reason = corrupt stamp
+                # on a live session. Repair it atomically and continue.
+                logger.warning(
+                    "compression parent %s carried a corrupt end stamp "
+                    "(ended_at=%s, end_reason=NULL) while being compressed "
+                    "live; clearing it and re-ending as 'compression'.",
+                    parent_session_id, prior_ended_at,
+                )
+                reended = conn.execute(
+                    "UPDATE sessions SET ended_at = ?, end_reason = 'compression' "
+                    "WHERE id = ? AND end_reason IS NULL",
+                    (transition_time, parent_session_id),
+                )
+                if reended.rowcount != 1:
+                    # Lost a race to set the reason between our SELECT and
+                    # UPDATE — another path claimed it. Abort rather than risk
+                    # a double child.
+                    raise RuntimeError(
+                        f"compression parent end raced: {parent_session_id}"
+                    )
             conn.execute(
                 """INSERT INTO sessions (id, source, model, model_config,
                    system_prompt, parent_session_id, cwd, started_at,
@@ -2026,6 +2097,38 @@ class SessionDB:
                   )
                 """,
                 (now, cutoff),
+            )
+            return result.rowcount
+
+        return self._execute_write(_do) or 0
+
+    def repair_corrupt_end_stamps(self) -> int:
+        """Repair sessions with a non-null ``ended_at`` but NULL ``end_reason``.
+
+        Every legitimate code path that ends a session also sets an
+        ``end_reason`` (``end_session`` sets the caller's reason, the
+        compression split sets ``'compression'``,
+        ``finalize_orphaned_compression_sessions`` sets
+        ``'orphaned_compression'``). A row with ``ended_at IS NOT NULL AND
+        end_reason IS NULL`` is therefore corrupt: it was stamped ended by a
+        writer that bypassed those paths (observed in the wild as a synthetic
+        ``ended_at = started_at + 3600`` finalizer that marks sessions which
+        never actually ended).
+
+        Such rows are poison for compression: ``split_session_for_compression``
+        keys its parent-end on ``ended_at IS NULL``, so a live session that
+        carries a bogus stamp can never be compressed and the turn falls into
+        an 8x retry loop. This repair re-tags every corrupt row with
+        ``end_reason = 'stale_stamp_repaired'`` so it can never again be
+        mistaken for a live-but-unended session, while preserving the row and
+        all of its messages. Idempotent; safe to run on every startup.
+
+        Returns the number of rows repaired.
+        """
+        def _do(conn):
+            result = conn.execute(
+                "UPDATE sessions SET end_reason = 'stale_stamp_repaired' "
+                "WHERE ended_at IS NOT NULL AND end_reason IS NULL"
             )
             return result.rowcount
 

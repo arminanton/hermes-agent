@@ -1523,6 +1523,23 @@ def _run_state_db_auto_maintenance(session_db) -> None:
         except Exception as _finalize_exc:
             logger.debug("Orphan compression finalize skipped: %s", _finalize_exc)
 
+        # Every-startup repair of corrupt end stamps: rows with a non-null
+        # ended_at but NULL end_reason are not produced by any legitimate
+        # ender, so they are stale/synthetic stamps (observed: a
+        # started_at + 3600 finalizer marking live sessions as ended). Left
+        # in place they block compression on the affected session and force
+        # an 8x no-progress retry loop. Not gated on a one-time meta flag
+        # because a still-active bad writer can re-poison rows between runs.
+        try:
+            repaired = session_db.repair_corrupt_end_stamps()
+            if repaired:
+                logger.warning(
+                    "Repaired %d corrupt session end stamps "
+                    "(ended_at set, end_reason NULL)", repaired
+                )
+        except Exception as _stamp_exc:
+            logger.debug("Corrupt end-stamp repair skipped: %s", _stamp_exc)
+
         cfg = (_load_full_config().get("sessions") or {})
         if not cfg.get("auto_prune", False):
             return

@@ -2627,6 +2627,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             except Exception as exc:
                 logger.debug("state.db auto-maintenance skipped: %s", exc)
 
+        # Repair corrupt session end stamps (ended_at set, end_reason NULL).
+        # No legitimate ender leaves end_reason NULL, so such rows are stale
+        # synthetic stamps (observed: a started_at + 3600 finalizer marking
+        # live sessions ended) that block compression and force an 8x
+        # no-progress retry loop. Runs every gateway start, unconditionally,
+        # because a still-active bad writer can re-poison rows between runs.
+        if self._session_db is not None:
+            try:
+                _repaired = self._session_db.repair_corrupt_end_stamps()
+                if _repaired:
+                    logger.warning(
+                        "Repaired %d corrupt session end stamps "
+                        "(ended_at set, end_reason NULL)", _repaired
+                    )
+            except Exception as exc:
+                logger.debug("Corrupt end-stamp repair skipped: %s", exc)
+
         # Opportunistic shadow-repo cleanup — deletes orphan/stale
         # checkpoint repos under ~/.hermes/checkpoints/.  Opt-in via
         # checkpoints.auto_prune, idempotent via .last_prune marker.
