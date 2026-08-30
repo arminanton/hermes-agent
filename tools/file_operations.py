@@ -333,6 +333,44 @@ class ExecuteResult:
 
 _SEARCH_TIMEOUT_MARKER_RE = re.compile(r"\n?\[Command timed out after \d+s\]\s*$")
 
+# Wall-clock ceiling for a single rg/grep/find invocation. Previously hardcoded
+# to 60 at six call sites, which is invisible to operators: a search over a large
+# or cold tree silently burns the full 60s, exits 124, and returns a truncated
+# result flagged only as "search_timeout". On a big monorepo two such stalls cost
+# 120s of a single turn with no way to tune it short of editing source.
+#
+# Resolution order (first hit wins):
+#   1. HERMES_SEARCH_TIMEOUT env var  (per-session override, no config edit)
+#   2. tools.search_timeout in config.yaml
+#   3. 60  (previous hardcoded value, so behaviour is unchanged by default)
+#
+# Values are clamped to [1, 600]. A non-numeric or out-of-range setting falls
+# back to the default rather than raising, since a bad config value must not
+# break every file search.
+_DEFAULT_SEARCH_TIMEOUT = 60
+_SEARCH_TIMEOUT_MIN = 1
+_SEARCH_TIMEOUT_MAX = 600
+
+
+def _search_timeout() -> int:
+    """Resolve the per-invocation search timeout in seconds."""
+    raw = os.environ.get("HERMES_SEARCH_TIMEOUT")
+    if raw is None:
+        try:
+            from hermes_cli.config import load_config, cfg_get
+            raw = cfg_get(load_config(), "tools", "search_timeout")
+        except Exception:
+            raw = None
+    if raw is None or raw == "":
+        return _DEFAULT_SEARCH_TIMEOUT
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_SEARCH_TIMEOUT
+    if value < _SEARCH_TIMEOUT_MIN or value > _SEARCH_TIMEOUT_MAX:
+        return _DEFAULT_SEARCH_TIMEOUT
+    return value
+
 
 def _search_stdout_and_limit(result: ExecuteResult) -> tuple[str, Optional[str]]:
     """Return stdout cleaned for parsing and a limit reason for search timeouts."""
@@ -2022,14 +2060,14 @@ class ShellFileOperations(FileOperations):
         cmd = f"find {self._escape_shell_arg(path)}{hidden_filter_expr} -type f -name {self._escape_shell_arg(search_pattern)} " \
               f"-printf '%T@ %p\\n' 2>/dev/null | sort -rn{pagination_expr}"
 
-        result = self._exec(cmd, timeout=60)
+        result = self._exec(cmd, timeout=_search_timeout())
         stdout, limit_reason = _search_stdout_and_limit(result)
 
         if not stdout.strip() and not limit_reason:
             # Try without -printf (BSD find compatibility -- macOS)
             cmd_simple = f"find {self._escape_shell_arg(path)}{hidden_filter_expr} -type f -name {self._escape_shell_arg(search_pattern)} " \
                         f"2>/dev/null | sort -rn{pagination_expr}"
-            result = self._exec(cmd_simple, timeout=60)
+            result = self._exec(cmd_simple, timeout=_search_timeout())
             stdout, limit_reason = _search_stdout_and_limit(result)
 
         files = []
@@ -2088,7 +2126,7 @@ class ShellFileOperations(FileOperations):
             f"{self._escape_shell_arg(path)} 2>/dev/null "
             f"| head -n {fetch_limit}"
         )
-        result = self._exec(cmd_sorted, timeout=60)
+        result = self._exec(cmd_sorted, timeout=_search_timeout())
         stdout, limit_reason = _search_stdout_and_limit(result)
         all_files = [f for f in stdout.strip().split('\n') if f]
 
@@ -2099,7 +2137,7 @@ class ShellFileOperations(FileOperations):
                 f"{self._escape_shell_arg(path)} 2>/dev/null "
                 f"| head -n {fetch_limit}"
             )
-            result = self._exec(cmd_plain, timeout=60)
+            result = self._exec(cmd_plain, timeout=_search_timeout())
             stdout, limit_reason = _search_stdout_and_limit(result)
             all_files = [f for f in stdout.strip().split('\n') if f]
 
@@ -2164,7 +2202,7 @@ class ShellFileOperations(FileOperations):
         # truncating head cleanly (exit 0 on SIGPIPE), so pipefail does not
         # introduce false errors on a successful-but-truncated search.
         cmd = "set -o pipefail; " + " ".join(cmd_parts)
-        result = self._exec(cmd, timeout=60)
+        result = self._exec(cmd, timeout=_search_timeout())
         stdout, limit_reason = _search_stdout_and_limit(result)
 
         # _exec merges stderr into stdout (stderr=subprocess.STDOUT), so rg's
@@ -2292,7 +2330,7 @@ class ShellFileOperations(FileOperations):
         # successful search; the strict `== 2` guard below ignores that, so
         # pipefail does not turn truncated results into false errors.
         cmd = "set -o pipefail; " + " ".join(cmd_parts)
-        result = self._exec(cmd, timeout=60)
+        result = self._exec(cmd, timeout=_search_timeout())
         stdout, limit_reason = _search_stdout_and_limit(result)
 
         # _exec merges stderr into stdout, so grep's diagnostic lines
