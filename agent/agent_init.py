@@ -1399,6 +1399,29 @@ def init_agent(
     # single turn; the runtime already executes such batches concurrently.
     agent._parallel_tool_call_guidance = bool(_agent_section.get("parallel_tool_call_guidance", True))
 
+    # First-turn planning prelude ("off" | "preferred" | "always"). Default
+    # "off", so behaviour is unchanged unless an operator opts in. Appends a
+    # short todo reminder to the model-facing copy of the first user turn; the
+    # persisted/displayed message is untouched. Exists because gpt and grok open
+    # multi-step work with a todo unprompted while claude and gemini do not, and
+    # three rounds of system-prompt changes moved that number zero. See
+    # agent/planning_prelude.py for the full gate chain and the evidence.
+    agent._planning_prelude_mode = str(
+        _agent_section.get("planning_prelude", "off")
+    ).strip().lower()
+
+    # Per-model overrides: {model-glob: mode}, first match wins. The families
+    # genuinely differ (measured: claude and gemini need the reminder, gpt and
+    # grok already plan without it), so which models get it belongs in config
+    # rather than hardcoded in the module. Non-mapping values are ignored rather
+    # than raising, so a malformed key cannot break startup.
+    _pp_models = _agent_section.get("planning_prelude_models", {})
+    agent._planning_prelude_models = (
+        {str(k): str(v).strip().lower() for k, v in _pp_models.items()}
+        if isinstance(_pp_models, dict) else {}
+    )
+
+
     # Local Python toolchain probe toggle.  Default True.  When False,
     # the probe is skipped entirely (no subprocess calls, no system-prompt
     # line).  Useful for users on exotic setups where the probe heuristics

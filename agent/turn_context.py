@@ -247,7 +247,15 @@ def build_turn_context(
             agent._turns_since_memory = 0
 
     # Add user message.
-    user_msg = {"role": "user", "content": user_message}
+    #
+    # The planning prelude may append a short reminder here. It is applied to the
+    # MODEL-FACING copy only: ``original_user_message`` above is what gets
+    # persisted and shown, so the transcript and memory keep the user's actual
+    # words. Off by default; see agent/planning_prelude.py for the gate chain.
+    from agent import planning_prelude as _planning_prelude
+
+    model_facing_user_message = _planning_prelude.apply(agent, user_message)
+    user_msg = {"role": "user", "content": model_facing_user_message}
     messages.append(user_msg)
     current_turn_user_idx = len(messages) - 1
     agent._persist_user_message_idx = current_turn_user_idx
