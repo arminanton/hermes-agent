@@ -129,14 +129,29 @@ class WSTransport:
         return not self._closed
 
     async def _safe_send(self, line: str) -> None:
+        # Re-check the latch HERE, not only in write(). ``write()`` can schedule
+        # this coroutine (create_task / run_coroutine_threadsafe) while the
+        # socket is still live, and by the time the loop actually runs it the
+        # peer may have gone away and another frame's failure — or an explicit
+        # close() — may already have latched ``_closed``. Sending on that socket
+        # raises RuntimeError('Cannot call "send" once a close message has been
+        # sent'), which is noise, not information: the disconnect was already
+        # recorded by whoever latched first.
+        if self._closed:
+            return
+
         try:
             await self._ws.send_text(line)
         except Exception as exc:
+            # Latch first so any sibling frame already queued for this transport
+            # returns at the guard above instead of piling up duplicate errors.
+            was_open = not self._closed
             self._closed = True
-            _log.warning(
-                "ws send failed peer=%s error_type=%s error=%s",
-                self._peer, type(exc).__name__, exc,
-            )
+            if was_open:
+                _log.warning(
+                    "ws send failed peer=%s error_type=%s error=%s",
+                    self._peer, type(exc).__name__, exc,
+                )
 
     def close(self) -> None:
         self._closed = True

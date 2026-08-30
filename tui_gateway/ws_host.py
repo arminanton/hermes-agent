@@ -87,9 +87,40 @@ def main(argv: list[str] | None = None) -> int:
         return 69  # EX_UNAVAILABLE
 
     app = build_app(cred)
+
+    # Keepalive: uvicorn defaults to ws_ping_interval=20s / ws_ping_timeout=20s,
+    # which is wrong for this client. The TUI renderer is a SINGLE-THREADED
+    # bun/Ink process; while it is laying out a large transcript (or the machine
+    # is loaded by several concurrent agent sessions pushing 100-200k-token
+    # payloads) it can be unable to answer a ping for more than 20 seconds. The
+    # websockets layer then tears the connection down and uvicorn reports close
+    # code 1011, which the TUI surfaces to the user as
+    # "gateway exited - recovering your session (any in-flight reply was lost)"
+    # even though the gateway process is perfectly healthy and never restarted.
+    #
+    # A busy renderer is NOT a dead peer. Keep sending pings (so genuinely dead
+    # TCP peers are still reaped) but allow a long time to answer. Both values
+    # are overridable for debugging.
+    def _f(name: str, default: float) -> float:
+        try:
+            return float(os.environ.get(name, "") or default)
+        except ValueError:
+            return default
+
+    ping_interval = _f("HERMES_TUI_WS_PING_INTERVAL", 20.0)
+    ping_timeout = _f("HERMES_TUI_WS_PING_TIMEOUT", 300.0)
+
     # log_level kept quiet: the gateway's own logging covers session events; we
     # don't want uvicorn access logs racing the TUI on the same terminal.
-    uvicorn.run(app, host=host, port=port, log_level="warning", ws="websockets")
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="warning",
+        ws="websockets",
+        ws_ping_interval=ping_interval,
+        ws_ping_timeout=ping_timeout,
+    )
     return 0
 
 
